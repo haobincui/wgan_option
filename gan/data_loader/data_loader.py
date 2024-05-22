@@ -1,6 +1,6 @@
+import torch
+from torch.utils.data import DataLoader, Dataset
 
-from torch.utils.data import Dataset, DataLoader
-import numpy as np
 
 
 class CustomDataset(Dataset):
@@ -26,8 +26,21 @@ class CustomDataset(Dataset):
         data_point = self.values[data_point_index]
         return data_point
 
+
 # Example usage:
 # values = np.array([[1, 2], [3, 4], [5, 6]])
 # frequencies = np.array([10, 20, 30])
 # dataset = CustomDataset(values, frequencies)
 # dataloader = DataLoader(dataset, batch_size=5, shuffle=True)
+
+
+
+class OptionReturnDataset(Dataset):
+    def __init__(self, data):
+        self.data = data
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        return self.data[idx]
