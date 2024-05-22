@@ -34,6 +34,7 @@ class Discriminator(nn.Module):
         )
 
     def _get_conv_output(self, shape):
+        # TODO: bugs here !!!!!
         # Utility function for calculating the size of the output after convolution layers
         batch_size = 1
         input = torch.autograd.Variable(torch.rand(batch_size, *shape))

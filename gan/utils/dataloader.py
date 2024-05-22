@@ -1,16 +1,13 @@
-from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
+import torch
+from torch.utils.data import DataLoader, Dataset
 
 
-def get_dataloader(batch_size):
-    # Transformations for the images
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5])
-    ])
+class OptionReturnDataset(Dataset):
+    def __init__(self, data):
+        self.data = data
 
-    # Load the dataset
-    train_dataset = datasets.MNIST(root='./data', train=True, transform=transform, download=True)
-    train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
+    def __len__(self):
+        return len(self.data)
 
-    return train_loader
+    def __getitem__(self, idx):
+        return self.data[idx]
