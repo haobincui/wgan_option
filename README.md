@@ -5,6 +5,14 @@
 This project implements a Generative Adversarial Network (GAN), specifically a Wasserstein GAN (WGAN), to model and generate option return distributions. This approach uses convolutional neural networks (CNNs) in both the generator and discriminator to leverage the spatial structure of option return data, structured as 
 (R,T) matrices where R is the number of return bins and T is the number of time-to-maturity intervals.
 
+```shell
+conda create -n wgan python=3.10
+source activate wgan
+cd gan
+pip install -r requirement.txt
+```
+
+
 ## Project Structure
 ```graphql
 wgan_option/gan/

@@ -49,6 +49,6 @@ class Discriminator(nn.Module):
             x = x.unsqueeze(1)  # Add channel dimension if not present
         x = self.model(x)
         # x = x.view(x.size(0), -1)  # Flatten
-        x = x.view(-1, 256, self.R, self.T)
+        x = x.view(-1, 256, 8, 8)
         x = self.final_layer(x)
         return x

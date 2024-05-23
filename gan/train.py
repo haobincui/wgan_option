@@ -1,3 +1,6 @@
+import os
+import sys
+sys.path.insert(0, '/home/haobin_cui/wgan_option')
 import torch
 import numpy as np
 from torch.utils.data import DataLoader
@@ -6,11 +9,14 @@ from config import config
 from gan.models.gan_model import WGAN
 from gan.utils.dataloader import OptionReturnDataset
 
+
+
+
 # Unpack configurations
 R = config['R']
-R= 256
+R= 126
 T = config['T']
-T= 256
+T= 126
 num_samples = config['num_samples']
 z_dim = config['z_dim']
 lr = config['lr']
