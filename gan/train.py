@@ -3,12 +3,14 @@ import numpy as np
 from torch.utils.data import DataLoader
 
 from config import config
-from gan.models.gan_model import WGAN
+from gan.models.gan_model import WGAN_GP
 from gan.utils.dataloader import OptionReturnDataset
 
 # Unpack configurations
 R = config['R']
 T = config['T']
+R = 64
+T = 64
 num_samples = config['num_samples']
 z_dim = config['z_dim']
 lr = config['lr']
@@ -27,7 +29,10 @@ dataset = OptionReturnDataset(option_returns_tensor)
 dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 # Initialize WGAN model
-gan = WGAN(z_dim, R, T, lr, device, clip_value)
+
+gan = WGAN_GP()
 
 # Train the model
-gan.train(dataloader, num_epochs, n_critic)
+
+
+gan.train(dataloader)

@@ -1,51 +1,41 @@
-import torch
 import torch.nn as nn
 
 
 class Discriminator(nn.Module):
-    def __init__(self, R, T):
-        super(Discriminator, self).__init__()
-
-        # Input shape: (batch_size, 1, R, T)
-        # We use 1 input channel because our data is like grayscale in structure
-        self.model = nn.Sequential(
-            # First convolution
-            nn.Conv2d(1, 64, kernel_size=4, stride=2, padding=1),
+    def __init__(self, channels):
+        super().__init__()
+        # Filters [256, 512, 1024]
+        # Input_dim = channels (Cx64x64)
+        # Output_dim = 1
+        self.main_module = nn.Sequential(
+            # Omitting batch normalization in critic because our new penalized training objective (WGAN with gradient penalty) is no longer valid
+            # in this setting, since we penalize the norm of the critic's gradient with respect to each input independently and not the enitre batch.
+            # There is not good & fast implementation of layer normalization --> using per instance normalization nn.InstanceNorm2d()
+            # Image (Cx32x32)
+            nn.Conv2d(in_channels=channels, out_channels=256, kernel_size=4, stride=2, padding=1),
+            nn.InstanceNorm2d(256, affine=True),
             nn.LeakyReLU(0.2, inplace=True),
 
-            # Second convolution
-            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(128),
+            # State (256x16x16)
+            nn.Conv2d(in_channels=256, out_channels=512, kernel_size=4, stride=2, padding=1),
+            nn.InstanceNorm2d(512, affine=True),
             nn.LeakyReLU(0.2, inplace=True),
 
-            # Third convolution
-            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(256),
-            nn.LeakyReLU(0.2, inplace=True)
-        )
+            # State (512x8x8)
+            nn.Conv2d(in_channels=512, out_channels=1024, kernel_size=4, stride=2, padding=1),
+            nn.InstanceNorm2d(1024, affine=True),
+            nn.LeakyReLU(0.2, inplace=True))
+        # output of main module --> State (1024x4x4)
 
-        # Compute the output size after the conv layers
-        self.output_size = self._get_conv_output((1, R, T))
-
-        # Final fully connected layer
-        self.final_layer = nn.Sequential(
-            nn.Linear(self.output_size, 1),
-            nn.Sigmoid()
-        )
-
-    def _get_conv_output(self, shape):
-        # TODO: bugs here !!!!!
-        # Utility function for calculating the size of the output after convolution layers
-        batch_size = 1
-        input = torch.autograd.Variable(torch.rand(batch_size, *shape))
-        output_feat = self.model(input)
-        n_size = output_feat.data.view(batch_size, -1).size(1)
-        return n_size
+        self.output = nn.Sequential(
+            # The output of D is no longer a probability, we do not apply sigmoid at the output of D.
+            nn.Conv2d(in_channels=1024, out_channels=1, kernel_size=4, stride=1, padding=0))
 
     def forward(self, x):
-        if len(x.shape) == 3:
-            x = x.unsqueeze(1)  # Add channel dimension if not present
-        x = self.model(x)
-        x = x.view(x.size(0), -1)  # Flatten
-        x = self.final_layer(x)
-        return x
+        x = self.main_module(x)
+        return self.output(x)
+
+    def feature_extraction(self, x):
+        # Use discriminator for feature extraction then flatten to vector of 16384
+        x = self.main_module(x)
+        return x.view(-1, 1024 * 4 * 4)

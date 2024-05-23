@@ -1,34 +1,38 @@
+
 import torch
 import torch.nn as nn
 
 
+
+
 class Generator(nn.Module):
-    def __init__(self, z_dim, R, T):
-        super(Generator, self).__init__()
-        self.init_size = R // 16  # Prepare the initial size
-        self.init_size_t = T // 16
-
-        self.fc = nn.Linear(z_dim, 512 * self.init_size * self.init_size_t)
-
-        self.t_conv_layers = nn.Sequential(
-            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(256),
+    def __init__(self, channels):
+        super().__init__()
+        # Filters [1024, 512, 256]
+        # Input_dim = 100
+        # Output_dim = C (number of channels)
+        self.main_module = nn.Sequential(
+            # Z latent vector 100
+            nn.ConvTranspose2d(in_channels=100, out_channels=1024, kernel_size=4, stride=1, padding=0),
+            nn.BatchNorm2d(num_features=1024),
             nn.ReLU(True),
 
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(128),
+            # State (1024x4x4)
+            nn.ConvTranspose2d(in_channels=1024, out_channels=512, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(num_features=512),
             nn.ReLU(True),
 
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(64),
+            # State (512x8x8)
+            nn.ConvTranspose2d(in_channels=512, out_channels=256, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(num_features=256),
             nn.ReLU(True),
 
-            nn.ConvTranspose2d(64, 1, kernel_size=4, stride=2, padding=1),
-            nn.Tanh()
-        )
+            # State (256x16x16)
+            nn.ConvTranspose2d(in_channels=256, out_channels=channels, kernel_size=4, stride=2, padding=1))
+            # output of main module --> Image (Cx32x32)
 
-    def forward(self, z):
-        x = self.fc(z)
-        x = x.view(-1, 512, self.init_size, self.init_size_t)
-        x = self.t_conv_layers(x)
-        return x
+        self.output = nn.Tanh()
+
+    def forward(self, x):
+        x = self.main_module(x)
+        return self.output(x)
