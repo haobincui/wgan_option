@@ -5,6 +5,8 @@ import torch.nn as nn
 class Discriminator(nn.Module):
     def __init__(self, R, T):
         super(Discriminator, self).__init__()
+        self.R = R
+        self.T = T
 
         # Input shape: (batch_size, 1, R, T)
         # We use 1 input channel because our data is like grayscale in structure
@@ -25,11 +27,11 @@ class Discriminator(nn.Module):
         )
 
         # Compute the output size after the conv layers
-        self.output_size = self._get_conv_output((1, R, T))
+        # self.output_size = self._get_conv_output((1, R, T))
 
         # Final fully connected layer
         self.final_layer = nn.Sequential(
-            nn.Linear(self.output_size, 1),
+            nn.Conv2d(256, 1, kernel_size=4, stride=2, padding=0),
             nn.Sigmoid()
         )
 
@@ -46,6 +48,7 @@ class Discriminator(nn.Module):
         if len(x.shape) == 3:
             x = x.unsqueeze(1)  # Add channel dimension if not present
         x = self.model(x)
-        x = x.view(x.size(0), -1)  # Flatten
+        # x = x.view(x.size(0), -1)  # Flatten
+        x = x.view(-1, 256, self.R, self.T)
         x = self.final_layer(x)
         return x

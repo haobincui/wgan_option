@@ -8,7 +8,9 @@ from gan.utils.dataloader import OptionReturnDataset
 
 # Unpack configurations
 R = config['R']
+R= 256
 T = config['T']
+T= 256
 num_samples = config['num_samples']
 z_dim = config['z_dim']
 lr = config['lr']
