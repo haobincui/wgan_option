@@ -1,32 +1,6 @@
-import torch
-from torch.utils.data import DataLoader, Dataset
-
-import torchvision.datasets as dset
-import torchvision.transforms as transforms
-import torch.utils.data as data_utils
-
-
-# from utils.fashion_mnist import MNIST, FashionMNIST
-
-
-class OptionReturnDataset(Dataset):
-    def __init__(self, data):
-        self.data = data
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        return self.data[idx]
-
-
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
-import numpy as np
-
-import torch
-from torch.utils.data import DataLoader, TensorDataset
-import numpy as np
 
 
 def create_dataloader(raw_data: np.ndarray, batch_size=64, shuffle=True):

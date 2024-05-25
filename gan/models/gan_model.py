@@ -1,42 +1,40 @@
 import time as t
+import os
 
 import torch
 import torch.optim as optim
 from torch import autograd
 from torch.autograd import Variable
 
+from gan.config import Config
 from gan.models.discriminator import Discriminator
 from gan.models.generator import Generator
 
 # plt.switch_backend('agg')
-import os
 
 from torchvision import utils
-
 from gan.utils.tensorboard_logger import Logger
 
-SAVE_PER_TIMES = 100
+_IMAGE_SAVED_PER_TIMES = 100
 
 
 class WGAN_GP(object):
-    def __init__(self, channels = 1, cuda = False, generator_iters=10000):
+    def __init__(self, config: Config):
         print("WGAN_GradientPenalty init model.")
-        # if not args:
-        #     args.channels = 1
-        #     args.cuda = False
-        #     args.generator_iters = 10000
-        self.G = Generator(channels)
-        self.D = Discriminator(channels)
-        self.C = channels
+        self.model_path = config.models_path
+        self.output_path = config.outputs_path
+        self.G = Generator(config.channels)
+        self.D = Discriminator(config.channels)
+        self.C = config.channels
 
         # Check if cuda is available
-        self.check_cuda(cuda)
+        self.check_cuda(config.cuda)
 
         # WGAN values from paper
-        self.learning_rate = 1e-4
-        self.b1 = 0.5
-        self.b2 = 0.999
-        self.batch_size = 64
+        self.learning_rate = config.learning_rate
+        self.b1 = config.beta_1
+        self.b2 = config.beta_2
+        self.batch_size = config.batch_size
 
         # WGAN_gradient penalty uses ADAM
         self.d_optimizer = optim.Adam(self.D.parameters(), lr=self.learning_rate, betas=(self.b1, self.b2))
@@ -47,8 +45,8 @@ class WGAN_GP(object):
         self.logger.writer.flush()
         self.number_of_images = 10
 
-        self.generator_iters = generator_iters
-        self.critic_iter = 5
+        self.num_epochs = config.num_epochs
+        self.critic_iter = config.discriminator_iter
         self.lambda_term = 10
 
     def get_torch_variable(self, arg):
@@ -58,15 +56,17 @@ class WGAN_GP(object):
             return Variable(arg)
 
     def check_cuda(self, cuda_flag=False):
-        print(cuda_flag)
+        # print(cuda_flag)
         if cuda_flag:
             self.cuda_index = 0
             self.cuda = True
             self.D.cuda(self.cuda_index)
             self.G.cuda(self.cuda_index)
-            print("Cuda enabled flag: {}".format(self.cuda))
+            print('Using GPU: 0')
+            # print("Cuda enabled flag: {}".format(self.cuda))
         else:
             self.cuda = False
+            print('Using CPU')
 
     def train(self, train_loader):
         self.t_begin = t.time()
@@ -81,7 +81,7 @@ class WGAN_GP(object):
             one = one.cuda(self.cuda_index)
             mone = mone.cuda(self.cuda_index)
 
-        for g_iter in range(self.generator_iters):
+        for g_iter in range(self.num_epochs):
             # Requires grad, Generator requires_grad = False
             for p in self.D.parameters():
                 p.requires_grad = True
@@ -125,7 +125,7 @@ class WGAN_GP(object):
                 Wasserstein_D = d_loss_real - d_loss_fake
                 self.d_optimizer.step()
                 print(
-                    f'  Discriminator iteration: {d_iter}/{self.critic_iter}, loss_fake: {d_loss_fake}, loss_real: {d_loss_real}')
+                    f'Discriminator iteration: {d_iter}/{self.critic_iter}, loss_fake: {d_loss_fake}, loss_real: {d_loss_real}')
 
             # Generator update
             for p in self.D.parameters():
@@ -141,9 +141,9 @@ class WGAN_GP(object):
             g_loss.backward(mone)
             g_cost = -g_loss
             self.g_optimizer.step()
-            print(f'Generator iteration: {g_iter}/{self.generator_iters}, g_loss: {g_loss}')
+            print(f'Generator iteration: {g_iter}/{self.num_epochs}, g_loss: {g_loss}')
             # Saving model and sampling images every 1000th generator iterations
-            if (g_iter) % SAVE_PER_TIMES == 0:
+            if g_iter % _IMAGE_SAVED_PER_TIMES == 0:
                 self.save_model()
                 # # Workaround because graphic card memory can't store more than 830 examples in memory for generating image
                 # # Therefore doing loop and generating 800 examples and stacking into list of samples to get 8000 generated images
@@ -277,13 +277,13 @@ class WGAN_GP(object):
         return x.data.cpu().numpy()
 
     def save_model(self):
-        torch.save(self.G.state_dict(), './generator.pkl')
-        torch.save(self.D.state_dict(), './discriminator.pkl')
-        print('Models save to ./generator.pkl & ./discriminator.pkl ')
+        torch.save(self.G.state_dict(), f'{self.output_path}/generator.pkl')
+        torch.save(self.D.state_dict(), f'{self.output_path}/discriminator.pkl')
+        print(f'Models save to [{self.output_path}/generator.pkl] and [{self.output_path}/discriminator.pkl]')
 
-    def load_model(self, D_model_filename, G_model_filename):
-        D_model_path = os.path.join(os.getcwd(), D_model_filename)
-        G_model_path = os.path.join(os.getcwd(), G_model_filename)
+    def load_model(self):
+        D_model_path = os.path.join(os.getcwd(), self.model_path, 'discriminator.pkl')
+        G_model_path = os.path.join(os.getcwd(), self.model_path, 'generator.pkl')
         self.D.load_state_dict(torch.load(D_model_path))
         self.G.load_state_dict(torch.load(G_model_path))
         print('Generator model loaded from {}.'.format(G_model_path))

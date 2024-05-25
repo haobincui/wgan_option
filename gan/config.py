@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import torch
 
 # Hyperparameters for the WGAN model
@@ -10,9 +12,32 @@ config = {
     "num_epochs": 50,  # Number of epochs to train the GAN
     "batch_size": 128,  # Batch size for training
     "device": "cuda" if torch.cuda.is_available() else "cpu",  # Device to train on
-    "clip_value": 0.01,  # Weight clipping for the critic in WGAN
     "n_critic": 5,  # Number of critic updates per generator update
     "data_path": "data/",  # Path to the dataset directory
     "models_path": "models/",  # Path to save trained models
     "outputs_path": "outputs/"  # Path to save outputs
 }
+
+
+@dataclass
+class Config:
+    channels: int = 1
+    # R: int = 8
+    # T: int = 8
+    num_samples: int = 1000
+    # z_dim: int = 100
+    learning_rate: float = 0.00005
+    num_epochs: int = 50  # generate 50 epochs
+    batch_size: int = 64
+    beta_1: float = 0.5
+    beta_2: float = 0.999
+
+    cuda: bool = torch.cuda.is_available()
+
+    discriminator_iter: int = 5
+    # data_path: str = "data/"
+    models_path: str = "./model_params/"
+    outputs_path: str = "./output/"
+
+
+default_config = Config()
