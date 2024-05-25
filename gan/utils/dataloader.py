@@ -1,6 +1,13 @@
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+import torchvision.datasets as dset
+import torchvision.transforms as transforms
+import torch.utils.data as data_utils
+
+
+# from utils.fashion_mnist import MNIST, FashionMNIST
+
 
 class OptionReturnDataset(Dataset):
     def __init__(self, data):
@@ -13,55 +20,57 @@ class OptionReturnDataset(Dataset):
         return self.data[idx]
 
 
-import torchvision.datasets as dset
-import torchvision.transforms as transforms
-import torch.utils.data as data_utils
-# from utils.fashion_mnist import MNIST, FashionMNIST
+import torch
+from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
+
+import torch
+from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
 
 
-def get_data_loader(args):
+def create_dataloader(raw_data: np.ndarray, target_length: int, batch_size=64, shuffle=True):
+    """
+    Create a DataLoader for the Option Returns dataset.
+    :param number_of_data:
+    :param x_length:
+    :param y_length:
+    :param batch_size:
+    :param shuffle:
+    :return:
+    """
+    # np_data = np.random.rand(number_of_data, x_length, y_length)
 
-    if args.dataset == 'mnist':
-        trans = transforms.Compose([
-            transforms.Resize(32),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, ), (0.5, )),
-        ])
-        train_dataset = MNIST(root=args.dataroot, train=True, download=args.download, transform=trans)
-        test_dataset = MNIST(root=args.dataroot, train=False, download=args.download, transform=trans)
 
-    elif args.dataset == 'fashion-mnist':
-        trans = transforms.Compose([
-            transforms.Resize(32),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, ), (0.5, )),
-        ])
-        train_dataset = FashionMNIST(root=args.dataroot, train=True, download=args.download, transform=trans)
-        test_dataset = FashionMNIST(root=args.dataroot, train=False, download=args.download, transform=trans)
+    # add a channel dimension
+    data_tensor = torch.tensor(raw_data, dtype=torch.float32).unsqueeze(1)
 
-    elif args.dataset == 'cifar':
-        trans = transforms.Compose([
-            transforms.Resize(32),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ])
+    dataset = TensorDataset(data_tensor)
 
-        train_dataset = dset.CIFAR10(root=args.dataroot, train=True, download=args.download, transform=trans)
-        test_dataset = dset.CIFAR10(root=args.dataroot, train=False, download=args.download, transform=trans)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+    # sample shape: (batch_size, 1, x_length, y_length)
 
-    elif args.dataset == 'stl10':
-        trans = transforms.Compose([
-            transforms.Resize(32),
-            transforms.ToTensor(),
-        ])
-        train_dataset = dset.STL10(root=args.dataroot, split='train', download=args.download, transform=trans)
-        test_dataset = dset.STL10(root=args.dataroot,  split='test', download=args.download, transform=trans)
+    return dataloader
 
-    # Check if everything is ok with loading datasets
-    assert train_dataset
-    assert test_dataset
 
-    train_dataloader = data_utils.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    test_dataloader = data_utils.DataLoader(test_dataset,  batch_size=args.batch_size, shuffle=True)
+def create_random_dataloader(number_of_data: int, x_length: int, y_length: int, batch_size=64, shuffle=True):
+    """
+    Create a DataLoader for the Option Returns dataset.
+    :param number_of_data:
+    :param x_length:
+    :param y_length:
+    :param batch_size:
+    :param shuffle:
+    :return:
+    """
+    np_data = np.random.rand(number_of_data, x_length, y_length)
 
-    return train_dataloader, test_dataloader
+    # add a channel dimension
+    data_tensor = torch.tensor(np_data, dtype=torch.float32).unsqueeze(1)
+
+    dataset = TensorDataset(data_tensor)
+
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+    # sample shape: (batch_size, 1, x_length, y_length)
+
+    return dataloader

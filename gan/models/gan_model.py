@@ -95,7 +95,7 @@ class WGAN_GP(object):
 
                 images = self.data.__next__()
                 # Check for batch to have full batch_size
-                if (images.size()[0] != self.batch_size):
+                if images.size()[0] != self.batch_size:
                     continue
 
                 z = torch.rand((self.batch_size, 100, 1, 1))
@@ -291,8 +291,8 @@ class WGAN_GP(object):
 
     def get_infinite_batches(self, data_loader):
         while True:
-            for i, (images, _) in enumerate(data_loader):
-                yield images
+            for i, images in enumerate(data_loader):
+                yield images[0]
 
     def generate_latent_walk(self, number):
         if not os.path.exists('interpolated_images/'):
