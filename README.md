@@ -7,26 +7,27 @@ This project implements a Generative Adversarial Network (GAN), specifically a W
 
 ## Project Structure
 ```graphql
-wgan_option/gan/
+wgan_option/
 │
-├── data/                           # Directory for the dataset
-│
-├── models/                         # Directory to save trained models
-│
-├── outputs/                        # Directory to save output distributions and generation results
-│
-├── gan/                            # GAN components
-│   ├── __init__.py                 # Makes GAN a Python module
-│   ├── discriminator.py            # Discriminator model
-│   ├── generator.py                # Generator model
-│   └── gan_model.py                # Script with the GAN class that includes training logic
-│
-├── utils/
-│   ├── __init__.py                 # Makes utils a Python module
-│   └── dataloader.py               # DataLoader utilities, custom dataset class
-│
-├── config.py                       # Configuration file for hyperparameters
-└── train.py                        # Main script to run the training process
+├── data/                           # Datasets
+│   ├── raw/
+│   └── processed/
+├── logs/                           # TensorBoard logs
+├── outputs/                        # Generated outputs and checkpoints
+│   ├── checkpoints/
+│   ├── metrics/
+│   └── samples/
+├── scripts/
+│   └── train.py                    # Training entrypoint
+├── src/
+│   └── wgan_option/
+│       ├── __init__.py             # Package marker
+│       ├── config.py               # Configuration file
+│       ├── train.py                # Training logic
+│       ├── models/                 # GAN components
+│       └── utils/                  # Data utilities + logging
+├── requirements.txt
+└── README.md
 ```
 
 ### Key Components
@@ -47,3 +48,7 @@ batch_size: Batch size used in training.
 clip_value: Clipping value for the discriminator weights to satisfy the Lipschitz constraint.
 n_critic: Number of times the discriminator is updated per generator update
 
+## Running
+```bash
+PYTHONPATH=src python scripts/train.py
+```

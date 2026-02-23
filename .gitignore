@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pkl
+
+# Data & outputs
+data/
+outputs/
+logs/
+training_result_images/
+
+# Env / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Virtualenv
+.venv/
+venv/
