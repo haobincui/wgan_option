@@ -14,6 +14,13 @@ Use editable install (recommended):
 python -m pip install -e .
 ```
 
+If you are installing on a GPU server with a CUDA 12.4 driver, install the matching
+PyTorch wheel after the editable install:
+
+```bash
+python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+```
+
 If you prefer requirements-based setup:
 
 ```bash
