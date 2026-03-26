@@ -1,54 +1,84 @@
 # wgan_option
 
+This project implements a Wasserstein GAN (WGAN) for option-surface style data generation and forecasting.
 
+## Requirements
 
-This project implements a Generative Adversarial Network (GAN), specifically a Wasserstein GAN (WGAN), to model and generate option return distributions. This approach uses convolutional neural networks (CNNs) in both the generator and discriminator to leverage the spatial structure of option return data, structured as 
-(R,T) matrices where R is the number of return bins and T is the number of time-to-maturity intervals.
+- Python 3.10+
 
-## Project Structure
-```graphql
-wgan_option/
-│
-├── data/                           # Datasets
-│   ├── raw/
-│   └── processed/
-├── logs/                           # TensorBoard logs
-├── outputs/                        # Generated outputs and checkpoints
-│   ├── checkpoints/
-│   ├── metrics/
-│   └── samples/
-├── scripts/
-│   └── train.py                    # Training entrypoint
-├── src/
-│   └── wgan_option/
-│       ├── __init__.py             # Package marker
-│       ├── config.py               # Configuration file
-│       ├── train.py                # Training logic
-│       ├── models/                 # GAN components
-│       └── utils/                  # Data utilities + logging
-├── requirements.txt
-└── README.md
+## Installation
+
+Use editable install (recommended):
+
+```bash
+python -m pip install -e .
 ```
 
-### Key Components
-Generator (CNN-based): Uses transposed convolutional layers to generate option return distributions from latent variables.
-Discriminator (CNN-based): Utilizes convolutional layers to differentiate between real and generated distributions.
-Wasserstein Loss: Improves training stability by using the Earth Mover's distance, avoiding issues like mode collapse and vanishing gradient
+If you prefer requirements-based setup:
 
-### Configuration
-Hyperparameters and other configurations are managed in config.py. Here's a brief on key configurations:
+```bash
+python -m pip install -r requirements.txt
+```
 
-R: Number of return bins.
-T: Number of time-to-maturity intervals.
-num_samples: Total number of option return samples.
-z_dim: Dimension of the latent space for the generator.
-lr: Learning rate for the RMSprop optimizers.
-num_epochs: Total number of epochs for training.
-batch_size: Batch size used in training.
-clip_value: Clipping value for the discriminator weights to satisfy the Lipschitz constraint.
-n_critic: Number of times the discriminator is updated per generator update
+## Project Layout
+
+```text
+wgan_option/
+├── scripts/                         # Entrypoints
+│   ├── train.py
+│   ├── generate_surface/
+│   │   ├── main.py
+│   │   ├── common/
+│   │   ├── surface_cpu/
+│   │   └── surface_gpu/
+├── src/
+│   ├── wgan_option/                 # WGAN training pipeline
+│   ├── quantlib/                    # Quant analytics + vol surface toolkit
+│   └── market_data/                 # Market data contracts/dto/parser utilities
+├── tests/
+├── pyproject.toml
+└── requirements.txt                 # Main runtime dependencies
+```
 
 ## Running
+
+Train:
+
 ```bash
-PYTHONPATH=src python scripts/train.py
+python scripts/train.py --config configs/wgan/train_default.yaml
 ```
+
+Generate surface stack:
+
+```bash
+python scripts/generate_surface/main.py daily-surface --input-glob "data/raw/option_data/*.csv.gz" --output-dir outputs/vol_surface
+```
+
+Generate minute SVI surfaces:
+
+```bash
+python scripts/generate_surface/main.py minute-svi --device cpu --input-glob "data/raw/option_data/**/*.csv.gz"
+```
+
+Generate from config-driven job selection:
+
+```bash
+python scripts/generate_surface/main.py --config configs/surface_builder/default.yaml
+```
+
+Set `surface_builder.job` in `configs/surface_builder/default.yaml` to choose one of:
+`daily-surface`, `minute-svi`, `minute-svi-window`, `minute-svi-excel`.
+
+Server background example:
+
+```bash
+nohup python scripts/train.py \
+  --config configs/wgan/train_default.yaml \
+  --set cuda=true \
+  --set num_epochs=200 \
+  > logs/train_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+```
+
+## Notes
+
+- Main package no longer relies on manually setting `PYTHONPATH=src`.

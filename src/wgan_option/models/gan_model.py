@@ -1,333 +1,297 @@
-import time as t
+import csv
+import math
 import os
+import random
+from dataclasses import asdict
+from typing import Dict, Optional
 
+import numpy as np
 import torch
-import torch.optim as optim
+import torch.nn.functional as F
 from torch import autograd
-from torch.autograd import Variable
+from torch.optim import Adam
 
 from wgan_option.config import Config
 from wgan_option.models.discriminator import Discriminator
 from wgan_option.models.generator import Generator
 
-# plt.switch_backend('agg')
 
-from torchvision import utils
-from wgan_option.utils.tensorboard_logger import Logger
+class WGAN_GP:
+    """
+    Conditional WGAN-GP for volatility-surface forecasting:
+    (surface_t, text_t) -> surface_{t+h}
+    """
 
-_IMAGE_SAVED_PER_TIMES = 100
+    def __init__(
+        self,
+        config: Config,
+        strike_grid: np.ndarray,
+        maturity_grid_days: np.ndarray,
+        embedding_dim: int,
+    ):
+        self.config = config
+        self.device = torch.device("cuda:0" if (config.cuda and torch.cuda.is_available()) else "cpu")
+        self.strike_grid = torch.tensor(strike_grid, dtype=torch.float32, device=self.device).clamp_min(1e-4)
+        self.maturity_grid_days = torch.tensor(maturity_grid_days, dtype=torch.float32, device=self.device)
+        self.tau_years = (self.maturity_grid_days / 365.0).clamp_min(1.0 / 365.0)
+        self.embedding_dim = embedding_dim
 
+        surface_height = int(len(maturity_grid_days))
+        surface_width = int(len(strike_grid))
+        self.G = Generator(
+            channels=config.channels,
+            embedding_dim=embedding_dim,
+            noise_dim=config.noise_dim,
+            surface_height=surface_height,
+            surface_width=surface_width,
+            hidden_dim=config.gen_hidden_dim,
+        ).to(self.device)
+        self.D = Discriminator(
+            channels=config.channels,
+            embedding_dim=embedding_dim,
+            surface_height=surface_height,
+            surface_width=surface_width,
+            hidden_dim=config.disc_hidden_dim,
+        ).to(self.device)
 
-class WGAN_GP(object):
-    def __init__(self, config: Config):
-        print("WGAN_GradientPenalty init model.")
-        self.model_path = config.models_path
-        self.output_path = config.outputs_path
-        self.samples_path = config.samples_path
-        self.metrics_path = config.metrics_path
-        self.G = Generator(config.channels)
-        self.D = Discriminator(config.channels)
-        self.C = config.channels
+        self.g_optimizer = Adam(self.G.parameters(), lr=config.learning_rate, betas=(config.beta_1, config.beta_2))
+        self.d_optimizer = Adam(self.D.parameters(), lr=config.learning_rate, betas=(config.beta_1, config.beta_2))
 
-        # Check if cuda is available
-        self.check_cuda(config.cuda)
-
-        # WGAN values from paper
-        self.learning_rate = config.learning_rate
-        self.b1 = config.beta_1
-        self.b2 = config.beta_2
-        self.batch_size = config.batch_size
-
-        # WGAN_gradient penalty uses ADAM
-        self.d_optimizer = optim.Adam(self.D.parameters(), lr=self.learning_rate, betas=(self.b1, self.b2))
-        self.g_optimizer = optim.Adam(self.G.parameters(), lr=self.learning_rate, betas=(self.b1, self.b2))
-
-        # Set the logger
-        self.logger = Logger('./logs')
-        self.logger.writer.flush()
-        self.number_of_images = 10
-
-        self.num_epochs = config.num_epochs
         self.critic_iter = config.discriminator_iter
-        self.lambda_term = 10
+        self.lambda_gp = config.lambda_gp
+        self.lambda_recon = config.lambda_recon
+        self.lambda_calendar = config.lambda_calendar
+        self.lambda_butterfly = config.lambda_butterfly
+        self.lambda_smooth = config.lambda_smooth
+        self.num_epochs = config.num_epochs
 
-        for path in (self.model_path, self.output_path, self.samples_path, self.metrics_path):
-            if path and not os.path.exists(path):
-                os.makedirs(path, exist_ok=True)
+        self.model_path = config.models_path
+        self.metrics_path = config.metrics_path
+        os.makedirs(self.model_path, exist_ok=True)
+        os.makedirs(self.metrics_path, exist_ok=True)
 
-    def get_torch_variable(self, arg):
-        if self.cuda:
-            return Variable(arg).cuda(self.cuda_index)
-        else:
-            return Variable(arg)
+        self._set_seed(config.seed)
 
-    def check_cuda(self, cuda_flag=False):
-        # print(cuda_flag)
-        if cuda_flag:
-            self.cuda_index = 0
-            self.cuda = True
-            self.D.cuda(self.cuda_index)
-            self.G.cuda(self.cuda_index)
-            print('Using GPU: 0')
-            # print("Cuda enabled flag: {}".format(self.cuda))
-        else:
-            self.cuda = False
-            print('Using CPU')
+    def _set_seed(self, seed: int):
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
-    def train(self, train_loader):
-        self.t_begin = t.time()
-        self.file = open(os.path.join(self.metrics_path, "inception_score_graph.txt"), "w")
+    def _to_device(self, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.to(self.device, non_blocking=True)
 
-        # Now batches are callable self.data.next()
-        self.data = self.get_infinite_batches(train_loader)
+    def _normal_cdf(self, x: torch.Tensor) -> torch.Tensor:
+        return 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
-        one = torch.tensor(1, dtype=torch.float)
-        mone = one * -1
-        if self.cuda:
-            one = one.cuda(self.cuda_index)
-            mone = mone.cuda(self.cuda_index)
+    def _black_call_price(self, sigma: torch.Tensor) -> torch.Tensor:
+        """
+        sigma: [B, H, W], strike dimension is W and maturity dimension is H.
+        """
+        sigma = sigma.clamp_min(1e-4)
+        k = self.strike_grid.view(1, 1, -1)
+        t = self.tau_years.view(1, -1, 1)
+        sqrt_t = torch.sqrt(t)
+        d1 = (torch.log(1.0 / k) + 0.5 * sigma.pow(2) * t) / (sigma * sqrt_t)
+        d2 = d1 - sigma * sqrt_t
+        return self._normal_cdf(d1) - k * self._normal_cdf(d2)
 
-        for g_iter in range(self.num_epochs):
-            # Requires grad, Generator requires_grad = False
-            for p in self.D.parameters():
-                p.requires_grad = True
+    def calendar_arbitrage_penalty(self, generated_surface: torch.Tensor) -> torch.Tensor:
+        sigma = generated_surface.squeeze(1).clamp_min(1e-4)
+        if sigma.size(1) < 2:
+            return torch.zeros(1, device=self.device).squeeze()
+        total_variance = sigma.pow(2) * self.tau_years.view(1, -1, 1)
+        diff = total_variance[:, 1:, :] - total_variance[:, :-1, :]
+        return F.relu(-diff).mean()
 
-            d_loss_real = 0
-            d_loss_fake = 0
-            Wasserstein_D = 0
-            # Train Dicriminator forward-loss-backward-update self.critic_iter times while 1 Generator forward-loss-backward-update
-            for d_iter in range(self.critic_iter):
-                self.D.zero_grad()
+    def butterfly_arbitrage_penalty(self, generated_surface: torch.Tensor) -> torch.Tensor:
+        sigma = generated_surface.squeeze(1).clamp_min(1e-4)
+        if sigma.size(2) < 3:
+            return torch.zeros(1, device=self.device).squeeze()
+        call_prices = self._black_call_price(sigma)
+        second_diff = call_prices[:, :, 2:] - 2.0 * call_prices[:, :, 1:-1] + call_prices[:, :, :-2]
+        return F.relu(-second_diff).mean()
 
-                images = self.data.__next__()
-                # Check for batch to have full batch_size
-                if images.size()[0] != self.batch_size:
-                    continue
+    def smoothness_penalty(self, generated_surface: torch.Tensor) -> torch.Tensor:
+        sigma = generated_surface.squeeze(1)
+        penalty = torch.zeros(1, device=self.device).squeeze()
+        if sigma.size(1) > 1:
+            penalty = penalty + (sigma[:, 1:, :] - sigma[:, :-1, :]).pow(2).mean()
+        if sigma.size(2) > 1:
+            penalty = penalty + (sigma[:, :, 1:] - sigma[:, :, :-1]).pow(2).mean()
+        return penalty
 
-                z = torch.rand((self.batch_size, 100, 1, 1))
+    def calculate_gradient_penalty(
+        self,
+        real_surface: torch.Tensor,
+        fake_surface: torch.Tensor,
+        current_surface: torch.Tensor,
+        text_embedding: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size = real_surface.size(0)
+        alpha = torch.rand(batch_size, 1, 1, 1, device=self.device)
+        interpolated = alpha * real_surface + (1.0 - alpha) * fake_surface
+        interpolated.requires_grad_(True)
 
-                images, z = self.get_torch_variable(images), self.get_torch_variable(z)
+        interpolated_scores = self.D(interpolated, current_surface, text_embedding)
+        grad_outputs = torch.ones_like(interpolated_scores, device=self.device)
+        gradients = autograd.grad(
+            outputs=interpolated_scores,
+            inputs=interpolated,
+            grad_outputs=grad_outputs,
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True,
+        )[0]
 
-                # Train discriminator
-                # WGAN - Training discriminator more iterations than generator
-                # Train with real images
-                d_loss_real = self.D(images)
-                d_loss_real = d_loss_real.mean()
-                d_loss_real.backward(mone)
-
-                # Train with fake images
-                z = self.get_torch_variable(torch.randn(self.batch_size, 100, 1, 1))
-
-                fake_images = self.G(z)
-                d_loss_fake = self.D(fake_images)
-                d_loss_fake = d_loss_fake.mean()
-                d_loss_fake.backward(one)
-
-                # Train with gradient penalty
-                gradient_penalty = self.calculate_gradient_penalty(images.data, fake_images.data)
-                gradient_penalty.backward()
-
-                d_loss = d_loss_fake - d_loss_real + gradient_penalty
-                Wasserstein_D = d_loss_real - d_loss_fake
-                self.d_optimizer.step()
-                print(
-                    f'Discriminator iteration: {d_iter}/{self.critic_iter}, loss_fake: {d_loss_fake}, loss_real: {d_loss_real}')
-
-            # Generator update
-            for p in self.D.parameters():
-                p.requires_grad = False  # to avoid computation
-
-            self.G.zero_grad()
-            # train generator
-            # compute loss with fake images
-            z = self.get_torch_variable(torch.randn(self.batch_size, 100, 1, 1))
-            fake_images = self.G(z)
-            g_loss = self.D(fake_images)
-            g_loss = g_loss.mean()
-            g_loss.backward(mone)
-            g_cost = -g_loss
-            self.g_optimizer.step()
-            print(f'Generator iteration: {g_iter}/{self.num_epochs}, g_loss: {g_loss}')
-            # Saving model and sampling images every 1000th generator iterations
-            if g_iter % _IMAGE_SAVED_PER_TIMES == 0:
-                self.save_model()
-                # # Workaround because graphic card memory can't store more than 830 examples in memory for generating image
-                # # Therefore doing loop and generating 800 examples and stacking into list of samples to get 8000 generated images
-                # # This way Inception score is more correct since there are different generated examples from every class of Inception model
-                # sample_list = []
-                # for i in range(125):
-                #     samples  = self.data.__next__()
-                # #     z = Variable(torch.randn(800, 100, 1, 1)).cuda(self.cuda_index)
-                # #     samples = self.G(z)
-                #     sample_list.append(samples.data.cpu().numpy())
-                # #
-                # # # Flattening list of list into one list
-                # new_sample_list = list(chain.from_iterable(sample_list))
-                # print("Calculating Inception Score over 8k generated images")
-                # # # Feeding list of numpy arrays
-                # inception_score = get_inception_score(new_sample_list, cuda=True, batch_size=32,
-                #                                       resize=True, splits=10)
-
-                if not os.path.exists(self.samples_path):
-                    os.makedirs(self.samples_path, exist_ok=True)
-
-                # Denormalize images and save them in grid 8x8
-                z = self.get_torch_variable(torch.randn(800, 100, 1, 1))
-                samples = self.G(z)
-                samples = samples.mul(0.5).add(0.5)
-                samples = samples.data.cpu()[:64]
-                grid = utils.make_grid(samples)
-                utils.save_image(
-                    grid,
-                    os.path.join(self.samples_path, 'img_generatori_iter_{}.png'.format(str(g_iter).zfill(3)))
-                )
-
-                # Testing
-                time = t.time() - self.t_begin
-                # print("Real Inception score: {}".format(inception_score))
-                print("Generator iter: {}".format(g_iter))
-                print("Time {}".format(time))
-
-                # Write to file inception_score, gen_iters, time
-                # output = str(g_iter) + " " + str(time) + " " + str(inception_score[0]) + "\n"
-                # self.file.write(output)
-
-                # ============ TensorBoard logging ============#
-                # (1) Log the scalar values
-                info = {
-                    'Wasserstein distance': Wasserstein_D.data,
-                    'Loss D': d_loss.data,
-                    'Loss G': g_cost.data,
-                    'Loss D Real': d_loss_real.data,
-                    'Loss D Fake': d_loss_fake.data
-
-                }
-
-                for tag, value in info.items():
-                    self.logger.scalar_summary(tag, value.cpu(), g_iter + 1)
-
-                # (3) Log the images
-                info = {
-                    'real_images': self.real_images(images, self.number_of_images),
-                    'generated_images': self.generate_img(z, self.number_of_images)
-                }
-
-                for tag, images in info.items():
-                    self.logger.image_summary(tag, images, g_iter + 1)
-
-        self.t_end = t.time()
-        print('Time of training-{}'.format((self.t_end - self.t_begin)))
-        # self.file.close()
-
-        # Save the trained parameters
-        self.save_model()
-
-    def evaluate(self, test_loader, D_model_path, G_model_path):
-        self.load_model(D_model_path, G_model_path)
-        z = self.get_torch_variable(torch.randn(self.batch_size, 100, 1, 1))
-        samples = self.G(z)
-        samples = samples.mul(0.5).add(0.5)
-        samples = samples.data.cpu()
-        grid = utils.make_grid(samples)
-        print("Grid of 8x8 images saved to 'dgan_model_image.png'.")
-        utils.save_image(grid, 'dgan_model_image.png')
-
-    def calculate_gradient_penalty(self, real_images, fake_images):
-        eta = torch.FloatTensor(self.batch_size, 1, 1, 1).uniform_(0, 1)
-        eta = eta.expand(self.batch_size, real_images.size(1), real_images.size(2), real_images.size(3))
-        if self.cuda:
-            eta = eta.cuda(self.cuda_index)
-        else:
-            eta = eta
-
-        interpolated = eta * real_images + ((1 - eta) * fake_images)
-
-        if self.cuda:
-            interpolated = interpolated.cuda(self.cuda_index)
-        else:
-            interpolated = interpolated
-
-        # define it to calculate gradient
-        interpolated = Variable(interpolated, requires_grad=True)
-
-        # calculate probability of interpolated examples
-        prob_interpolated = self.D(interpolated)
-
-        # calculate gradients of probabilities with respect to examples
-        gradients = autograd.grad(outputs=prob_interpolated, inputs=interpolated,
-                                  grad_outputs=torch.ones(
-                                      prob_interpolated.size()).cuda(self.cuda_index) if self.cuda else torch.ones(
-                                      prob_interpolated.size()),
-                                  create_graph=True, retain_graph=True)[0]
-
-        # flatten the gradients to it calculates norm batchwise
-        gradients = gradients.view(gradients.size(0), -1)
-
-        grad_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * self.lambda_term
+        gradients = gradients.view(batch_size, -1)
+        grad_penalty = ((gradients.norm(2, dim=1) - 1.0) ** 2).mean() * self.lambda_gp
         return grad_penalty
 
-    def real_images(self, images, number_of_images):
-        if (self.C == 3):
-            return self.to_np(images.view(-1, self.C, 32, 32)[:self.number_of_images])
-        else:
-            return self.to_np(images.view(-1, 32, 32)[:self.number_of_images])
+    def _generator_step(self, current_surface: torch.Tensor, text_embedding: torch.Tensor, real_future: torch.Tensor):
+        self.g_optimizer.zero_grad(set_to_none=True)
+        fake_future = self.G(current_surface, text_embedding)
+        adv_loss = -self.D(fake_future, current_surface, text_embedding).mean()
+        recon_loss = F.l1_loss(fake_future, real_future)
+        cal_penalty = self.calendar_arbitrage_penalty(fake_future)
+        bfly_penalty = self.butterfly_arbitrage_penalty(fake_future)
+        smooth_penalty = self.smoothness_penalty(fake_future)
 
-    def generate_img(self, z, number_of_images):
-        samples = self.G(z).data.cpu().numpy()[:number_of_images]
-        generated_images = []
-        for sample in samples:
-            if self.C == 3:
-                generated_images.append(sample.reshape(self.C, 32, 32))
-            else:
-                generated_images.append(sample.reshape(32, 32))
-        return generated_images
+        g_loss = (
+            adv_loss
+            + self.lambda_recon * recon_loss
+            + self.lambda_calendar * cal_penalty
+            + self.lambda_butterfly * bfly_penalty
+            + self.lambda_smooth * smooth_penalty
+        )
+        g_loss.backward()
+        self.g_optimizer.step()
 
-    def to_np(self, x):
-        return x.data.cpu().numpy()
+        return {
+            "g_total": float(g_loss.detach().cpu()),
+            "g_adv": float(adv_loss.detach().cpu()),
+            "g_recon": float(recon_loss.detach().cpu()),
+            "g_calendar": float(cal_penalty.detach().cpu()),
+            "g_butterfly": float(bfly_penalty.detach().cpu()),
+            "g_smooth": float(smooth_penalty.detach().cpu()),
+        }
 
-    def save_model(self):
-        torch.save(self.G.state_dict(), f'{self.output_path}/generator.pkl')
-        torch.save(self.D.state_dict(), f'{self.output_path}/discriminator.pkl')
-        print(f'Models save to [{self.output_path}/generator.pkl] and [{self.output_path}/discriminator.pkl]')
+    def _discriminator_step(
+        self,
+        current_surface: torch.Tensor,
+        text_embedding: torch.Tensor,
+        real_future: torch.Tensor,
+    ):
+        self.d_optimizer.zero_grad(set_to_none=True)
+        with torch.no_grad():
+            fake_future = self.G(current_surface, text_embedding)
 
-    def load_model(self):
-        D_model_path = os.path.join(os.getcwd(), self.model_path, 'discriminator.pkl')
-        G_model_path = os.path.join(os.getcwd(), self.model_path, 'generator.pkl')
-        self.D.load_state_dict(torch.load(D_model_path))
-        self.G.load_state_dict(torch.load(G_model_path))
-        print('Generator model loaded from {}.'.format(G_model_path))
-        print('Discriminator model loaded from {}-'.format(D_model_path))
+        d_real = self.D(real_future, current_surface, text_embedding).mean()
+        d_fake = self.D(fake_future, current_surface, text_embedding).mean()
+        gp = self.calculate_gradient_penalty(real_future, fake_future, current_surface, text_embedding)
+        d_loss = d_fake - d_real + gp
+        d_loss.backward()
+        self.d_optimizer.step()
 
-    def get_infinite_batches(self, data_loader):
-        while True:
-            for i, images in enumerate(data_loader):
-                yield images[0]
+        return {
+            "d_total": float(d_loss.detach().cpu()),
+            "d_real": float(d_real.detach().cpu()),
+            "d_fake": float(d_fake.detach().cpu()),
+            "gp": float(gp.detach().cpu()),
+        }
 
-    def generate_latent_walk(self, number):
-        if not os.path.exists('interpolated_images/'):
-            os.makedirs('interpolated_images/')
+    def _evaluate(self, val_loader) -> Dict[str, float]:
+        if val_loader is None:
+            return {}
 
-        number_int = 10
-        # interpolate between twe noise(z1, z2).
-        z_intp = torch.FloatTensor(1, 100, 1, 1)
-        z1 = torch.randn(1, 100, 1, 1)
-        z2 = torch.randn(1, 100, 1, 1)
-        if self.cuda:
-            z_intp = z_intp.cuda()
-            z1 = z1.cuda()
-            z2 = z2.cuda()
+        self.G.eval()
+        recon, calendar, butterfly = [], [], []
+        with torch.no_grad():
+            for current_surface, text_embedding, real_future in val_loader:
+                current_surface = self._to_device(current_surface)
+                text_embedding = self._to_device(text_embedding)
+                real_future = self._to_device(real_future)
+                fake_future = self.G(current_surface, text_embedding)
+                recon.append(float(F.l1_loss(fake_future, real_future).detach().cpu()))
+                calendar.append(float(self.calendar_arbitrage_penalty(fake_future).detach().cpu()))
+                butterfly.append(float(self.butterfly_arbitrage_penalty(fake_future).detach().cpu()))
+        self.G.train()
+        return {
+            "val_recon": float(np.mean(recon)) if recon else 0.0,
+            "val_calendar": float(np.mean(calendar)) if calendar else 0.0,
+            "val_butterfly": float(np.mean(butterfly)) if butterfly else 0.0,
+        }
 
-        z_intp = Variable(z_intp)
-        images = []
-        alpha = 1.0 / float(number_int + 1)
-        print(alpha)
-        for i in range(1, number_int + 1):
-            z_intp.data = z1 * alpha + z2 * (1.0 - alpha)
-            alpha += alpha
-            fake_im = self.G(z_intp)
-            fake_im = fake_im.mul(0.5).add(0.5)  # denormalize
-            images.append(fake_im.view(self.C, 32, 32).data.cpu())
+    def _write_metrics(self, metrics_rows):
+        output_file = os.path.join(self.metrics_path, "training_metrics.csv")
+        fieldnames = sorted({key for row in metrics_rows for key in row.keys()})
+        with open(output_file, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in metrics_rows:
+                writer.writerow(row)
 
-        grid = utils.make_grid(images, nrow=number_int)
-        utils.save_image(grid, 'interpolated_images/interpolated_{}.png'.format(str(number).zfill(3)))
-        print("Saved interpolated images.")
+    def save_model(self, epoch: Optional[int] = None):
+        suffix = f"_epoch_{epoch:04d}" if epoch is not None else ""
+        generator_path = os.path.join(self.model_path, f"generator{suffix}.pt")
+        discriminator_path = os.path.join(self.model_path, f"discriminator{suffix}.pt")
+
+        torch.save(
+            {
+                "state_dict": self.G.state_dict(),
+                "config": asdict(self.config),
+                "embedding_dim": self.embedding_dim,
+            },
+            generator_path,
+        )
+        torch.save(
+            {
+                "state_dict": self.D.state_dict(),
+                "config": asdict(self.config),
+                "embedding_dim": self.embedding_dim,
+            },
+            discriminator_path,
+        )
+
+    def train(self, train_loader, val_loader=None):
+        metrics_rows = []
+        for epoch in range(1, self.num_epochs + 1):
+            running: Dict[str, list] = {}
+            for current_surface, text_embedding, real_future in train_loader:
+                current_surface = self._to_device(current_surface)
+                text_embedding = self._to_device(text_embedding)
+                real_future = self._to_device(real_future)
+
+                d_stats = {}
+                for _ in range(self.critic_iter):
+                    d_stats = self._discriminator_step(current_surface, text_embedding, real_future)
+                    for key, value in d_stats.items():
+                        running.setdefault(key, []).append(value)
+
+                g_stats = self._generator_step(current_surface, text_embedding, real_future)
+                for key, value in g_stats.items():
+                    running.setdefault(key, []).append(value)
+
+            epoch_stats = {
+                "epoch": epoch,
+                **{key: float(np.mean(values)) for key, values in running.items() if values},
+            }
+            epoch_stats.update(self._evaluate(val_loader))
+            metrics_rows.append(epoch_stats)
+
+            if epoch == 1 or epoch % 5 == 0:
+                print(
+                    f"[Epoch {epoch:04d}/{self.num_epochs}] "
+                    f"D={epoch_stats.get('d_total', 0.0):.4f} "
+                    f"G={epoch_stats.get('g_total', 0.0):.4f} "
+                    f"Recon={epoch_stats.get('g_recon', 0.0):.4f} "
+                    f"Cal={epoch_stats.get('g_calendar', 0.0):.4f} "
+                    f"Bfly={epoch_stats.get('g_butterfly', 0.0):.4f}"
+                )
+
+            if epoch % self.config.save_every == 0:
+                self.save_model(epoch)
+
+        self.save_model()
+        self._write_metrics(metrics_rows)

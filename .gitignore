@@ -2,12 +2,27 @@
 __pycache__/
 *.py[cod]
 *.pkl
+*.egg-info/
 
-# Data & outputs
-data/
-outputs/
-logs/
-training_result_images/
+# Project data: raw inputs, processed data, generated outputs
+/data/
+/outputs/
+/logs/
+/training_result_images/
+/validator_output/
+/merged_output/
+
+# Script-local input/output data drops
+/scripts/data_to_distribution/input/
+/scripts/data_to_distribution/output/
+
+# Common generated surface artifacts
+**/daily_csv/
+*.npz
+*.csv.gz
+
+# Test / tool caches
+.pytest_cache/
 
 # Env / IDE
 .DS_Store

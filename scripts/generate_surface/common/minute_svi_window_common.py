@@ -1,0 +1,524 @@
+"""Shared datetime-window minute-SVI helpers."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import glob
+import gzip
+import json
+import logging
+import shlex
+import sys
+import time
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
+
+import pandas as pd
+import yaml
+
+if __package__ in {None, ""}:
+    ROOT_DIR = Path(__file__).resolve().parents[3]
+    if str(ROOT_DIR) not in sys.path:
+        sys.path.insert(0, str(ROOT_DIR))
+    from scripts.generate_surface.common.minute_svi_common import (  # noqa: E402
+        DEFAULT_CONFIG_PATH,
+        PRECALIB_CSV_HEADERS,
+        _build_rows_for_minute,
+        _collect_minute_spot,
+        _get_file_target_future_month_code,
+        _infer_file_date_range,
+        _log_cli_arguments,
+        _parse_args as _parse_base_args,
+        _resolve_config_path,
+        _setup_runtime,
+        _to_utc_minute_string,
+        ProcessMinuteFn,
+    )
+else:
+    from .minute_svi_common import (  # noqa: E402
+        DEFAULT_CONFIG_PATH,
+        PRECALIB_CSV_HEADERS,
+        ProcessMinuteFn,
+        _build_rows_for_minute,
+        _collect_minute_spot,
+        _get_file_target_future_month_code,
+        _infer_file_date_range,
+        _log_cli_arguments,
+        _parse_args as _parse_base_args,
+        _resolve_config_path,
+        _setup_runtime,
+        _to_utc_minute_string,
+    )
+
+logger = logging.getLogger(__name__)
+
+DatetimeLike = Union[str, datetime, pd.Timestamp]
+SUPPORTED_MINUTE_SVI_WINDOW_CONFIG_KEYS = {
+    "target_datetimes",
+    "target_datetimes_file",
+    "window_minutes",
+}
+
+
+def _coerce_target_datetime_defaults(value: Any) -> List[str]:
+    def _normalize_item(item: Any) -> str:
+        if item is None:
+            return ""
+        if isinstance(item, str):
+            return item.strip()
+        try:
+            ts = pd.Timestamp(item)
+        except Exception:
+            return str(item).strip()
+        if pd.isna(ts):
+            return ""
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [normalized for item in value if (normalized := _normalize_item(item))]
+    normalized = _normalize_item(value)
+    return [normalized] if normalized else []
+
+
+def _load_window_config(config_path_value: str) -> Dict[str, Any]:
+    config_path = _resolve_config_path(config_path_value)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file does not exist: {config_path}")
+
+    with config_path.open("r", encoding="utf-8") as f:
+        raw_data = yaml.safe_load(f) or {}
+    if not isinstance(raw_data, dict):
+        raise ValueError(f"Config file must contain a YAML mapping: {config_path}")
+
+    config_root = raw_data.get("surface_builder", raw_data)
+    if not isinstance(config_root, dict):
+        raise ValueError(f"`surface_builder` must be a mapping in config file: {config_path}")
+
+    window_section = config_root.get("minute_svi_window")
+    if window_section is None:
+        window_section = {k: v for k, v in config_root.items() if k in SUPPORTED_MINUTE_SVI_WINDOW_CONFIG_KEYS}
+    if not isinstance(window_section, dict):
+        raise ValueError(f"`minute_svi_window` must be a mapping in config file: {config_path}")
+
+    unknown_keys = sorted(set(window_section.keys()) - SUPPORTED_MINUTE_SVI_WINDOW_CONFIG_KEYS)
+    if unknown_keys:
+        raise ValueError(f"Unknown minute_svi_window config keys in {config_path}: {unknown_keys}")
+    return dict(window_section)
+
+
+def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
+    argv_list = list(argv) if argv is not None else sys.argv[1:]
+
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config", type=str, default=DEFAULT_CONFIG_PATH)
+    pre_args, _ = pre_parser.parse_known_args(argv_list)
+
+    if "-h" in argv_list or "--help" in argv_list:
+        config_defaults: Dict[str, Any] = {}
+        try:
+            _parse_base_args(["--help"])
+        except SystemExit:
+            print("")
+            print("Datetime-window arguments (added by this script):")
+            print("  --target-datetime VALUE")
+            print("      Repeatable; comma-separated values are also supported.")
+            print("  --target-datetimes-file PATH")
+            print("      Optional text file containing datetime values.")
+            print("  --window-minutes N")
+            print("      Calibrate in +/-N minutes around each target datetime (default: 3).")
+            raise
+    else:
+        config_defaults = _load_window_config(pre_args.config)
+
+    window_parser = argparse.ArgumentParser(add_help=False)
+    window_parser.add_argument(
+        "--target-datetime",
+        dest="target_datetimes",
+        action="append",
+        default=_coerce_target_datetime_defaults(config_defaults.get("target_datetimes", [])),
+        help=(
+            "Target datetime in UTC by default (repeatable, supports comma-separated "
+            "values in each argument). Example: 2026-03-09T14:35:00Z"
+        ),
+    )
+    window_parser.add_argument(
+        "--target-datetimes-file",
+        type=str,
+        default=str(config_defaults.get("target_datetimes_file", "")),
+        help="Optional text file containing target datetimes (one per line, comma also supported).",
+    )
+    window_parser.add_argument(
+        "--window-minutes",
+        type=int,
+        default=int(config_defaults.get("window_minutes", 3)),
+        help="Calibrate minute surfaces within +/- this many minutes around each target datetime.",
+    )
+
+    window_args, remaining_argv = window_parser.parse_known_args(argv_list)
+    args = _parse_base_args(remaining_argv)
+    args.target_datetimes = list(window_args.target_datetimes)
+    args.target_datetimes_file = str(window_args.target_datetimes_file)
+    args.window_minutes = int(window_args.window_minutes)
+    return args
+
+
+def _split_datetime_tokens(values: Sequence[str]) -> List[str]:
+    tokens: List[str] = []
+    for raw in values:
+        for token in str(raw).split(","):
+            stripped = token.strip()
+            if stripped:
+                tokens.append(stripped)
+    return tokens
+
+
+def _collect_target_datetime_tokens(cli_values: Sequence[str], file_path: str) -> List[str]:
+    tokens = _split_datetime_tokens(cli_values)
+
+    file_path = file_path.strip()
+    if file_path:
+        src = Path(file_path)
+        if not src.exists():
+            raise FileNotFoundError(f"target datetime file does not exist: {src}")
+        file_tokens: List[str] = []
+        for line in src.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            file_tokens.extend(_split_datetime_tokens([stripped]))
+        tokens.extend(file_tokens)
+
+    deduped: List[str] = []
+    seen = set()
+    for token in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        deduped.append(token)
+    return deduped
+
+
+def _to_utc_minute_ts(value: DatetimeLike) -> pd.Timestamp:
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    return ts.floor("min")
+
+
+def _build_target_window_map(
+    target_datetimes: Sequence[DatetimeLike],
+    window_minutes: int,
+) -> Dict[str, List[pd.Timestamp]]:
+    if window_minutes < 0:
+        raise ValueError(f"window_minutes must be >= 0, got {window_minutes}")
+    if not target_datetimes:
+        raise ValueError("target_datetimes is empty; please provide at least one datetime.")
+
+    window_map_raw: Dict[str, set[pd.Timestamp]] = defaultdict(set)
+    for raw_value in target_datetimes:
+        center_minute = _to_utc_minute_ts(raw_value)
+        target_key = _to_utc_minute_string(center_minute)
+        for offset in range(-window_minutes, window_minutes + 1):
+            window_map_raw[target_key].add(center_minute + pd.Timedelta(minutes=offset))
+
+    window_map: Dict[str, List[pd.Timestamp]] = {}
+    for key, minute_set in window_map_raw.items():
+        window_map[key] = sorted(minute_set)
+    return window_map
+
+
+def _extract_target_surfaces(
+    minute_results: Dict[str, Dict[str, Any]],
+    target_window_map: Dict[str, List[pd.Timestamp]],
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    by_target: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for target_key, minute_ts_list in target_window_map.items():
+        target_results: Dict[str, Dict[str, Any]] = {}
+        for minute_ts in minute_ts_list:
+            minute_key = _to_utc_minute_string(minute_ts)
+            params = minute_results.get(minute_key)
+            if params is not None:
+                target_results[minute_key] = params
+        by_target[target_key] = target_results
+    return by_target
+
+
+def generate_surfaces_for_datetime_windows(
+    args: argparse.Namespace,
+    target_datetimes: Sequence[DatetimeLike],
+    process_minute_fn: ProcessMinuteFn,
+    window_minutes: int = 3,
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    output_json_path, log_path, expiry_inference_date, calendar, vol_daycount, files = _setup_runtime(args)
+
+    target_window_map = _build_target_window_map(
+        target_datetimes=target_datetimes,
+        window_minutes=int(window_minutes),
+    )
+    target_minute_set = {
+        minute_ts for minute_ts_list in target_window_map.values() for minute_ts in minute_ts_list
+    }
+    target_minute_key_set = {_to_utc_minute_string(ts) for ts in target_minute_set}
+
+    logger.info("Start minute SVI generation for target datetime windows")
+    _log_cli_arguments(args)
+    logger.info("Config file=%s", Path(args.config))
+    logger.info("Expiry inference data_date=%s", expiry_inference_date.isoformat())
+    logger.info("Input files=%d", len(files))
+    logger.info("Output JSON=%s", output_json_path)
+    logger.info("Log file=%s", log_path)
+    logger.info("Save pre-calib CSV=%s", bool(args.save_precalib_csv))
+    logger.info("Pre-calib CSV path=%s", Path(args.precalib_csv))
+    logger.info("Target datetimes=%d", len(target_window_map))
+    logger.info("Window minutes=%d", int(window_minutes))
+    logger.info("Unique target minutes=%d", len(target_minute_set))
+    logger.info(
+        "Target minute range=%s..%s",
+        _to_utc_minute_string(min(target_minute_set)),
+        _to_utc_minute_string(max(target_minute_set)),
+    )
+    logger.debug("Target minute keys=%s", sorted(target_minute_key_set))
+    parsed_file_ranges = [rng for rng in (_infer_file_date_range(path) for path in files) if rng[0] is not None]
+    if parsed_file_ranges:
+        logger.info(
+            "Input file date span=%s..%s",
+            min(start for start, _ in parsed_file_ranges).isoformat(),
+            max(end for _, end in parsed_file_ranges if end is not None).isoformat(),
+        )
+
+    start_ts = time.time()
+    stats: Dict[str, int] = defaultdict(int)
+    results: Dict[str, Dict[str, Any]] = {}
+    contract_cache: Dict[str, Any] = {}
+    last_spot_by_key: Dict[tuple[str, str], float] = {}
+    precalib_csv_path = Path(args.precalib_csv)
+    precalib_writer: Optional[csv.DictWriter] = None
+    precalib_fp = None
+
+    if args.save_precalib_csv:
+        precalib_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        precalib_fp = precalib_csv_path.open("w", encoding="utf-8", newline="")
+        precalib_writer = csv.DictWriter(precalib_fp, fieldnames=PRECALIB_CSV_HEADERS)
+        precalib_writer.writeheader()
+
+    stop_due_to_max_minutes = False
+
+    def process_group(
+        minute_ts: pd.Timestamp,
+        minute_df: pd.DataFrame,
+        target_future_month_code: Optional[str],
+    ) -> bool:
+        rows = _build_rows_for_minute(
+            minute_df=minute_df,
+            expiry_inference_date=expiry_inference_date,
+            calendar=calendar,
+            contract_cache=contract_cache,
+            stats=stats,
+        )
+
+        if minute_ts not in target_minute_set:
+            stats["skip_not_target_minute"] += 1
+            if rows:
+                _collect_minute_spot(
+                    rows=rows,
+                    target_future_month_code=target_future_month_code,
+                    last_spot_by_key=last_spot_by_key,
+                    stats=stats,
+                )
+            return False
+
+        if args.max_minutes and args.max_minutes > 0 and stats["total_minutes"] >= args.max_minutes:
+            return True
+
+        if not rows:
+            stats["total_minutes"] += 1
+            stats["target_minutes_without_rows"] += 1
+            return False
+
+        process_minute_fn(
+            minute_ts=minute_ts,
+            rows=rows,
+            days_in_year=int(args.days_in_year),
+            min_strikes_per_expiry=int(args.min_strikes_per_expiry),
+            min_expiries_per_minute=int(args.min_expiries_per_minute),
+            vol_daycount=vol_daycount,
+            calendar=calendar,
+            target_future_month_code=target_future_month_code,
+            last_spot_by_key=last_spot_by_key,
+            results=results,
+            stats=stats,
+            precalib_writer=precalib_writer,
+        )
+        stats["target_minutes_processed"] += 1
+        return False
+
+    try:
+        for file_idx, path in enumerate(files, start=1):
+            logger.info("Processing file %d/%d: %s", file_idx, len(files), path)
+            stats["total_files"] += 1
+            file_start_date, file_end_date = _infer_file_date_range(path)
+            target_future_month_code = _get_file_target_future_month_code(path)
+            logger.info(
+                "File context: date_range=%s..%s target_future_month=%s",
+                file_start_date.isoformat() if file_start_date is not None else "unknown",
+                file_end_date.isoformat() if file_end_date is not None else "unknown",
+                target_future_month_code or "unknown",
+            )
+
+            try:
+                chunk_iter = pd.read_csv(
+                    path,
+                    usecols=["#RIC", "Date-Time", "Price", "Volume"],
+                    chunksize=max(1, int(args.chunk_size)),
+                )
+            except ValueError:
+                logger.warning("Skip unreadable/empty file: %s", path)
+                stats["skip_empty_file"] += 1
+                continue
+            except (gzip.BadGzipFile, EOFError, OSError, pd.errors.ParserError) as exc:
+                logger.warning("Skip corrupted file: %s (%s)", path, exc)
+                stats["skip_bad_gzip"] += 1
+                continue
+
+            pending_minute_df: Optional[pd.DataFrame] = None
+            try:
+                for chunk in chunk_iter:
+                    if chunk.empty:
+                        continue
+
+                    chunk = chunk.rename(
+                        columns={
+                            "#RIC": "ric",
+                            "Date-Time": "raw_time",
+                            "Price": "price",
+                            "Volume": "volume",
+                        }
+                    )
+                    chunk["price"] = pd.to_numeric(chunk["price"], errors="coerce")
+                    chunk["volume"] = pd.to_numeric(chunk["volume"], errors="coerce").fillna(1.0)
+                    chunk["trade_dt"] = pd.to_datetime(chunk["raw_time"], errors="coerce", utc=True)
+                    chunk = chunk[
+                        chunk["ric"].notna()
+                        & chunk["price"].notna()
+                        & (chunk["price"] > 0)
+                        & chunk["trade_dt"].notna()
+                    ].copy()
+                    if chunk.empty:
+                        continue
+
+                    if pending_minute_df is not None and not pending_minute_df.empty:
+                        chunk = pd.concat([pending_minute_df, chunk], axis=0, ignore_index=True)
+                        pending_minute_df = None
+
+                    chunk["minute"] = chunk["trade_dt"].dt.floor("min")
+                    chunk = chunk.sort_values(["minute", "trade_dt"])
+                    if chunk.empty:
+                        continue
+
+                    last_minute = chunk["minute"].iloc[-1]
+                    pending_mask = chunk["minute"] == last_minute
+                    pending_minute_df = chunk[pending_mask].copy()
+                    ready_df = chunk[~pending_mask]
+
+                    for minute_ts, minute_df in ready_df.groupby("minute", sort=True):
+                        stats["encountered_minutes"] += 1
+                        stop_due_to_max_minutes = process_group(
+                            minute_ts,
+                            minute_df,
+                            target_future_month_code,
+                        )
+                        if stop_due_to_max_minutes:
+                            break
+
+                    if stop_due_to_max_minutes:
+                        break
+            except (gzip.BadGzipFile, EOFError, OSError, pd.errors.ParserError) as exc:
+                logger.warning("Skip corrupted file: %s (%s)", path, exc)
+                stats["skip_bad_gzip"] += 1
+                pending_minute_df = None
+                continue
+
+            if not stop_due_to_max_minutes and pending_minute_df is not None and not pending_minute_df.empty:
+                for minute_ts, minute_df in pending_minute_df.groupby("minute", sort=True):
+                    stats["encountered_minutes"] += 1
+                    stop_due_to_max_minutes = process_group(
+                        minute_ts,
+                        minute_df,
+                        target_future_month_code,
+                    )
+                    if stop_due_to_max_minutes:
+                        break
+
+            if stop_due_to_max_minutes:
+                logger.info("Stop early due to --max-minutes=%d", args.max_minutes)
+                break
+    finally:
+        if precalib_fp is not None:
+            precalib_fp.close()
+
+    with output_json_path.open("w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+
+    surfaces_by_target = _extract_target_surfaces(results, target_window_map)
+
+    elapsed = time.time() - start_ts
+    logger.info("Finished minute SVI generation for target datetime windows")
+    logger.info("Elapsed seconds: %.2f", elapsed)
+    logger.info("Summary stats:")
+    logger.info("  total_files=%d", stats["total_files"])
+    logger.info("  encountered_minutes=%d", stats["encountered_minutes"])
+    logger.info("  total_minutes=%d", stats["total_minutes"])
+    logger.info("  target_minutes_processed=%d", stats["target_minutes_processed"])
+    logger.info("  target_minutes_without_rows=%d", stats["target_minutes_without_rows"])
+    logger.info("  calibrated_minutes=%d", stats["calibrated_minutes"])
+    logger.info("  skip_not_target_minute=%d", stats["skip_not_target_minute"])
+    logger.info("  unique_contracts_cached=%d", len(contract_cache))
+    logger.info("  option_rows=%d", stats["option_rows"])
+    logger.info("  used_option_rows=%d", stats["used_option_rows"])
+    logger.info("  future_rows=%d", stats["future_rows"])
+    logger.info("  skip_future_non_target_month=%d", stats["skip_future_non_target_month"])
+    logger.info("  skip_no_spot=%d", stats["skip_no_spot"])
+    logger.info("  skip_tau_nonpositive=%d", stats["skip_tau_nonpositive"])
+    logger.info("  skip_iv_fail=%d", stats["skip_iv_fail"])
+    logger.info("  skip_sample_insufficient=%d", stats["skip_sample_insufficient"])
+    logger.info("  skip_calibration_exception=%d", stats["skip_calibration_exception"])
+    logger.info("  skip_contract_parse=%d", stats["skip_contract_parse"])
+    logger.info("  skip_empty_file=%d", stats["skip_empty_file"])
+    logger.info("  skip_bad_gzip=%d", stats["skip_bad_gzip"])
+    logger.info("  precalib_minutes_written=%d", stats["precalib_minutes_written"])
+    logger.info("  precalib_rows_written=%d", stats["precalib_rows_written"])
+    logger.info("Saved %d calibrated minute surfaces to %s", len(results), output_json_path)
+
+    covered_targets = sum(1 for minute_map in surfaces_by_target.values() if minute_map)
+    logger.info("Targets with at least one calibrated minute=%d/%d", covered_targets, len(surfaces_by_target))
+    return surfaces_by_target
+
+
+def run_window_job(args: argparse.Namespace, process_minute_fn: ProcessMinuteFn) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    target_tokens = _collect_target_datetime_tokens(
+        cli_values=args.target_datetimes,
+        file_path=args.target_datetimes_file,
+    )
+    if not target_tokens:
+        raise ValueError(
+            "Please provide target datetimes via --target-datetime and/or --target-datetimes-file."
+        )
+
+    logger.info("Target datetime tokens=%s", " ".join(shlex.quote(x) for x in target_tokens))
+    return generate_surfaces_for_datetime_windows(
+        args=args,
+        target_datetimes=target_tokens,
+        process_minute_fn=process_minute_fn,
+        window_minutes=int(args.window_minutes),
+    )

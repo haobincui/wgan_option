@@ -1,41 +1,63 @@
+import torch
 import torch.nn as nn
 
 
+def _conv2d_out_size(size: int, kernel_size: int = 3, stride: int = 2, padding: int = 1, dilation: int = 1) -> int:
+    return ((size + 2 * padding - dilation * (kernel_size - 1) - 1) // stride) + 1
+
+
 class Discriminator(nn.Module):
-    def __init__(self, channels):
+    """
+    Conditional critic:
+    score(real/fake next surface | current surface, text embedding)
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        embedding_dim: int,
+        surface_height: int,
+        surface_width: int,
+        hidden_dim: int = 256,
+    ):
         super().__init__()
-        # Filters [256, 512, 1024]
-        # Input_dim = channels (Cx64x64)
-        # Output_dim = 1
-        self.main_module = nn.Sequential(
-            # Omitting batch normalization in critic because our new penalized training objective (WGAN with gradient penalty) is no longer valid
-            # in this setting, since we penalize the norm of the critic's gradient with respect to each input independently and not the enitre batch.
-            # There is not good & fast implementation of layer normalization --> using per instance normalization nn.InstanceNorm2d()
-            # Image (Cx32x32)
-            nn.Conv2d(in_channels=channels, out_channels=256, kernel_size=4, stride=2, padding=1),
-            nn.InstanceNorm2d(256, affine=True),
+        self.surface_height = surface_height
+        self.surface_width = surface_width
+
+        self.surface_encoder = nn.Sequential(
+            nn.Conv2d(channels * 2, 32, kernel_size=3, stride=2, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
-
-            # State (256x16x16)
-            nn.Conv2d(in_channels=256, out_channels=512, kernel_size=4, stride=2, padding=1),
-            nn.InstanceNorm2d(512, affine=True),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.InstanceNorm2d(64, affine=True),
             nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.InstanceNorm2d(128, affine=True),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
 
-            # State (512x8x8)
-            nn.Conv2d(in_channels=512, out_channels=1024, kernel_size=4, stride=2, padding=1),
-            nn.InstanceNorm2d(1024, affine=True),
-            nn.LeakyReLU(0.2, inplace=True))
-        # output of main module --> State (1024x4x4)
+        reduced_h = _conv2d_out_size(_conv2d_out_size(_conv2d_out_size(surface_height)))
+        reduced_w = _conv2d_out_size(_conv2d_out_size(_conv2d_out_size(surface_width)))
+        self.surface_feat_dim = 128 * reduced_h * reduced_w
 
-        self.output = nn.Sequential(
-            # The output of D is no longer a probability, we do not apply sigmoid at the output of D.
-            nn.Conv2d(in_channels=1024, out_channels=1, kernel_size=3, stride=1, padding=0))
+        self.text_encoder = nn.Sequential(
+            nn.Linear(embedding_dim, 128),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
 
-    def forward(self, x):
-        x = self.main_module(x)
-        return self.output(x)
+        self.classifier = nn.Sequential(
+            nn.Linear(self.surface_feat_dim + 128, hidden_dim),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(hidden_dim, 1),
+        )
 
-    def feature_extraction(self, x):
-        # Use discriminator for feature extraction then flatten to vector of 16384
-        x = self.main_module(x)
-        return x.view(-1, 1024 * 4 * 4)
+    def forward(
+        self,
+        next_surface: torch.Tensor,
+        current_surface: torch.Tensor,
+        text_embedding: torch.Tensor,
+    ) -> torch.Tensor:
+        stacked = torch.cat([current_surface, next_surface], dim=1)
+        surface_features = self.surface_encoder(stacked).flatten(start_dim=1)
+        text_features = self.text_encoder(text_embedding)
+        combined = torch.cat([surface_features, text_features], dim=1)
+        return self.classifier(combined)
