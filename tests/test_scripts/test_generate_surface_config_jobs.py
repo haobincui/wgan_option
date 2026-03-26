@@ -10,6 +10,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 import scripts.generate_surface.main as surface_main  # noqa: E402
+from scripts.generate_surface.common.minute_svi_common import _load_minute_svi_config  # noqa: E402
 from scripts.generate_surface.common.minute_svi_excel_common import _parse_args as parse_excel_args  # noqa: E402
 from scripts.generate_surface.common.minute_svi_window_common import _parse_args as parse_window_args  # noqa: E402
 
@@ -74,6 +75,34 @@ class TestGenerateSurfaceConfigDrivenJob(unittest.TestCase):
 
 
 class TestWindowAndExcelConfigParsing(unittest.TestCase):
+    def test_minute_svi_config_expands_output_dir_variables(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "surface.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    surface_builder:
+                      option_data_glob: data/raw/shared/**/*.csv.gz
+                      minute_svi:
+                        output_dir: data/processed
+                        input_glob: ${option_data_glob}
+                        output_json: output_dir/window.json
+                        log_file: ${output_dir}/minute_svi.log
+                        precalib_csv: ${output_dir}/minute_svi_precalib.csv
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            loaded = _load_minute_svi_config(str(config_path))
+
+            self.assertEqual(loaded["input_glob"], "data/raw/shared/**/*.csv.gz")
+            self.assertEqual(loaded["output_dir"], "data/processed")
+            self.assertEqual(loaded["output_json"], "data/processed/window.json")
+            self.assertEqual(loaded["log_file"], "data/processed/minute_svi.log")
+            self.assertEqual(loaded["precalib_csv"], "data/processed/minute_svi_precalib.csv")
+
     def test_window_args_read_defaults_from_default_yaml_shape(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "surface.yaml"
@@ -83,7 +112,9 @@ class TestWindowAndExcelConfigParsing(unittest.TestCase):
                     surface_builder:
                       option_data_glob: data/raw/shared/**/*.csv.gz
                       minute_svi:
-                        output_json: data/processed/window.json
+                        output_dir: data/processed
+                        output_json: ${output_dir}/window.json
+                        log_file: output_dir/window.log
                       minute_svi_window:
                         target_datetimes:
                           - 2026-03-09T14:35:00Z
@@ -100,6 +131,7 @@ class TestWindowAndExcelConfigParsing(unittest.TestCase):
 
             self.assertEqual(args.input_glob, "data/raw/shared/**/*.csv.gz")
             self.assertEqual(args.output_json, "data/processed/window.json")
+            self.assertEqual(args.log_file, "data/processed/window.log")
             self.assertEqual(
                 args.target_datetimes,
                 ["2026-03-09T14:35:00Z", "2026-03-09T14:36:00Z"],
@@ -115,7 +147,9 @@ class TestWindowAndExcelConfigParsing(unittest.TestCase):
                     """
                     surface_builder:
                       minute_svi:
-                        output_json: data/processed/excel.json
+                        output_dir: data/processed
+                        output_json: output_dir/excel.json
+                        precalib_csv: ${output_dir}/excel_precalib.csv
                       minute_svi_excel:
                         target_xlsx: data/raw/custom.xlsx
                         sheet_name: Events
@@ -133,6 +167,7 @@ class TestWindowAndExcelConfigParsing(unittest.TestCase):
             args = parse_excel_args(["--config", str(config_path)])
 
             self.assertEqual(args.output_json, "data/processed/excel.json")
+            self.assertEqual(args.precalib_csv, "data/processed/excel_precalib.csv")
             self.assertEqual(args.target_xlsx, "data/raw/custom.xlsx")
             self.assertEqual(args.sheet_name, "Events")
             self.assertEqual(args.date_column, "PublishDate")

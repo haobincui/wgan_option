@@ -16,6 +16,10 @@ if str(ROOT_DIR) not in sys.path:
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from scripts.generate_surface.common.config_utils import (  # noqa: E402
+    build_config_scope,
+    resolve_config_variables,
+)
 from quantlib.vol_surface.builder import OptionSurfaceBuilder, OptionSurfaceBuilderConfig  # noqa: E402
 
 DEFAULT_CONFIG_PATH = "configs/surface_builder/default.yaml"
@@ -90,7 +94,7 @@ def _load_daily_surface_config(config_path_value: str) -> Dict[str, Any]:
     unknown_keys = sorted(set(daily_section.keys()) - SUPPORTED_DAILY_SURFACE_CONFIG_KEYS)
     if unknown_keys:
         raise ValueError(f"Unknown daily_surface config keys in {config_path}: {unknown_keys}")
-    return defaults
+    return resolve_config_variables(defaults, extra_scope=build_config_scope(config_root))
 
 
 def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:

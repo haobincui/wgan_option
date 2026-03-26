@@ -19,6 +19,10 @@ if __package__ in {None, ""}:
     ROOT_DIR = Path(__file__).resolve().parents[3]
     if str(ROOT_DIR) not in sys.path:
         sys.path.insert(0, str(ROOT_DIR))
+    from scripts.generate_surface.common.config_utils import (  # noqa: E402
+        build_config_scope,
+        resolve_config_variables,
+    )
     from scripts.generate_surface.common.minute_svi_common import (  # noqa: E402
         DEFAULT_CONFIG_PATH,
         _parse_args as _parse_base_args,
@@ -29,6 +33,7 @@ if __package__ in {None, ""}:
         generate_surfaces_for_datetime_windows,
     )
 else:
+    from .config_utils import build_config_scope, resolve_config_variables  # noqa: E402
     from .minute_svi_common import (  # noqa: E402
         DEFAULT_CONFIG_PATH,
         _parse_args as _parse_base_args,
@@ -80,7 +85,7 @@ def _load_excel_config(config_path_value: str) -> Dict[str, Any]:
     unknown_keys = sorted(set(excel_section.keys()) - SUPPORTED_MINUTE_SVI_EXCEL_CONFIG_KEYS)
     if unknown_keys:
         raise ValueError(f"Unknown minute_svi_excel config keys in {config_path}: {unknown_keys}")
-    return dict(excel_section)
+    return resolve_config_variables(dict(excel_section), extra_scope=build_config_scope(config_root))
 
 
 def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:

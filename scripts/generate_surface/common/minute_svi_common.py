@@ -29,6 +29,10 @@ if str(ROOT_DIR) not in sys.path:
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from scripts.generate_surface.common.config_utils import (  # noqa: E402
+    build_config_scope,
+    resolve_config_variables,
+)
 from logger import LoggingConfig, setup_logging  # noqa: E402
 from market_data.contract_handler.future_contract import FutureContract  # noqa: E402
 from market_data.contract_handler.option_contract import OptionContract  # noqa: E402
@@ -54,6 +58,7 @@ PRECALIB_CSV_HEADERS = [
 DEFAULT_CONFIG_PATH = "configs/surface_builder/default.yaml"
 SUPPORTED_MINUTE_SVI_CONFIG_KEYS = {
     "input_glob",
+    "output_dir",
     "output_json",
     "log_file",
     "data_date",
@@ -170,11 +175,15 @@ def _load_minute_svi_config(config_path_value: str) -> Dict[str, Any]:
     shared_glob = config_root.get("option_data_glob")
     if "input_glob" not in defaults and isinstance(shared_glob, str):
         defaults["input_glob"] = shared_glob
+    if "output_dir" in defaults and isinstance(defaults["output_dir"], str):
+        defaults.setdefault("output_json", "${output_dir}/minute_svi_params.json")
+        defaults.setdefault("log_file", "${output_dir}/minute_svi_params.log")
+        defaults.setdefault("precalib_csv", "${output_dir}/minute_svi_precalib_points.csv")
 
     unknown_keys = sorted(set(defaults.keys()) - SUPPORTED_MINUTE_SVI_CONFIG_KEYS)
     if unknown_keys:
         raise ValueError(f"Unknown minute_svi config keys in {config_path}: {unknown_keys}")
-    return defaults
+    return resolve_config_variables(defaults, extra_scope=build_config_scope(config_root))
 
 
 def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:

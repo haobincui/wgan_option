@@ -2,29 +2,29 @@ surface_builder:
   # Unified entry selection for scripts/generate_surface/main.py when no explicit subcommand is passed.
   # Supported values:
   # daily-surface | minute-svi | minute-svi-window | minute-svi-excel
-  job: daily-surface
+  job: minute-svi-excel
 
   # Shared raw option data source for surface-related jobs.
   option_data_glob: data/raw/option_data/**/*.csv.gz
-  output_dir: data/processed
+  output_dir: data/processed_excel
 
   # Daily surface generation settings (used by scripts/generate_surface/main.py daily-surface).
   daily_surface:
     # Falls back to surface_builder.option_data_glob when omitted.
     input_glob: ${option_data_glob}
+    output_dir: outputs/vol_surface
     save_daily_csv: true
     npz_name: vol_surface_stack.npz
     strike_bins: 20
     maturity_bins: 20
-    moneyness_min: 0.5
-    moneyness_max: 1.5
+    moneyness_min: 0.3
+    moneyness_max: 1.7
     maturity_min_days: 1
     maturity_max_days: 365
 
   # Minute SVI generation settings (used by scripts/generate_surface/main.py minute-svi and related subcommands).
   minute_svi:
     # Falls back to surface_builder.option_data_glob when omitted.
-    output_dir: data/processed
     input_glob: ${option_data_glob}
     output_json: ${output_dir}/minute_svi_params.json
     log_file: ${output_dir}/minute_svi_params.log

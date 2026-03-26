@@ -12,6 +12,30 @@ from scripts.generate_surface.daily_surface import _load_daily_surface_config, _
 
 
 class TestDailySurfaceConfig(unittest.TestCase):
+    def test_load_daily_surface_config_expands_shared_variables(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "surface.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    surface_builder:
+                      raw_root: data/raw/shared
+                      daily_surface:
+                        input_glob: ${raw_root}/**/*.csv.gz
+                        output_dir: outputs/daily
+                        save_daily_csv: false
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            loaded = _load_daily_surface_config(str(config_path))
+
+            self.assertEqual(loaded["input_glob"], "data/raw/shared/**/*.csv.gz")
+            self.assertEqual(loaded["output_dir"], "outputs/daily")
+            self.assertFalse(loaded["save_daily_csv"])
+
     def test_load_daily_surface_config_reads_nested_section(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "surface.yaml"
