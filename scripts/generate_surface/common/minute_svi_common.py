@@ -50,6 +50,8 @@ PRECALIB_CSV_HEADERS = [
     "maturity_date",
     "option_type",
     "strike",
+    "price",
+    "spot",
     "percent_strike",
     "implied_vol",
     "weight_sum",
@@ -547,6 +549,8 @@ def _finalize_minute_surface(
             lambda: {
                 "iv_weighted_sum": 0.0,
                 "weight_sum": 0.0,
+                "price_weighted_sum": 0.0,
+                "spot_weighted_sum": 0.0,
                 "percent_strike_weighted_sum": 0.0,
                 "option_weight_map": defaultdict(float),
                 "maturity_weight_map": defaultdict(float),
@@ -567,6 +571,8 @@ def _finalize_minute_surface(
         bucket = grouped[candidate.business_days][candidate.strike]
         bucket["iv_weighted_sum"] += iv * candidate.weight
         bucket["weight_sum"] += candidate.weight
+        bucket["price_weighted_sum"] += candidate.price * candidate.weight
+        bucket["spot_weighted_sum"] += candidate.spot * candidate.weight
         bucket["percent_strike_weighted_sum"] += percent_strike * candidate.weight
         bucket["option_weight_map"][_option_type_name(candidate.meta.option_type)] += candidate.weight
         if candidate.meta.expiry_date is not None:
@@ -586,8 +592,14 @@ def _finalize_minute_surface(
             if weight_sum <= 0:
                 continue
             avg_iv = float(values["iv_weighted_sum"]) / weight_sum
+            avg_price = float(values["price_weighted_sum"]) / weight_sum
+            avg_spot = float(values["spot_weighted_sum"]) / weight_sum
             avg_pct = float(values["percent_strike_weighted_sum"]) / weight_sum
             if not math.isfinite(avg_iv) or avg_iv <= 0:
+                continue
+            if not math.isfinite(avg_price) or avg_price <= 0:
+                continue
+            if not math.isfinite(avg_spot) or avg_spot <= 0:
                 continue
             if not math.isfinite(avg_pct) or avg_pct <= 0:
                 continue
@@ -607,6 +619,8 @@ def _finalize_minute_surface(
                     "percent_strike": avg_pct,
                     "implied_vol": avg_iv,
                     "strike": float(strike_value),
+                    "price": avg_price,
+                    "spot": avg_spot,
                     "weight_sum": weight_sum,
                     "maturity_date": maturity_date,
                     "option_type": option_type,
@@ -627,6 +641,8 @@ def _finalize_minute_surface(
                     "maturity_date": point["maturity_date"],
                     "option_type": point["option_type"],
                     "strike": point["strike"],
+                    "price": point["price"],
+                    "spot": point["spot"],
                     "percent_strike": point["percent_strike"],
                     "implied_vol": point["implied_vol"],
                     "weight_sum": point["weight_sum"],
@@ -647,6 +663,8 @@ def _finalize_minute_surface(
                     "maturity_date": row["maturity_date"],
                     "option_type": row["option_type"],
                     "strike": row["strike"],
+                    "price": row["price"],
+                    "spot": row["spot"],
                     "percent_strike": row["percent_strike"],
                     "implied_vol": row["implied_vol"],
                     "weight_sum": row["weight_sum"],
