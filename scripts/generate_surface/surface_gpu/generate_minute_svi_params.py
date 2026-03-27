@@ -117,9 +117,11 @@ def _process_minute(
     results: Dict[str, Dict[str, Any]],
     stats: Dict[str, int],
     precalib_writer: Optional[csv.DictWriter] = None,
+    tau_anchor_ts: Optional[pd.Timestamp] = None,
+    count_stat_key: str = "total_minutes",
 ) -> None:
     del days_in_year
-    stats["total_minutes"] += 1
+    stats[count_stat_key] += 1
 
     minute_spot, option_rows = _collect_minute_spot(
         rows=rows,
@@ -139,6 +141,7 @@ def _process_minute(
         vol_daycount=vol_daycount,
         calendar=calendar,
         stats=stats,
+        tau_anchor_ts=tau_anchor_ts,
     )
     implied_vols = _compute_implied_vols_gpu(candidates)
     _finalize_minute_surface(

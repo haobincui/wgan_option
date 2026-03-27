@@ -14,7 +14,7 @@ import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import pandas as pd
 import yaml
@@ -31,8 +31,9 @@ if __package__ in {None, ""}:
         DEFAULT_CONFIG_PATH,
         PRECALIB_CSV_HEADERS,
         _build_rows_for_minute,
-        _collect_minute_spot,
+        _collect_spot_and_option_rows,
         _get_file_target_future_month_code,
+        _get_target_future_month_code,
         _infer_file_date_range,
         _log_cli_arguments,
         _parse_args as _parse_base_args,
@@ -48,8 +49,9 @@ else:
         PRECALIB_CSV_HEADERS,
         ProcessMinuteFn,
         _build_rows_for_minute,
-        _collect_minute_spot,
+        _collect_spot_and_option_rows,
         _get_file_target_future_month_code,
+        _get_target_future_month_code,
         _infer_file_date_range,
         _log_cli_arguments,
         _parse_args as _parse_base_args,
@@ -224,37 +226,51 @@ def _to_utc_minute_ts(value: DatetimeLike) -> pd.Timestamp:
 def _build_target_window_map(
     target_datetimes: Sequence[DatetimeLike],
     window_minutes: int,
-) -> Dict[str, List[pd.Timestamp]]:
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
     if window_minutes < 0:
         raise ValueError(f"window_minutes must be >= 0, got {window_minutes}")
     if not target_datetimes:
         raise ValueError("target_datetimes is empty; please provide at least one datetime.")
 
-    window_map_raw: Dict[str, set[pd.Timestamp]] = defaultdict(set)
+    window_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for raw_value in target_datetimes:
         center_minute = _to_utc_minute_ts(raw_value)
         target_key = _to_utc_minute_string(center_minute)
-        for offset in range(-window_minutes, window_minutes + 1):
-            window_map_raw[target_key].add(center_minute + pd.Timedelta(minutes=offset))
-
-    window_map: Dict[str, List[pd.Timestamp]] = {}
-    for key, minute_set in window_map_raw.items():
-        window_map[key] = sorted(minute_set)
+        backward_minutes = [
+            center_minute + pd.Timedelta(minutes=offset)
+            for offset in range(-window_minutes + 1, 1)
+        ]
+        forward_minutes = [
+            center_minute + pd.Timedelta(minutes=offset)
+            for offset in range(1, window_minutes + 1)
+        ]
+        window_map[target_key] = {
+            "target_ts": center_minute,
+            "backward": {
+                "anchor_ts": center_minute,
+                "minutes": sorted(backward_minutes),
+            },
+            "forward": {
+                "anchor_ts": center_minute + pd.Timedelta(minutes=window_minutes),
+                "minutes": sorted(forward_minutes),
+            },
+        }
     return window_map
 
 
 def _extract_target_surfaces(
-    minute_results: Dict[str, Dict[str, Any]],
-    target_window_map: Dict[str, List[pd.Timestamp]],
+    side_results: Dict[Tuple[str, str], Optional[Dict[str, Any]]],
+    target_window_map: Dict[str, Dict[str, Dict[str, Any]]],
 ) -> Dict[str, Dict[str, Dict[str, Any]]]:
     by_target: Dict[str, Dict[str, Dict[str, Any]]] = {}
-    for target_key, minute_ts_list in target_window_map.items():
+    for target_key, target_spec in target_window_map.items():
         target_results: Dict[str, Dict[str, Any]] = {}
-        for minute_ts in minute_ts_list:
-            minute_key = _to_utc_minute_string(minute_ts)
-            params = minute_results.get(minute_key)
-            if params is not None:
-                target_results[minute_key] = params
+        for direction in ("backward", "forward"):
+            anchor_ts = target_spec[direction]["anchor_ts"]
+            target_results[direction] = {
+                "snapshot_time_utc": _to_utc_minute_string(anchor_ts),
+                "svi_params": side_results.get((target_key, direction)),
+            }
         by_target[target_key] = target_results
     return by_target
 
@@ -273,10 +289,23 @@ def generate_surfaces_for_datetime_windows(
         target_datetimes=target_datetimes,
         window_minutes=int(window_minutes),
     )
-    target_minute_set = {
-        minute_ts for minute_ts_list in target_window_map.values() for minute_ts in minute_ts_list
-    }
-    target_minute_key_set = {_to_utc_minute_string(ts) for ts in target_minute_set}
+    bucket_rows: Dict[Tuple[str, str], List[Any]] = {}
+    minute_bucket_map: Dict[pd.Timestamp, List[Tuple[str, str]]] = defaultdict(list)
+    pending_buckets: List[Tuple[pd.Timestamp, str, str]] = []
+    all_window_minutes: set[pd.Timestamp] = set()
+
+    for target_key, target_spec in target_window_map.items():
+        for direction in ("backward", "forward"):
+            bucket_key = (target_key, direction)
+            bucket_rows[bucket_key] = []
+            anchor_ts = target_spec[direction]["anchor_ts"]
+            pending_buckets.append((anchor_ts, target_key, direction))
+            for minute_ts in target_spec[direction]["minutes"]:
+                minute_bucket_map[minute_ts].append(bucket_key)
+                all_window_minutes.add(minute_ts)
+            all_window_minutes.add(anchor_ts)
+
+    pending_buckets.sort(key=lambda item: (item[0], item[1], item[2]))
 
     logger.info("Start minute SVI generation for target datetime windows")
     _log_cli_arguments(args)
@@ -291,13 +320,13 @@ def generate_surfaces_for_datetime_windows(
     logger.info("Pre-calib CSV path=%s", Path(args.precalib_csv))
     logger.info("Target datetimes=%d", len(target_window_map))
     logger.info("Window minutes=%d", int(window_minutes))
-    logger.info("Unique target minutes=%d", len(target_minute_set))
-    logger.info(
-        "Target minute range=%s..%s",
-        _to_utc_minute_string(min(target_minute_set)),
-        _to_utc_minute_string(max(target_minute_set)),
-    )
-    logger.debug("Target minute keys=%s", sorted(target_minute_key_set))
+    logger.info("Window surface sides=%d", len(pending_buckets))
+    if all_window_minutes:
+        logger.info(
+            "Target window minute range=%s..%s",
+            _to_utc_minute_string(min(all_window_minutes)),
+            _to_utc_minute_string(max(all_window_minutes)),
+        )
     parsed_file_ranges = [rng for rng in (_infer_file_date_range(path) for path in files) if rng[0] is not None]
     if parsed_file_ranges:
         logger.info(
@@ -308,9 +337,9 @@ def generate_surfaces_for_datetime_windows(
 
     start_ts = time.time()
     stats: Dict[str, int] = defaultdict(int)
-    results: Dict[str, Dict[str, Any]] = {}
+    side_results: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}
     contract_cache: Dict[str, Any] = {}
-    last_spot_by_key: Dict[tuple[str, str], float] = {}
+    visible_spot_by_key: Dict[tuple[str, str], float] = {}
     precalib_csv_path = Path(args.precalib_csv)
     precalib_writer: Optional[csv.DictWriter] = None
     precalib_fp = None
@@ -322,57 +351,38 @@ def generate_surfaces_for_datetime_windows(
         precalib_writer.writeheader()
 
     stop_due_to_max_minutes = False
+    next_bucket_idx = 0
 
-    def process_group(
-        minute_ts: pd.Timestamp,
-        minute_df: pd.DataFrame,
-        target_future_month_code: Optional[str],
-    ) -> bool:
-        rows = _build_rows_for_minute(
-            minute_df=minute_df,
-            expiry_inference_date=expiry_inference_date,
-            expiration_time_utc=expiration_time_utc,
-            calendar=calendar,
-            contract_cache=contract_cache,
-            stats=stats,
-        )
+    def finalize_pending_buckets(current_minute: Optional[pd.Timestamp], include_equal: bool) -> None:
+        nonlocal next_bucket_idx
+        while next_bucket_idx < len(pending_buckets):
+            anchor_ts, target_key, direction = pending_buckets[next_bucket_idx]
+            if current_minute is not None:
+                if anchor_ts > current_minute:
+                    break
+                if anchor_ts == current_minute and not include_equal:
+                    break
 
-        if minute_ts not in target_minute_set:
-            stats["skip_not_target_minute"] += 1
-            if rows:
-                _collect_minute_spot(
-                    rows=rows,
-                    target_future_month_code=target_future_month_code,
-                    last_spot_by_key=last_spot_by_key,
-                    stats=stats,
-                )
-            return False
-
-        if args.max_minutes and args.max_minutes > 0 and stats["total_minutes"] >= args.max_minutes:
-            return True
-
-        if not rows:
-            stats["total_minutes"] += 1
-            stats["target_minutes_without_rows"] += 1
-            return False
-
-        process_minute_fn(
-            minute_ts=minute_ts,
-            rows=rows,
-            days_in_year=int(args.days_in_year),
-            min_strikes_per_expiry=int(args.min_strikes_per_expiry),
-            min_expiries_per_minute=int(args.min_expiries_per_minute),
-            max_precalib_iv=float(args.max_precalib_iv),
-            vol_daycount=vol_daycount,
-            calendar=calendar,
-            target_future_month_code=target_future_month_code,
-            last_spot_by_key=last_spot_by_key,
-            results=results,
-            stats=stats,
-            precalib_writer=precalib_writer,
-        )
-        stats["target_minutes_processed"] += 1
-        return False
+            local_results: Dict[str, Dict[str, Any]] = {}
+            process_minute_fn(
+                minute_ts=anchor_ts,
+                rows=bucket_rows[(target_key, direction)],
+                days_in_year=int(args.days_in_year),
+                min_strikes_per_expiry=int(args.min_strikes_per_expiry),
+                min_expiries_per_minute=int(args.min_expiries_per_minute),
+                max_precalib_iv=float(args.max_precalib_iv),
+                vol_daycount=vol_daycount,
+                calendar=calendar,
+                target_future_month_code=_get_target_future_month_code(anchor_ts.month),
+                last_spot_by_key=dict(visible_spot_by_key),
+                results=local_results,
+                stats=stats,
+                precalib_writer=precalib_writer,
+                tau_anchor_ts=anchor_ts,
+                count_stat_key="window_surface_attempts",
+            )
+            side_results[(target_key, direction)] = local_results.get(_to_utc_minute_string(anchor_ts))
+            next_bucket_idx += 1
 
     try:
         for file_idx, path in enumerate(files, start=1):
@@ -443,14 +453,30 @@ def generate_surfaces_for_datetime_windows(
                     ready_df = chunk[~pending_mask]
 
                     for minute_ts, minute_df in ready_df.groupby("minute", sort=True):
-                        stats["encountered_minutes"] += 1
-                        stop_due_to_max_minutes = process_group(
-                            minute_ts,
-                            minute_df,
-                            target_future_month_code,
-                        )
-                        if stop_due_to_max_minutes:
+                        if args.max_minutes and args.max_minutes > 0 and stats["encountered_minutes"] >= args.max_minutes:
+                            stop_due_to_max_minutes = True
                             break
+                        stats["encountered_minutes"] += 1
+                        finalize_pending_buckets(current_minute=minute_ts, include_equal=False)
+                        rows = _build_rows_for_minute(
+                            minute_df=minute_df,
+                            expiry_inference_date=expiry_inference_date,
+                            expiration_time_utc=expiration_time_utc,
+                            calendar=calendar,
+                            contract_cache=contract_cache,
+                            stats=stats,
+                        )
+                        if rows:
+                            _collect_spot_and_option_rows(
+                                rows=rows,
+                                target_future_month_code=None,
+                                last_spot_by_key=visible_spot_by_key,
+                            )
+                            for bucket_key in minute_bucket_map.get(minute_ts, []):
+                                bucket_rows[bucket_key].extend(rows)
+                        if minute_ts not in minute_bucket_map:
+                            stats["skip_not_target_minute"] += 1
+                        finalize_pending_buckets(current_minute=minute_ts, include_equal=True)
 
                     if stop_due_to_max_minutes:
                         break
@@ -462,26 +488,42 @@ def generate_surfaces_for_datetime_windows(
 
             if not stop_due_to_max_minutes and pending_minute_df is not None and not pending_minute_df.empty:
                 for minute_ts, minute_df in pending_minute_df.groupby("minute", sort=True):
-                    stats["encountered_minutes"] += 1
-                    stop_due_to_max_minutes = process_group(
-                        minute_ts,
-                        minute_df,
-                        target_future_month_code,
-                    )
-                    if stop_due_to_max_minutes:
+                    if args.max_minutes and args.max_minutes > 0 and stats["encountered_minutes"] >= args.max_minutes:
+                        stop_due_to_max_minutes = True
                         break
+                    stats["encountered_minutes"] += 1
+                    finalize_pending_buckets(current_minute=minute_ts, include_equal=False)
+                    rows = _build_rows_for_minute(
+                        minute_df=minute_df,
+                        expiry_inference_date=expiry_inference_date,
+                        expiration_time_utc=expiration_time_utc,
+                        calendar=calendar,
+                        contract_cache=contract_cache,
+                        stats=stats,
+                    )
+                    if rows:
+                        _collect_spot_and_option_rows(
+                            rows=rows,
+                            target_future_month_code=None,
+                            last_spot_by_key=visible_spot_by_key,
+                        )
+                        for bucket_key in minute_bucket_map.get(minute_ts, []):
+                            bucket_rows[bucket_key].extend(rows)
+                    if minute_ts not in minute_bucket_map:
+                        stats["skip_not_target_minute"] += 1
+                    finalize_pending_buckets(current_minute=minute_ts, include_equal=True)
 
             if stop_due_to_max_minutes:
                 logger.info("Stop early due to --max-minutes=%d", args.max_minutes)
                 break
     finally:
+        finalize_pending_buckets(current_minute=None, include_equal=True)
         if precalib_fp is not None:
             precalib_fp.close()
 
+    surfaces_by_target = _extract_target_surfaces(side_results, target_window_map)
     with output_json_path.open("w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
-
-    surfaces_by_target = _extract_target_surfaces(results, target_window_map)
+        json.dump(surfaces_by_target, f, ensure_ascii=False, indent=2)
 
     elapsed = time.time() - start_ts
     logger.info("Finished minute SVI generation for target datetime windows")
@@ -489,10 +531,9 @@ def generate_surfaces_for_datetime_windows(
     logger.info("Summary stats:")
     logger.info("  total_files=%d", stats["total_files"])
     logger.info("  encountered_minutes=%d", stats["encountered_minutes"])
-    logger.info("  total_minutes=%d", stats["total_minutes"])
-    logger.info("  target_minutes_processed=%d", stats["target_minutes_processed"])
-    logger.info("  target_minutes_without_rows=%d", stats["target_minutes_without_rows"])
-    logger.info("  calibrated_minutes=%d", stats["calibrated_minutes"])
+    logger.info("  window_surface_sides=%d", len(pending_buckets))
+    logger.info("  window_surface_attempts=%d", stats["window_surface_attempts"])
+    logger.info("  calibrated_window_surfaces=%d", stats["calibrated_minutes"])
     logger.info("  skip_not_target_minute=%d", stats["skip_not_target_minute"])
     logger.info("  unique_contracts_cached=%d", len(contract_cache))
     logger.info("  option_rows=%d", stats["option_rows"])
@@ -510,10 +551,15 @@ def generate_surfaces_for_datetime_windows(
     logger.info("  skip_bad_gzip=%d", stats["skip_bad_gzip"])
     logger.info("  precalib_minutes_written=%d", stats["precalib_minutes_written"])
     logger.info("  precalib_rows_written=%d", stats["precalib_rows_written"])
-    logger.info("Saved %d calibrated minute surfaces to %s", len(results), output_json_path)
+    logger.info("Saved %d target window surface bundles to %s", len(surfaces_by_target), output_json_path)
 
-    covered_targets = sum(1 for minute_map in surfaces_by_target.values() if minute_map)
-    logger.info("Targets with at least one calibrated minute=%d/%d", covered_targets, len(surfaces_by_target))
+    covered_targets = sum(
+        1
+        for direction_map in surfaces_by_target.values()
+        if direction_map["backward"]["svi_params"] is not None
+        or direction_map["forward"]["svi_params"] is not None
+    )
+    logger.info("Targets with at least one calibrated direction=%d/%d", covered_targets, len(surfaces_by_target))
     return surfaces_by_target
 
 

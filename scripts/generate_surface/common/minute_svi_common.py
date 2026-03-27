@@ -507,6 +507,20 @@ def _collect_minute_spot(
     last_spot_by_key: Dict[Tuple[str, str], float],
     stats: Dict[str, int],
 ) -> Tuple[Dict[Tuple[str, str], float], List[MinuteTradeRow]]:
+    return _collect_spot_and_option_rows(
+        rows=rows,
+        target_future_month_code=target_future_month_code,
+        last_spot_by_key=last_spot_by_key,
+        stats=stats,
+    )
+
+
+def _collect_spot_and_option_rows(
+    rows: List[MinuteTradeRow],
+    target_future_month_code: Optional[str],
+    last_spot_by_key: Optional[Dict[Tuple[str, str], float]] = None,
+    stats: Optional[Dict[str, int]] = None,
+) -> Tuple[Dict[Tuple[str, str], float], List[MinuteTradeRow]]:
     fut_sum: Dict[Tuple[str, str], float] = defaultdict(float)
     fut_vol: Dict[Tuple[str, str], float] = defaultdict(float)
     option_rows: List[MinuteTradeRow] = []
@@ -515,9 +529,11 @@ def _collect_minute_spot(
     for row in rows:
         meta = row.meta
         if meta.contract_type == "future":
-            stats["future_rows"] += 1
+            if stats is not None:
+                stats["future_rows"] += 1
             if normalized_target_month and meta.maturity_month_code != normalized_target_month:
-                stats["skip_future_non_target_month"] += 1
+                if stats is not None:
+                    stats["skip_future_non_target_month"] += 1
                 continue
             spot_key = _make_spot_cache_key(
                 underlying=meta.underlying,
@@ -527,7 +543,8 @@ def _collect_minute_spot(
             fut_vol[spot_key] += row.volume
         elif meta.contract_type == "option":
             option_rows.append(row)
-            stats["option_rows"] += 1
+            if stats is not None:
+                stats["option_rows"] += 1
 
     minute_spot: Dict[Tuple[str, str], float] = {}
     for spot_key, total_pxv in fut_sum.items():
@@ -538,7 +555,8 @@ def _collect_minute_spot(
         if not math.isfinite(spot) or spot <= 0:
             continue
         minute_spot[spot_key] = spot
-        last_spot_by_key[spot_key] = spot
+        if last_spot_by_key is not None:
+            last_spot_by_key[spot_key] = spot
     return minute_spot, option_rows
 
 
@@ -572,12 +590,11 @@ def _prepare_option_candidates(
     vol_daycount: DayCountBusN,
     calendar,
     stats: Dict[str, int],
+    tau_anchor_ts: Optional[pd.Timestamp] = None,
 ) -> Tuple[date, List[MinuteOptionCandidate]]:
     normalized_target_month = (target_future_month_code or "").upper()
-    if minute_ts.tzinfo is None:
-        valuation_date = minute_ts.date()
-    else:
-        valuation_date = minute_ts.tz_convert("UTC").date()
+    minute_ts_utc = _to_utc_timestamp(minute_ts)
+    valuation_date = minute_ts_utc.date()
 
     candidates: List[MinuteOptionCandidate] = []
     for row in option_rows:
@@ -596,13 +613,14 @@ def _prepare_option_candidates(
             stats["skip_tau_nonpositive"] += 1
             continue
 
-        trade_ts_utc = _to_utc_timestamp(row.trade_ts)
+        effective_trade_ts = tau_anchor_ts if tau_anchor_ts is not None else row.trade_ts
+        trade_ts_utc = _to_utc_timestamp(effective_trade_ts)
         business_days = int(calendar.count_business_days(trade_ts_utc.date(), expiry_date, False, True))
         if business_days <= 0:
             stats["skip_tau_nonpositive"] += 1
             continue
 
-        tau = _tau_years_from_trade_to_expiry(row.trade_ts, expiry_dt_utc, vol_daycount)
+        tau = _tau_years_from_trade_to_expiry(trade_ts_utc, expiry_dt_utc, vol_daycount)
         if tau <= 0:
             stats["skip_tau_nonpositive"] += 1
             continue
