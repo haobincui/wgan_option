@@ -48,6 +48,7 @@ PRECALIB_CSV_HEADERS = [
     "snapshot_time_utc",
     "business_days",
     "maturity_date",
+    "contract_id",
     "option_type",
     "strike",
     "price",
@@ -58,12 +59,14 @@ PRECALIB_CSV_HEADERS = [
 ]
 
 DEFAULT_CONFIG_PATH = "configs/surface_builder/default.yaml"
+DEFAULT_EXPIRATION_TIME_UTC = "20:00:00"
 SUPPORTED_MINUTE_SVI_CONFIG_KEYS = {
     "input_glob",
     "output_dir",
     "output_json",
     "log_file",
     "data_date",
+    "expiration_time_utc",
     "days_in_year",
     "min_strikes_per_expiry",
     "min_expiries_per_minute",
@@ -87,6 +90,7 @@ class ContractMeta:
     option_type: Any = None
     expiry_date: Optional[date] = None
     expiry_dt_utc: Optional[datetime] = None
+    contract_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -151,6 +155,29 @@ def _parse_bool_from_config(value: Any, key: str) -> bool:
         if normalized in {"0", "false", "no", "n", "off"}:
             return False
     raise ValueError(f"Invalid boolean value for `{key}` in config: {value!r}")
+
+
+def _parse_expiration_time_utc(value: Any, key: str = "expiration_time_utc") -> dt_time:
+    if isinstance(value, dt_time):
+        parsed = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError(f"Invalid time value for `{key}` in config: {value!r}")
+        try:
+            parsed = dt_time.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid time value for `{key}` in config: {value!r}. Expected HH:MM[:SS]."
+            ) from exc
+    else:
+        raise ValueError(f"Invalid time value for `{key}` in config: {value!r}")
+
+    offset = parsed.utcoffset()
+    if offset not in {None, timezone.utc.utcoffset(None)}:
+        raise ValueError(f"`{key}` must be UTC or naive HH:MM[:SS], got {value!r}")
+
+    return parsed.replace(tzinfo=timezone.utc)
 
 
 def _load_minute_svi_config(config_path_value: str) -> Dict[str, Any]:
@@ -245,6 +272,12 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         type=str,
         default=str(config_defaults.get("data_date", "2026-03-09")),
         help="Reference date for contract expiry inference (YYYY-MM-DD).",
+    )
+    parser.add_argument(
+        "--expiration-time-utc",
+        type=str,
+        default=str(config_defaults.get("expiration_time_utc", DEFAULT_EXPIRATION_TIME_UTC)),
+        help="UTC expiration time used to build expiry datetime (HH:MM[:SS]).",
     )
     parser.add_argument(
         "--days-in-year",
@@ -387,21 +420,47 @@ def _to_utc_timestamp(value: pd.Timestamp | datetime) -> pd.Timestamp:
     return ts.tz_convert("UTC")
 
 
-def _make_expiry_dt_utc(expiry_date: date) -> datetime:
-    return datetime.combine(expiry_date, dt_time(23, 59, 59, tzinfo=timezone.utc))
+def _make_expiry_dt_utc(
+    expiry_date: date,
+    expiration_time_utc: Optional[dt_time] = None,
+) -> datetime:
+    target_time = expiration_time_utc or _parse_expiration_time_utc(DEFAULT_EXPIRATION_TIME_UTC)
+    if target_time.tzinfo is None:
+        target_time = target_time.replace(tzinfo=timezone.utc)
+    return datetime.combine(expiry_date, target_time)
+
+
+def _coerce_expiry_dt_utc(
+    expiry_value: date | datetime,
+    expiration_time_utc: dt_time,
+) -> Tuple[date, datetime]:
+    if isinstance(expiry_value, datetime):
+        expiry_ts = pd.Timestamp(expiry_value)
+        if expiry_ts.tzinfo is None:
+            expiry_ts = expiry_ts.tz_localize("UTC")
+        else:
+            expiry_ts = expiry_ts.tz_convert("UTC")
+        return expiry_ts.date(), expiry_ts.to_pydatetime(warn=False)
+    return expiry_value, _make_expiry_dt_utc(expiry_value, expiration_time_utc)
 
 
 def _make_spot_cache_key(underlying: str, target_future_month_code: Optional[str]) -> Tuple[str, str]:
     return underlying, (target_future_month_code or "").upper()
 
 
-def _build_contract_meta(trade_do: TradeDataDO, expiry_inference_date: date, calendar) -> Optional[ContractMeta]:
+def _build_contract_meta(
+    trade_do: TradeDataDO,
+    expiry_inference_date: date,
+    calendar,
+    expiration_time_utc: dt_time,
+) -> Optional[ContractMeta]:
     contract = trade_do.to_contract()
     if isinstance(contract, FutureContract):
         return ContractMeta(
             contract_type="future",
             underlying=contract.get_underlying(),
             maturity_month_code=contract.get_maturity_month_code(),
+            contract_id=trade_do.contract_id,
         )
 
     if isinstance(contract, OptionContract):
@@ -409,16 +468,17 @@ def _build_contract_meta(trade_do: TradeDataDO, expiry_inference_date: date, cal
             data_date=expiry_inference_date,
             calendars=[calendar],
             termination_rule=ContractTerminationRule.EndOfMonth,
+            expiration_time=expiration_time_utc,
         )
-        if isinstance(expiry, datetime):
-            expiry = expiry.date()
+        expiry_date, expiry_dt_utc = _coerce_expiry_dt_utc(expiry, expiration_time_utc)
         return ContractMeta(
             contract_type="option",
             underlying=contract.get_underlying(),
             strike=float(contract.get_strike()),
             option_type=contract.get_option_type(),
-            expiry_date=expiry,
-            expiry_dt_utc=_make_expiry_dt_utc(expiry),
+            expiry_date=expiry_date,
+            expiry_dt_utc=expiry_dt_utc,
+            contract_id=trade_do.contract_id,
         )
 
     return None
@@ -465,8 +525,25 @@ def _collect_minute_spot(
     return minute_spot, option_rows
 
 
-def _tau_years_from_trade_to_expiry(trade_ts: pd.Timestamp, expiry_dt_utc: datetime) -> float:
-    return (pd.Timestamp(expiry_dt_utc) - _to_utc_timestamp(trade_ts)).total_seconds() / SECONDS_PER_DAY / 365.0
+def _day_fraction_utc(value: pd.Timestamp | datetime) -> float:
+    ts_utc = _to_utc_timestamp(value)
+    midnight = ts_utc.normalize()
+    return (ts_utc - midnight).total_seconds() / SECONDS_PER_DAY
+
+
+def _tau_years_from_trade_to_expiry(
+    trade_ts: pd.Timestamp,
+    expiry_dt_utc: datetime,
+    vol_daycount: DayCountBusN,
+) -> float:
+    trade_ts_utc = _to_utc_timestamp(trade_ts)
+    expiry_ts_utc = _to_utc_timestamp(expiry_dt_utc)
+    base_tau = float(vol_daycount(trade_ts_utc.date(), expiry_ts_utc.date()))
+    quote_fraction = _day_fraction_utc(trade_ts_utc)
+    expiry_fraction = _day_fraction_utc(expiry_ts_utc)
+    return float(
+        base_tau + (expiry_fraction - quote_fraction) / float(vol_daycount.days_in_year)
+    )
 
 
 def _prepare_option_candidates(
@@ -475,6 +552,7 @@ def _prepare_option_candidates(
     minute_spot: Dict[Tuple[str, str], float],
     last_spot_by_key: Dict[Tuple[str, str], float],
     target_future_month_code: Optional[str],
+    vol_daycount: DayCountBusN,
     calendar,
     stats: Dict[str, int],
 ) -> Tuple[date, List[MinuteOptionCandidate]]:
@@ -507,7 +585,7 @@ def _prepare_option_candidates(
             stats["skip_tau_nonpositive"] += 1
             continue
 
-        tau = _tau_years_from_trade_to_expiry(row.trade_ts, expiry_dt_utc)
+        tau = _tau_years_from_trade_to_expiry(row.trade_ts, expiry_dt_utc, vol_daycount)
         if tau <= 0:
             stats["skip_tau_nonpositive"] += 1
             continue
@@ -552,6 +630,7 @@ def _finalize_minute_surface(
                 "price_weighted_sum": 0.0,
                 "spot_weighted_sum": 0.0,
                 "percent_strike_weighted_sum": 0.0,
+                "contract_weight_map": defaultdict(float),
                 "option_weight_map": defaultdict(float),
                 "maturity_weight_map": defaultdict(float),
             }
@@ -574,6 +653,8 @@ def _finalize_minute_surface(
         bucket["price_weighted_sum"] += candidate.price * candidate.weight
         bucket["spot_weighted_sum"] += candidate.spot * candidate.weight
         bucket["percent_strike_weighted_sum"] += percent_strike * candidate.weight
+        if candidate.meta.contract_id:
+            bucket["contract_weight_map"][candidate.meta.contract_id] += candidate.weight
         bucket["option_weight_map"][_option_type_name(candidate.meta.option_type)] += candidate.weight
         if candidate.meta.expiry_date is not None:
             bucket["maturity_weight_map"][candidate.meta.expiry_date.isoformat()] += candidate.weight
@@ -609,6 +690,11 @@ def _finalize_minute_surface(
             if maturity_weight_map:
                 maturity_date = max(maturity_weight_map.items(), key=lambda x: x[1])[0]
 
+            contract_weight_map = values["contract_weight_map"]
+            contract_id = ""
+            if contract_weight_map:
+                contract_id = max(contract_weight_map.items(), key=lambda x: x[1])[0]
+
             option_weight_map = values["option_weight_map"]
             option_type = ""
             if option_weight_map:
@@ -623,6 +709,7 @@ def _finalize_minute_surface(
                     "spot": avg_spot,
                     "weight_sum": weight_sum,
                     "maturity_date": maturity_date,
+                    "contract_id": contract_id,
                     "option_type": option_type,
                 }
             )
@@ -639,6 +726,7 @@ def _finalize_minute_surface(
                 {
                     "business_days": int(bdays),
                     "maturity_date": point["maturity_date"],
+                    "contract_id": point["contract_id"],
                     "option_type": point["option_type"],
                     "strike": point["strike"],
                     "price": point["price"],
@@ -661,6 +749,7 @@ def _finalize_minute_surface(
                     "snapshot_time_utc": minute_key,
                     "business_days": row["business_days"],
                     "maturity_date": row["maturity_date"],
+                    "contract_id": row["contract_id"],
                     "option_type": row["option_type"],
                     "strike": row["strike"],
                     "price": row["price"],
@@ -694,6 +783,7 @@ def _finalize_minute_surface(
 def _build_rows_for_minute(
     minute_df: pd.DataFrame,
     expiry_inference_date: date,
+    expiration_time_utc: dt_time,
     calendar,
     contract_cache: Dict[str, Optional[ContractMeta]],
     stats: Dict[str, int],
@@ -721,6 +811,7 @@ def _build_rows_for_minute(
                     trade_do=trade_do,
                     expiry_inference_date=expiry_inference_date,
                     calendar=calendar,
+                    expiration_time_utc=expiration_time_utc,
                 )
             except Exception:
                 stats["skip_contract_parse"] += 1
@@ -744,7 +835,9 @@ def _build_rows_for_minute(
     return rows
 
 
-def _setup_runtime(args: argparse.Namespace) -> Tuple[Path, Path, date, Any, DayCountBusN, List[str]]:
+def _setup_runtime(
+    args: argparse.Namespace,
+) -> Tuple[Path, Path, date, Any, DayCountBusN, dt_time, List[str]]:
     output_json_path = Path(args.output_json)
     log_path = Path(args.log_file)
     output_json_path.parent.mkdir(parents=True, exist_ok=True)
@@ -766,6 +859,7 @@ def _setup_runtime(args: argparse.Namespace) -> Tuple[Path, Path, date, Any, Day
         calendar=calendar,
         days_in_year=int(args.days_in_year),
     )
+    expiration_time_utc = _parse_expiration_time_utc(args.expiration_time_utc)
 
     files = sorted(glob.glob(args.input_glob, recursive=True))
     if args.max_files and args.max_files > 0:
@@ -774,11 +868,13 @@ def _setup_runtime(args: argparse.Namespace) -> Tuple[Path, Path, date, Any, Day
     if not files:
         raise FileNotFoundError(f"No input files found for pattern: {args.input_glob}")
 
-    return output_json_path, log_path, expiry_inference_date, calendar, vol_daycount, files
+    return output_json_path, log_path, expiry_inference_date, calendar, vol_daycount, expiration_time_utc, files
 
 
 def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinuteFn) -> Dict[str, Dict[str, Any]]:
-    output_json_path, log_path, expiry_inference_date, calendar, vol_daycount, files = _setup_runtime(args)
+    output_json_path, log_path, expiry_inference_date, calendar, vol_daycount, expiration_time_utc, files = (
+        _setup_runtime(args)
+    )
 
     logger.info("Start minute SVI generation")
     _log_cli_arguments(args)
@@ -787,6 +883,7 @@ def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinut
     logger.info("Input files=%d", len(files))
     logger.info("Output JSON=%s", output_json_path)
     logger.info("Log file=%s", log_path)
+    logger.info("Expiration time UTC=%s", expiration_time_utc.isoformat())
     logger.info("Save pre-calib CSV=%s", bool(args.save_precalib_csv))
     logger.info("Pre-calib CSV path=%s", Path(args.precalib_csv))
     parsed_file_ranges = [rng for rng in (_infer_file_date_range(path) for path in files) if rng[0] is not None]
@@ -891,6 +988,7 @@ def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinut
                         rows = _build_rows_for_minute(
                             minute_df=minute_df,
                             expiry_inference_date=expiry_inference_date,
+                            expiration_time_utc=expiration_time_utc,
                             calendar=calendar,
                             contract_cache=contract_cache,
                             stats=stats,
@@ -931,6 +1029,7 @@ def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinut
                     rows = _build_rows_for_minute(
                         minute_df=minute_df,
                         expiry_inference_date=expiry_inference_date,
+                        expiration_time_utc=expiration_time_utc,
                         calendar=calendar,
                         contract_cache=contract_cache,
                         stats=stats,

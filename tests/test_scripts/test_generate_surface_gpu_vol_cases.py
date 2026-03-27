@@ -1,6 +1,6 @@
 import sys
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, time as dt_time, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -14,6 +14,7 @@ from market_data.contract_handler.contract_type import ContractType  # noqa: E40
 from market_data.contract_handler.future_contract import FutureContract  # noqa: E402
 from market_data.contract_handler.option_contract import OptionContract  # noqa: E402
 from market_data.contract_handler.utils import ContractTerminationRule  # noqa: E402
+from quantlib.calendar.daycount import DayCountBusN  # noqa: E402
 from quantlib.calendar.holidays import usd_calendar  # noqa: E402
 from quantlib.calculation.analytics.models.analytical.equity.formula import (  # noqa: E402
     black_scholes_price,
@@ -34,6 +35,11 @@ from scripts.generate_surface.surface_gpu.generate_minute_svi_params import (  #
 
 class TestGenerateSurfaceGpuVolCases(unittest.TestCase):
     DEVICE = torch.device("cpu")
+    EXPIRATION_TIME_UTC = dt_time(20, 0, 0, tzinfo=timezone.utc)
+
+    @staticmethod
+    def _vol_daycount(calendar) -> DayCountBusN:
+        return DayCountBusN(name="BUS250USD", calendar=calendar, days_in_year=250)
 
     def _make_candidate(
         self,
@@ -53,13 +59,20 @@ class TestGenerateSurfaceGpuVolCases(unittest.TestCase):
             )
 
         calendar = usd_calendar()
-        expiry_date = option_contract.get_contract_maturity_dates_by_contract_id(
+        vol_daycount = self._vol_daycount(calendar)
+        expiry = option_contract.get_contract_maturity_dates_by_contract_id(
             data_date=trade_ts.date(),
             calendars=[calendar],
             termination_rule=ContractTerminationRule.EndOfMonth,
+            expiration_time=self.EXPIRATION_TIME_UTC,
         )
-        expiry_dt_utc = _make_expiry_dt_utc(expiry_date)
-        tau = _tau_years_from_trade_to_expiry(trade_ts, expiry_dt_utc)
+        if isinstance(expiry, datetime):
+            expiry_dt_utc = expiry if expiry.tzinfo is not None else expiry.replace(tzinfo=timezone.utc)
+            expiry_date = expiry_dt_utc.date()
+        else:
+            expiry_date = expiry
+            expiry_dt_utc = _make_expiry_dt_utc(expiry_date, self.EXPIRATION_TIME_UTC)
+        tau = _tau_years_from_trade_to_expiry(trade_ts, expiry_dt_utc, vol_daycount)
         strike = float(option_contract.get_strike())
         option_type = option_contract.get_option_type()
         business_days = int(calendar.count_business_days(trade_ts.date(), expiry_date, False, True))
@@ -72,6 +85,7 @@ class TestGenerateSurfaceGpuVolCases(unittest.TestCase):
                 option_type=option_type,
                 expiry_date=expiry_date,
                 expiry_dt_utc=expiry_dt_utc,
+                contract_id=option_contract_id,
             ),
             price=float(price),
             weight=5.0,
@@ -91,13 +105,21 @@ class TestGenerateSurfaceGpuVolCases(unittest.TestCase):
     ) -> MinuteOptionCandidate:
         trade_ts = trade_ts or datetime(2025, 11, 14, 18, 3, tzinfo=timezone.utc)
         option_contract = OptionContract(option_contract_id, ContractType.Option)
-        expiry_date = option_contract.get_contract_maturity_dates_by_contract_id(
+        calendar = usd_calendar()
+        vol_daycount = self._vol_daycount(calendar)
+        expiry = option_contract.get_contract_maturity_dates_by_contract_id(
             data_date=trade_ts.date(),
-            calendars=[usd_calendar()],
+            calendars=[calendar],
             termination_rule=ContractTerminationRule.EndOfMonth,
+            expiration_time=self.EXPIRATION_TIME_UTC,
         )
-        expiry_dt_utc = _make_expiry_dt_utc(expiry_date)
-        tau = _tau_years_from_trade_to_expiry(trade_ts, expiry_dt_utc)
+        if isinstance(expiry, datetime):
+            expiry_dt_utc = expiry if expiry.tzinfo is not None else expiry.replace(tzinfo=timezone.utc)
+            expiry_date = expiry_dt_utc.date()
+        else:
+            expiry_date = expiry
+            expiry_dt_utc = _make_expiry_dt_utc(expiry_date, self.EXPIRATION_TIME_UTC)
+        tau = _tau_years_from_trade_to_expiry(trade_ts, expiry_dt_utc, vol_daycount)
         price = float(
             black_scholes_price(
                 strike=float(option_contract.get_strike()),
@@ -141,7 +163,7 @@ class TestGenerateSurfaceGpuVolCases(unittest.TestCase):
                 "spot": 115.273438,
                 "price": 0.007,
                 "trade_ts": datetime(2023, 5, 1, 0, 2, 47, tzinfo=timezone.utc),
-                "expected_vol": 0.1287814081,
+                "expected_vol": 0.1271893777,
             },
             {
                 "option_contract_id": "TY990V3",
@@ -149,7 +171,7 @@ class TestGenerateSurfaceGpuVolCases(unittest.TestCase):
                 "spot": 113.585938,
                 "price": 2.5,
                 "trade_ts": datetime(2023, 5, 31, 20, 59, 49, tzinfo=timezone.utc),
-                "expected_vol": 0.2808476686,
+                "expected_vol": 0.2807429560,
             },
             {
                 "option_contract_id": "TY1015S3",
@@ -157,7 +179,7 @@ class TestGenerateSurfaceGpuVolCases(unittest.TestCase):
                 "spot": 112.179688,
                 "price": 0.007,
                 "trade_ts": datetime(2023, 6, 21, 14, 0, 2, tzinfo=timezone.utc),
-                "expected_vol": 0.1175748110,
+                "expected_vol": 0.1185037845,
             },
         ]
 

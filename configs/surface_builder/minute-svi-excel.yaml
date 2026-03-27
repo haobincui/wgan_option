@@ -25,7 +25,9 @@ surface_builder:
   # Minute SVI generation settings (used by scripts/generate_surface/main.py minute-svi and related subcommands).
   minute_svi:
     # Falls back to surface_builder.option_data_glob when omitted.
+    output_dir: data/processed
     input_glob: ${option_data_glob}
+    expiration_time_utc: "20:00:00"
     output_json: ${output_dir}/minute_svi_params.json
     log_file: ${output_dir}/minute_svi_params.log
     data_date: "2026-03-09"

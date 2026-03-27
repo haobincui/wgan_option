@@ -122,6 +122,7 @@ def _process_minute(
         minute_spot=minute_spot,
         last_spot_by_key=last_spot_by_key,
         target_future_month_code=target_future_month_code,
+        vol_daycount=vol_daycount,
         calendar=calendar,
         stats=stats,
     )

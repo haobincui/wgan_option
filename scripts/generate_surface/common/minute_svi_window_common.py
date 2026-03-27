@@ -265,7 +265,9 @@ def generate_surfaces_for_datetime_windows(
     process_minute_fn: ProcessMinuteFn,
     window_minutes: int = 3,
 ) -> Dict[str, Dict[str, Dict[str, Any]]]:
-    output_json_path, log_path, expiry_inference_date, calendar, vol_daycount, files = _setup_runtime(args)
+    output_json_path, log_path, expiry_inference_date, calendar, vol_daycount, expiration_time_utc, files = (
+        _setup_runtime(args)
+    )
 
     target_window_map = _build_target_window_map(
         target_datetimes=target_datetimes,
@@ -283,6 +285,7 @@ def generate_surfaces_for_datetime_windows(
     logger.info("Input files=%d", len(files))
     logger.info("Output JSON=%s", output_json_path)
     logger.info("Log file=%s", log_path)
+    logger.info("Expiration time UTC=%s", expiration_time_utc.isoformat())
     logger.info("Save pre-calib CSV=%s", bool(args.save_precalib_csv))
     logger.info("Pre-calib CSV path=%s", Path(args.precalib_csv))
     logger.info("Target datetimes=%d", len(target_window_map))
@@ -327,6 +330,7 @@ def generate_surfaces_for_datetime_windows(
         rows = _build_rows_for_minute(
             minute_df=minute_df,
             expiry_inference_date=expiry_inference_date,
+            expiration_time_utc=expiration_time_utc,
             calendar=calendar,
             contract_cache=contract_cache,
             stats=stats,
