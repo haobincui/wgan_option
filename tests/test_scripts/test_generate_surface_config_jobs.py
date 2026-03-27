@@ -86,6 +86,7 @@ class TestWindowAndExcelConfigParsing(unittest.TestCase):
                       minute_svi:
                         output_dir: data/processed
                         expiration_time_utc: "20:00:00"
+                        max_precalib_iv: 2.5
                         input_glob: ${option_data_glob}
                         output_json: output_dir/window.json
                         log_file: ${output_dir}/minute_svi.log
@@ -101,6 +102,7 @@ class TestWindowAndExcelConfigParsing(unittest.TestCase):
             self.assertEqual(loaded["input_glob"], "data/raw/shared/**/*.csv.gz")
             self.assertEqual(loaded["output_dir"], "data/processed")
             self.assertEqual(loaded["expiration_time_utc"], "20:00:00")
+            self.assertEqual(loaded["max_precalib_iv"], 2.5)
             self.assertEqual(loaded["output_json"], "data/processed/window.json")
             self.assertEqual(loaded["log_file"], "data/processed/minute_svi.log")
             self.assertEqual(loaded["precalib_csv"], "data/processed/minute_svi_precalib.csv")
@@ -116,6 +118,7 @@ class TestWindowAndExcelConfigParsing(unittest.TestCase):
                       minute_svi:
                         output_dir: data/processed
                         expiration_time_utc: "19:45:30"
+                        max_precalib_iv: 2.75
                         output_json: ${output_dir}/window.json
                         log_file: output_dir/window.log
                       minute_svi_window:
@@ -136,6 +139,7 @@ class TestWindowAndExcelConfigParsing(unittest.TestCase):
             self.assertEqual(args.output_json, "data/processed/window.json")
             self.assertEqual(args.log_file, "data/processed/window.log")
             self.assertEqual(args.expiration_time_utc, "19:45:30")
+            self.assertEqual(args.max_precalib_iv, 2.75)
             self.assertEqual(
                 args.target_datetimes,
                 ["2026-03-09T14:35:00Z", "2026-03-09T14:36:00Z"],
@@ -153,6 +157,7 @@ class TestWindowAndExcelConfigParsing(unittest.TestCase):
                       minute_svi:
                         output_dir: data/processed
                         expiration_time_utc: "20:00:00"
+                        max_precalib_iv: 1.8
                         output_json: output_dir/excel.json
                         precalib_csv: ${output_dir}/excel_precalib.csv
                       minute_svi_excel:
@@ -174,6 +179,7 @@ class TestWindowAndExcelConfigParsing(unittest.TestCase):
             self.assertEqual(args.output_json, "data/processed/excel.json")
             self.assertEqual(args.precalib_csv, "data/processed/excel_precalib.csv")
             self.assertEqual(args.expiration_time_utc, "20:00:00")
+            self.assertEqual(args.max_precalib_iv, 1.8)
             self.assertEqual(args.target_xlsx, "data/raw/custom.xlsx")
             self.assertEqual(args.sheet_name, "Events")
             self.assertEqual(args.date_column, "PublishDate")

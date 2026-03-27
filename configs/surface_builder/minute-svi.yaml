@@ -33,6 +33,7 @@ surface_builder:
     days_in_year: 250
     min_strikes_per_expiry: 3
     min_expiries_per_minute: 1
+    max_precalib_iv: 3.0
     max_files: 0
     max_minutes: 0
     chunk_size: 100000

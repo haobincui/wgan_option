@@ -286,6 +286,7 @@ def generate_surfaces_for_datetime_windows(
     logger.info("Output JSON=%s", output_json_path)
     logger.info("Log file=%s", log_path)
     logger.info("Expiration time UTC=%s", expiration_time_utc.isoformat())
+    logger.info("Max pre-calib IV=%s", float(args.max_precalib_iv))
     logger.info("Save pre-calib CSV=%s", bool(args.save_precalib_csv))
     logger.info("Pre-calib CSV path=%s", Path(args.precalib_csv))
     logger.info("Target datetimes=%d", len(target_window_map))
@@ -361,6 +362,7 @@ def generate_surfaces_for_datetime_windows(
             days_in_year=int(args.days_in_year),
             min_strikes_per_expiry=int(args.min_strikes_per_expiry),
             min_expiries_per_minute=int(args.min_expiries_per_minute),
+            max_precalib_iv=float(args.max_precalib_iv),
             vol_daycount=vol_daycount,
             calendar=calendar,
             target_future_month_code=target_future_month_code,
@@ -500,6 +502,7 @@ def generate_surfaces_for_datetime_windows(
     logger.info("  skip_no_spot=%d", stats["skip_no_spot"])
     logger.info("  skip_tau_nonpositive=%d", stats["skip_tau_nonpositive"])
     logger.info("  skip_iv_fail=%d", stats["skip_iv_fail"])
+    logger.info("  skip_precalib_iv_above_cap=%d", stats["skip_precalib_iv_above_cap"])
     logger.info("  skip_sample_insufficient=%d", stats["skip_sample_insufficient"])
     logger.info("  skip_calibration_exception=%d", stats["skip_calibration_exception"])
     logger.info("  skip_contract_parse=%d", stats["skip_contract_parse"])

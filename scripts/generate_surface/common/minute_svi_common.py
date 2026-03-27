@@ -55,11 +55,14 @@ PRECALIB_CSV_HEADERS = [
     "spot",
     "percent_strike",
     "implied_vol",
+    "passes_precalib_filter",
+    "filter_reason",
     "weight_sum",
 ]
 
 DEFAULT_CONFIG_PATH = "configs/surface_builder/default.yaml"
 DEFAULT_EXPIRATION_TIME_UTC = "20:00:00"
+DEFAULT_MAX_PRECALIB_IV = 3.0
 SUPPORTED_MINUTE_SVI_CONFIG_KEYS = {
     "input_glob",
     "output_dir",
@@ -67,6 +70,7 @@ SUPPORTED_MINUTE_SVI_CONFIG_KEYS = {
     "log_file",
     "data_date",
     "expiration_time_utc",
+    "max_precalib_iv",
     "days_in_year",
     "min_strikes_per_expiry",
     "min_expiries_per_minute",
@@ -119,6 +123,7 @@ ProcessMinuteFn = Callable[
         int,
         int,
         int,
+        float,
         DayCountBusN,
         Any,
         Optional[str],
@@ -298,6 +303,12 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Minimum valid expiries required to calibrate one minute surface.",
     )
     parser.add_argument(
+        "--max-precalib-iv",
+        type=float,
+        default=float(config_defaults.get("max_precalib_iv", DEFAULT_MAX_PRECALIB_IV)),
+        help="Maximum implied vol allowed into SVI calibration; <= 0 disables the filter.",
+    )
+    parser.add_argument(
         "--max-files",
         type=int,
         default=int(config_defaults.get("max_files", 0)),
@@ -379,6 +390,12 @@ def _option_type_name(option_type: Any) -> str:
     if "." in text:
         text = text.split(".")[-1]
     return text.upper()
+
+
+def _evaluate_precalib_filter(implied_vol: float, max_precalib_iv: float) -> Tuple[bool, str]:
+    if max_precalib_iv > 0 and implied_vol > max_precalib_iv:
+        return False, "implied_vol_above_cap"
+    return True, ""
 
 
 def _log_cli_arguments(args: argparse.Namespace) -> None:
@@ -617,6 +634,7 @@ def _finalize_minute_surface(
     implied_vols: List[Optional[float]],
     min_strikes_per_expiry: int,
     min_expiries_per_minute: int,
+    max_precalib_iv: float,
     vol_daycount: DayCountBusN,
     results: Dict[str, Dict[str, Any]],
     stats: Dict[str, int],
@@ -715,13 +733,13 @@ def _finalize_minute_surface(
             )
 
         points.sort(key=lambda x: x["percent_strike"])
-        if len(points) < min_strikes_per_expiry:
-            continue
-
-        business_days_list.append(int(bdays))
-        percent_strikes.append([float(p["percent_strike"]) for p in points])
-        vols.append([float(p["implied_vol"]) for p in points])
         for point in points:
+            passes_precalib_filter, filter_reason = _evaluate_precalib_filter(
+                implied_vol=float(point["implied_vol"]),
+                max_precalib_iv=float(max_precalib_iv),
+            )
+            if not passes_precalib_filter:
+                stats["skip_precalib_iv_above_cap"] += 1
             precalib_rows.append(
                 {
                     "business_days": int(bdays),
@@ -733,13 +751,25 @@ def _finalize_minute_surface(
                     "spot": point["spot"],
                     "percent_strike": point["percent_strike"],
                     "implied_vol": point["implied_vol"],
+                    "passes_precalib_filter": "true" if passes_precalib_filter else "false",
+                    "filter_reason": filter_reason,
                     "weight_sum": point["weight_sum"],
                 }
             )
 
-    if len(business_days_list) < min_expiries_per_minute:
-        stats["skip_sample_insufficient"] += 1
-        return
+        passing_points = [
+            point
+            for point in points
+            if not (
+                float(max_precalib_iv) > 0 and float(point["implied_vol"]) > float(max_precalib_iv)
+            )
+        ]
+        if len(passing_points) < min_strikes_per_expiry:
+            continue
+
+        business_days_list.append(int(bdays))
+        percent_strikes.append([float(p["percent_strike"]) for p in passing_points])
+        vols.append([float(p["implied_vol"]) for p in passing_points])
 
     minute_key = _to_utc_minute_string(minute_ts)
     if precalib_writer is not None and precalib_rows:
@@ -756,11 +786,17 @@ def _finalize_minute_surface(
                     "spot": row["spot"],
                     "percent_strike": row["percent_strike"],
                     "implied_vol": row["implied_vol"],
+                    "passes_precalib_filter": row["passes_precalib_filter"],
+                    "filter_reason": row["filter_reason"],
                     "weight_sum": row["weight_sum"],
                 }
             )
         stats["precalib_rows_written"] += len(precalib_rows)
         stats["precalib_minutes_written"] += 1
+
+    if len(business_days_list) < min_expiries_per_minute:
+        stats["skip_sample_insufficient"] += 1
+        return
 
     try:
         calibration = SviCalibrationQuasiExplicit(
@@ -884,6 +920,7 @@ def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinut
     logger.info("Output JSON=%s", output_json_path)
     logger.info("Log file=%s", log_path)
     logger.info("Expiration time UTC=%s", expiration_time_utc.isoformat())
+    logger.info("Max pre-calib IV=%s", float(args.max_precalib_iv))
     logger.info("Save pre-calib CSV=%s", bool(args.save_precalib_csv))
     logger.info("Pre-calib CSV path=%s", Path(args.precalib_csv))
     parsed_file_ranges = [rng for rng in (_infer_file_date_range(path) for path in files) if rng[0] is not None]
@@ -1003,6 +1040,7 @@ def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinut
                             days_in_year=int(args.days_in_year),
                             min_strikes_per_expiry=int(args.min_strikes_per_expiry),
                             min_expiries_per_minute=int(args.min_expiries_per_minute),
+                            max_precalib_iv=float(args.max_precalib_iv),
                             vol_daycount=vol_daycount,
                             calendar=calendar,
                             target_future_month_code=target_future_month_code,
@@ -1044,6 +1082,7 @@ def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinut
                         days_in_year=int(args.days_in_year),
                         min_strikes_per_expiry=int(args.min_strikes_per_expiry),
                         min_expiries_per_minute=int(args.min_expiries_per_minute),
+                        max_precalib_iv=float(args.max_precalib_iv),
                         vol_daycount=vol_daycount,
                         calendar=calendar,
                         target_future_month_code=target_future_month_code,
@@ -1078,6 +1117,7 @@ def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinut
     logger.info("  skip_no_spot=%d", stats["skip_no_spot"])
     logger.info("  skip_tau_nonpositive=%d", stats["skip_tau_nonpositive"])
     logger.info("  skip_iv_fail=%d", stats["skip_iv_fail"])
+    logger.info("  skip_precalib_iv_above_cap=%d", stats["skip_precalib_iv_above_cap"])
     logger.info("  skip_sample_insufficient=%d", stats["skip_sample_insufficient"])
     logger.info("  skip_calibration_exception=%d", stats["skip_calibration_exception"])
     logger.info("  skip_contract_parse=%d", stats["skip_contract_parse"])
