@@ -167,6 +167,7 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
         self.assertEqual(
             [window_common._to_utc_minute_string(ts) for ts in window_map[target_key]["backward"]["minutes"]],
             [
+                "2026-03-09T14:30:00Z",
                 "2026-03-09T14:31:00Z",
                 "2026-03-09T14:32:00Z",
                 "2026-03-09T14:33:00Z",
@@ -177,6 +178,7 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
         self.assertEqual(
             [window_common._to_utc_minute_string(ts) for ts in window_map[target_key]["forward"]["minutes"]],
             [
+                "2026-03-09T14:35:00Z",
                 "2026-03-09T14:36:00Z",
                 "2026-03-09T14:37:00Z",
                 "2026-03-09T14:38:00Z",
@@ -230,14 +232,14 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
             self.assertEqual(set(recorded_calls.keys()), {backward_key, forward_key})
             self.assertEqual(
                 recorded_calls[backward_key]["unique_row_minutes"],
-                ["2026-03-09T14:34:00Z", "2026-03-09T14:35:00Z"],
+                ["2026-03-09T14:30:00Z", "2026-03-09T14:34:00Z", "2026-03-09T14:35:00Z"],
             )
             self.assertEqual(
                 recorded_calls[forward_key]["unique_row_minutes"],
-                ["2026-03-09T14:36:00Z", "2026-03-09T14:40:00Z"],
+                ["2026-03-09T14:35:00Z", "2026-03-09T14:36:00Z", "2026-03-09T14:40:00Z"],
             )
-            self.assertEqual(recorded_calls[backward_key]["row_count"], 2)
-            self.assertEqual(recorded_calls[forward_key]["row_count"], 3)
+            self.assertEqual(recorded_calls[backward_key]["row_count"], 3)
+            self.assertEqual(recorded_calls[forward_key]["row_count"], 4)
             self.assertEqual(recorded_calls[backward_key]["last_spot_by_key"], {("TY", "H"): 100.0})
             self.assertEqual(recorded_calls[forward_key]["last_spot_by_key"], {("TY", "H"): 101.0})
             self.assertEqual(recorded_calls[backward_key]["tau_anchor_ts"], backward_key)
@@ -249,11 +251,25 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
             self.assertEqual(surfaces[target_key]["forward"]["snapshot_time_utc"], forward_key)
             self.assertEqual(
                 surfaces[target_key]["backward"]["svi_params"],
-                {"row_count": 2, "unique_row_minutes": ["2026-03-09T14:34:00Z", "2026-03-09T14:35:00Z"]},
+                {
+                    "row_count": 3,
+                    "unique_row_minutes": [
+                        "2026-03-09T14:30:00Z",
+                        "2026-03-09T14:34:00Z",
+                        "2026-03-09T14:35:00Z",
+                    ],
+                },
             )
             self.assertEqual(
                 surfaces[target_key]["forward"]["svi_params"],
-                {"row_count": 3, "unique_row_minutes": ["2026-03-09T14:36:00Z", "2026-03-09T14:40:00Z"]},
+                {
+                    "row_count": 4,
+                    "unique_row_minutes": [
+                        "2026-03-09T14:35:00Z",
+                        "2026-03-09T14:36:00Z",
+                        "2026-03-09T14:40:00Z",
+                    ],
+                },
             )
 
             written = json.loads(Path(args.output_json).read_text(encoding="utf-8"))
@@ -389,6 +405,29 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
         self.assertNotEqual(anchored[0].tau, unanchored[0].tau)
         self.assertEqual(anchored[0].business_days, anchored[1].business_days)
 
+    def test_filter_files_for_target_windows_keeps_only_overlapping_month_files(self):
+        window_map = window_common._build_target_window_map(
+            [pd.Timestamp("2022-01-27T09:24:00Z")],
+            window_minutes=5,
+        )
+
+        files = [
+            "data/raw/option_data/0#TY+/0#TY+_2021-12-01_2021-12-31.csv.gz",
+            "data/raw/option_data/0#TY+/0#TY+_2022-01-01_2022-01-31.csv.gz",
+            "data/raw/option_data/0#TY+/0#TY+_2022-02-01_2022-02-28.csv.gz",
+            "data/raw/option_data/window_input.csv",
+        ]
+
+        filtered = window_common._filter_files_for_target_windows(files, window_map)
+
+        self.assertEqual(
+            filtered,
+            [
+                "data/raw/option_data/0#TY+/0#TY+_2022-01-01_2022-01-31.csv.gz",
+                "data/raw/option_data/window_input.csv",
+            ],
+        )
+
     def test_run_excel_job_preserves_forward_backward_structure(self):
         sample_output = {
             "2026-03-09T14:35:00Z": {
@@ -420,7 +459,7 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
             excel_common,
             "generate_surfaces_for_datetime_windows",
             return_value=sample_output,
-        ) as mock_generate:
+        ) as mock_generate, patch.object(excel_common.logger, "info"):
             result = excel_common.run_excel_job(args, process_minute_fn=Mock())
 
         self.assertEqual(result, sample_output)

@@ -40,6 +40,37 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         calendar = usd_calendar()
         return DayCountBusN(name="BUS250USD", calendar=calendar, days_in_year=250)
 
+    def _make_candidate(
+        self,
+        *,
+        contract_id: str,
+        strike: float,
+        option_type,
+        price: float,
+        weight: float,
+        spot: float = 112.5934,
+        trade_ts: str = "2025-11-14T18:03:00Z",
+        business_days: int = 94,
+    ) -> MinuteOptionCandidate:
+        expiry_date = date(2026, 3, 31)
+        return MinuteOptionCandidate(
+            meta=ContractMeta(
+                contract_type="option",
+                underlying="TY",
+                strike=strike,
+                option_type=option_type,
+                expiry_date=expiry_date,
+                contract_id=contract_id,
+            ),
+            price=price,
+            weight=weight,
+            strike=strike,
+            spot=spot,
+            tau=0.376,
+            business_days=business_days,
+            trade_ts=pd.Timestamp(trade_ts),
+        )
+
     def test_infer_file_date_range_and_target_month(self):
         path = "data/raw/option_data/0#TY+/0#TY+_2025-11-14_2025-11-15.csv.gz"
         self.assertEqual(
@@ -172,41 +203,24 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
             pd.Timestamp("2026-03-31T20:00:00Z").to_pydatetime(warn=False),
         )
 
-    def test_finalize_minute_surface_writes_price_and_spot_to_precalib_csv(self):
+    def test_finalize_minute_surface_writes_raw_trade_rows_to_precalib_csv_and_aggregates_for_calibration(self):
         minute_ts = pd.Timestamp("2025-11-14T18:03:00Z")
-        expiry_date = date(2026, 3, 31)
         candidates = [
-            MinuteOptionCandidate(
-                meta=ContractMeta(
-                    contract_type="option",
-                    underlying="TY",
-                    strike=110.0,
-                    option_type=OptionType.PUT,
-                    expiry_date=expiry_date,
-                    contract_id="TY110O26",
-                ),
+            self._make_candidate(
+                contract_id="TY110O26",
+                strike=110.0,
+                option_type=OptionType.PUT,
                 price=0.25,
                 weight=1.0,
-                strike=110.0,
-                spot=112.5934,
-                tau=0.376,
-                business_days=94,
+                trade_ts="2025-11-14T18:03:11Z",
             ),
-            MinuteOptionCandidate(
-                meta=ContractMeta(
-                    contract_type="option",
-                    underlying="TY",
-                    strike=110.0,
-                    option_type=OptionType.PUT,
-                    expiry_date=expiry_date,
-                    contract_id="TY110O26",
-                ),
+            self._make_candidate(
+                contract_id="TY110O26",
+                strike=110.0,
+                option_type=OptionType.PUT,
                 price=0.50,
                 weight=3.0,
-                strike=110.0,
-                spot=112.5934,
-                tau=0.376,
-                business_days=94,
+                trade_ts="2025-11-14T18:03:47Z",
             ),
         ]
 
@@ -217,74 +231,88 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         calendar = usd_calendar()
         vol_daycount = DayCountBusN(name="BUS250USD", calendar=calendar, days_in_year=250)
         stats = defaultdict(int)
+        results = {}
 
-        _finalize_minute_surface(
-            minute_ts=minute_ts,
-            valuation_date=minute_ts.date(),
-            candidates=candidates,
-            implied_vols=[0.20, 0.30],
-            min_strikes_per_expiry=1,
-            min_expiries_per_minute=1,
-            max_precalib_iv=DEFAULT_MAX_PRECALIB_IV,
-            vol_daycount=vol_daycount,
-            results={},
-            stats=stats,
-            precalib_writer=precalib_writer,
-        )
+        with patch("scripts.generate_surface.common.minute_svi_common.SviCalibrationQuasiExplicit") as calibration_cls:
+            calibration_cls.return_value.params = {
+                "a": [0.01],
+                "b": [0.02],
+                "rho": [0.0],
+                "m": [0.0],
+                "sigma": [0.1],
+                "business_days": [94],
+            }
+
+            _finalize_minute_surface(
+                minute_ts=minute_ts,
+                valuation_date=minute_ts.date(),
+                candidates=candidates,
+                implied_vols=[0.20, 0.30],
+                min_strikes_per_expiry=1,
+                min_expiries_per_minute=1,
+                max_precalib_iv=DEFAULT_MAX_PRECALIB_IV,
+                vol_daycount=vol_daycount,
+                results=results,
+                stats=stats,
+                precalib_writer=precalib_writer,
+            )
 
         rows = list(csv.DictReader(io.StringIO(precalib_buffer.getvalue())))
-        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(rows), 2)
 
-        row = rows[0]
-        self.assertIn("contract_id", row)
-        self.assertIn("price", row)
-        self.assertIn("spot", row)
-        self.assertIn("passes_precalib_filter", row)
-        self.assertIn("filter_reason", row)
-        self.assertEqual(row["contract_id"], "TY110O26")
-        self.assertAlmostEqual(float(row["price"]), 0.4375, places=10)
-        self.assertAlmostEqual(float(row["spot"]), 112.5934, places=10)
-        self.assertEqual(row["passes_precalib_filter"], "true")
-        self.assertEqual(row["filter_reason"], "")
-        self.assertAlmostEqual(float(row["weight_sum"]), 4.0, places=10)
-        self.assertEqual(stats["precalib_rows_written"], 1)
+        self.assertNotIn("snapshot_time_utc", rows[0])
+        self.assertNotIn("weight_sum", rows[0])
+        self.assertIn("trade_datetime_utc", rows[0])
+        self.assertIn("calibration_datetime_utc", rows[0])
+        self.assertIn("weight", rows[0])
+
+        self.assertEqual(
+            [row["trade_datetime_utc"] for row in rows],
+            ["2025-11-14T18:03:11Z", "2025-11-14T18:03:47Z"],
+        )
+        self.assertEqual(
+            [row["calibration_datetime_utc"] for row in rows],
+            ["2025-11-14T18:03:00Z", "2025-11-14T18:03:00Z"],
+        )
+        self.assertEqual([row["contract_id"] for row in rows], ["TY110O26", "TY110O26"])
+        self.assertAlmostEqual(float(rows[0]["price"]), 0.25, places=10)
+        self.assertAlmostEqual(float(rows[1]["price"]), 0.50, places=10)
+        self.assertAlmostEqual(float(rows[0]["spot"]), 112.5934, places=10)
+        self.assertEqual([row["passes_precalib_filter"] for row in rows], ["true", "true"])
+        self.assertEqual([row["filter_reason"] for row in rows], ["", ""])
+        self.assertEqual([float(row["weight"]) for row in rows], [1.0, 3.0])
+        self.assertIn("2025-11-14T18:03:00Z", results)
+        self.assertEqual(len(calibration_cls.call_args.kwargs["vols"]), 1)
+        self.assertEqual(len(calibration_cls.call_args.kwargs["vols"][0]), 1)
+        self.assertAlmostEqual(calibration_cls.call_args.kwargs["vols"][0][0], 0.275, places=12)
+        self.assertEqual(len(calibration_cls.call_args.kwargs["percent_strikes"]), 1)
+        self.assertEqual(len(calibration_cls.call_args.kwargs["percent_strikes"][0]), 1)
+        self.assertAlmostEqual(
+            calibration_cls.call_args.kwargs["percent_strikes"][0][0],
+            110.0 / 112.5934,
+            places=12,
+        )
+        self.assertEqual(stats["precalib_rows_written"], 2)
         self.assertEqual(stats["precalib_minutes_written"], 1)
 
     def test_finalize_minute_surface_flags_filtered_points_and_skips_calibration_if_strikes_drop_below_minimum(self):
         minute_ts = pd.Timestamp("2025-11-14T18:03:00Z")
-        expiry_date = date(2026, 3, 31)
         candidates = [
-            MinuteOptionCandidate(
-                meta=ContractMeta(
-                    contract_type="option",
-                    underlying="TY",
-                    strike=110.0,
-                    option_type=OptionType.PUT,
-                    expiry_date=expiry_date,
-                    contract_id="TY110O26",
-                ),
+            self._make_candidate(
+                contract_id="TY110O26",
+                strike=110.0,
+                option_type=OptionType.PUT,
                 price=0.25,
                 weight=1.0,
-                strike=110.0,
-                spot=112.5934,
-                tau=0.376,
-                business_days=94,
+                trade_ts="2025-11-14T18:03:11Z",
             ),
-            MinuteOptionCandidate(
-                meta=ContractMeta(
-                    contract_type="option",
-                    underlying="TY",
-                    strike=115.0,
-                    option_type=OptionType.CALL,
-                    expiry_date=expiry_date,
-                    contract_id="TY115C26",
-                ),
+            self._make_candidate(
+                contract_id="TY115C26",
+                strike=115.0,
+                option_type=OptionType.CALL,
                 price=0.50,
                 weight=1.0,
-                strike=115.0,
-                spot=112.5934,
-                tau=0.376,
-                business_days=94,
+                trade_ts="2025-11-14T18:03:47Z",
             ),
         ]
 
@@ -318,6 +346,8 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         self.assertEqual(stats["precalib_minutes_written"], 1)
 
         rows_by_strike = {float(row["strike"]): row for row in rows}
+        self.assertEqual(rows_by_strike[110.0]["trade_datetime_utc"], "2025-11-14T18:03:11Z")
+        self.assertEqual(rows_by_strike[110.0]["calibration_datetime_utc"], "2025-11-14T18:03:00Z")
         self.assertEqual(rows_by_strike[110.0]["passes_precalib_filter"], "true")
         self.assertEqual(rows_by_strike[110.0]["filter_reason"], "")
         self.assertEqual(rows_by_strike[115.0]["passes_precalib_filter"], "false")
@@ -325,39 +355,22 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
 
     def test_finalize_minute_surface_disables_iv_cap_when_threshold_is_nonpositive(self):
         minute_ts = pd.Timestamp("2025-11-14T18:03:00Z")
-        expiry_date = date(2026, 3, 31)
         candidates = [
-            MinuteOptionCandidate(
-                meta=ContractMeta(
-                    contract_type="option",
-                    underlying="TY",
-                    strike=110.0,
-                    option_type=OptionType.PUT,
-                    expiry_date=expiry_date,
-                    contract_id="TY110O26",
-                ),
+            self._make_candidate(
+                contract_id="TY110O26",
+                strike=110.0,
+                option_type=OptionType.PUT,
                 price=0.25,
                 weight=1.0,
-                strike=110.0,
-                spot=112.5934,
-                tau=0.376,
-                business_days=94,
+                trade_ts="2025-11-14T18:03:11Z",
             ),
-            MinuteOptionCandidate(
-                meta=ContractMeta(
-                    contract_type="option",
-                    underlying="TY",
-                    strike=115.0,
-                    option_type=OptionType.CALL,
-                    expiry_date=expiry_date,
-                    contract_id="TY115C26",
-                ),
+            self._make_candidate(
+                contract_id="TY115C26",
+                strike=115.0,
+                option_type=OptionType.CALL,
                 price=0.50,
                 weight=1.0,
-                strike=115.0,
-                spot=112.5934,
-                tau=0.376,
-                business_days=94,
+                trade_ts="2025-11-14T18:03:47Z",
             ),
         ]
 
@@ -403,6 +416,14 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         self.assertEqual(
             calibration_cls.call_args.kwargs["percent_strikes"],
             [[110.0 / 112.5934, 115.0 / 112.5934]],
+        )
+        self.assertEqual(
+            [row["trade_datetime_utc"] for row in rows],
+            ["2025-11-14T18:03:11Z", "2025-11-14T18:03:47Z"],
+        )
+        self.assertEqual(
+            [row["calibration_datetime_utc"] for row in rows],
+            ["2025-11-14T18:03:00Z", "2025-11-14T18:03:00Z"],
         )
         self.assertEqual([row["passes_precalib_filter"] for row in rows], ["true", "true"])
         self.assertEqual([row["filter_reason"] for row in rows], ["", ""])

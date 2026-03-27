@@ -238,11 +238,11 @@ def _build_target_window_map(
         target_key = _to_utc_minute_string(center_minute)
         backward_minutes = [
             center_minute + pd.Timedelta(minutes=offset)
-            for offset in range(-window_minutes + 1, 1)
+            for offset in range(-window_minutes, 1)
         ]
         forward_minutes = [
             center_minute + pd.Timedelta(minutes=offset)
-            for offset in range(1, window_minutes + 1)
+            for offset in range(0, window_minutes + 1)
         ]
         window_map[target_key] = {
             "target_ts": center_minute,
@@ -256,6 +256,39 @@ def _build_target_window_map(
             },
         }
     return window_map
+
+
+def _filter_files_for_target_windows(
+    files: Sequence[str],
+    target_window_map: Dict[str, Dict[str, Dict[str, Any]]],
+) -> List[str]:
+    if not target_window_map:
+        return list(files)
+
+    window_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+    for target_spec in target_window_map.values():
+        window_minutes = sorted(
+            set(target_spec["backward"]["minutes"]) | set(target_spec["forward"]["minutes"])
+        )
+        if not window_minutes:
+            continue
+        window_ranges.append((window_minutes[0], window_minutes[-1]))
+
+    if not window_ranges:
+        return list(files)
+
+    filtered_files: List[str] = []
+    for path in files:
+        file_start_date, file_end_date = _infer_file_date_range(path)
+        if file_start_date is None or file_end_date is None:
+            filtered_files.append(path)
+            continue
+
+        for range_start_ts, range_end_ts in window_ranges:
+            if file_end_date >= range_start_ts.date() and file_start_date <= range_end_ts.date():
+                filtered_files.append(path)
+                break
+    return filtered_files
 
 
 def _extract_target_surfaces(
@@ -281,7 +314,7 @@ def generate_surfaces_for_datetime_windows(
     process_minute_fn: ProcessMinuteFn,
     window_minutes: int = 3,
 ) -> Dict[str, Dict[str, Dict[str, Any]]]:
-    output_json_path, log_path, expiry_inference_date, calendar, vol_daycount, expiration_time_utc, files = (
+    output_json_path, log_path, expiry_inference_date, calendar, vol_daycount, expiration_time_utc, all_files = (
         _setup_runtime(args)
     )
 
@@ -289,6 +322,9 @@ def generate_surfaces_for_datetime_windows(
         target_datetimes=target_datetimes,
         window_minutes=int(window_minutes),
     )
+    files = _filter_files_for_target_windows(all_files, target_window_map)
+    if not files:
+        raise FileNotFoundError("No input files overlap the requested target datetime windows.")
     bucket_rows: Dict[Tuple[str, str], List[Any]] = {}
     minute_bucket_map: Dict[pd.Timestamp, List[Tuple[str, str]]] = defaultdict(list)
     pending_buckets: List[Tuple[pd.Timestamp, str, str]] = []

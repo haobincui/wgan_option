@@ -45,7 +45,8 @@ from quantlib.vol_surface.algo.svi_algo import SviCalibrationQuasiExplicit  # no
 logger = logging.getLogger(__name__)
 
 PRECALIB_CSV_HEADERS = [
-    "snapshot_time_utc",
+    "trade_datetime_utc",
+    "calibration_datetime_utc",
     "business_days",
     "maturity_date",
     "contract_id",
@@ -57,7 +58,7 @@ PRECALIB_CSV_HEADERS = [
     "implied_vol",
     "passes_precalib_filter",
     "filter_reason",
-    "weight_sum",
+    "weight",
 ]
 
 DEFAULT_CONFIG_PATH = "configs/surface_builder/default.yaml"
@@ -114,6 +115,7 @@ class MinuteOptionCandidate:
     spot: float
     tau: float
     business_days: int
+    trade_ts: Optional[pd.Timestamp] = None
 
 
 ProcessMinuteFn = Callable[
@@ -356,6 +358,14 @@ def _to_utc_minute_string(ts: pd.Timestamp) -> str:
     else:
         ts = ts.tz_convert("UTC")
     return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _to_utc_datetime_string(value: pd.Timestamp | datetime) -> str:
+    ts = _to_utc_timestamp(value)
+    iso = ts.isoformat()
+    if iso.endswith("+00:00"):
+        return iso[:-6] + "Z"
+    return iso
 
 
 def _parse_data_date(value: str) -> date:
@@ -639,6 +649,7 @@ def _prepare_option_candidates(
                 spot=float(spot),
                 tau=float(tau),
                 business_days=business_days,
+                trade_ts=_to_utc_timestamp(row.trade_ts),
             )
         )
 
@@ -666,12 +677,11 @@ def _finalize_minute_surface(
                 "price_weighted_sum": 0.0,
                 "spot_weighted_sum": 0.0,
                 "percent_strike_weighted_sum": 0.0,
-                "contract_weight_map": defaultdict(float),
-                "option_weight_map": defaultdict(float),
-                "maturity_weight_map": defaultdict(float),
             }
         )
     )
+    minute_key = _to_utc_minute_string(minute_ts)
+    precalib_rows: List[Dict[str, Any]] = []
 
     for candidate, iv in zip(candidates, implied_vols):
         if iv is None or not math.isfinite(iv) or iv <= 0:
@@ -683,23 +693,50 @@ def _finalize_minute_surface(
             stats["skip_iv_fail"] += 1
             continue
 
+        passes_precalib_filter, filter_reason = _evaluate_precalib_filter(
+            implied_vol=float(iv),
+            max_precalib_iv=float(max_precalib_iv),
+        )
+        if not passes_precalib_filter:
+            stats["skip_precalib_iv_above_cap"] += 1
+
+        trade_ts = candidate.trade_ts if candidate.trade_ts is not None else minute_ts
+        precalib_rows.append(
+            {
+                "trade_datetime_utc": _to_utc_datetime_string(trade_ts),
+                "calibration_datetime_utc": minute_key,
+                "business_days": int(candidate.business_days),
+                "maturity_date": (
+                    candidate.meta.expiry_date.isoformat()
+                    if candidate.meta.expiry_date is not None
+                    else ""
+                ),
+                "contract_id": candidate.meta.contract_id or "",
+                "option_type": _option_type_name(candidate.meta.option_type),
+                "strike": float(candidate.strike),
+                "price": float(candidate.price),
+                "spot": float(candidate.spot),
+                "percent_strike": float(percent_strike),
+                "implied_vol": float(iv),
+                "passes_precalib_filter": "true" if passes_precalib_filter else "false",
+                "filter_reason": filter_reason,
+                "weight": float(candidate.weight),
+            }
+        )
         bucket = grouped[candidate.business_days][candidate.strike]
-        bucket["iv_weighted_sum"] += iv * candidate.weight
+        stats["used_option_rows"] += 1
+        if not passes_precalib_filter:
+            continue
+
+        bucket["iv_weighted_sum"] += float(iv) * candidate.weight
         bucket["weight_sum"] += candidate.weight
         bucket["price_weighted_sum"] += candidate.price * candidate.weight
         bucket["spot_weighted_sum"] += candidate.spot * candidate.weight
         bucket["percent_strike_weighted_sum"] += percent_strike * candidate.weight
-        if candidate.meta.contract_id:
-            bucket["contract_weight_map"][candidate.meta.contract_id] += candidate.weight
-        bucket["option_weight_map"][_option_type_name(candidate.meta.option_type)] += candidate.weight
-        if candidate.meta.expiry_date is not None:
-            bucket["maturity_weight_map"][candidate.meta.expiry_date.isoformat()] += candidate.weight
-        stats["used_option_rows"] += 1
 
     business_days_list: List[int] = []
     vols: List[List[float]] = []
     percent_strikes: List[List[float]] = []
-    precalib_rows: List[Dict[str, Any]] = []
 
     for bdays in sorted(grouped.keys()):
         strike_map = grouped[bdays]
@@ -721,94 +758,24 @@ def _finalize_minute_surface(
             if not math.isfinite(avg_pct) or avg_pct <= 0:
                 continue
 
-            maturity_weight_map = values["maturity_weight_map"]
-            maturity_date = ""
-            if maturity_weight_map:
-                maturity_date = max(maturity_weight_map.items(), key=lambda x: x[1])[0]
-
-            contract_weight_map = values["contract_weight_map"]
-            contract_id = ""
-            if contract_weight_map:
-                contract_id = max(contract_weight_map.items(), key=lambda x: x[1])[0]
-
-            option_weight_map = values["option_weight_map"]
-            option_type = ""
-            if option_weight_map:
-                option_type = max(option_weight_map.items(), key=lambda x: x[1])[0]
-
             points.append(
                 {
                     "percent_strike": avg_pct,
                     "implied_vol": avg_iv,
-                    "strike": float(strike_value),
-                    "price": avg_price,
-                    "spot": avg_spot,
-                    "weight_sum": weight_sum,
-                    "maturity_date": maturity_date,
-                    "contract_id": contract_id,
-                    "option_type": option_type,
                 }
             )
 
         points.sort(key=lambda x: x["percent_strike"])
-        for point in points:
-            passes_precalib_filter, filter_reason = _evaluate_precalib_filter(
-                implied_vol=float(point["implied_vol"]),
-                max_precalib_iv=float(max_precalib_iv),
-            )
-            if not passes_precalib_filter:
-                stats["skip_precalib_iv_above_cap"] += 1
-            precalib_rows.append(
-                {
-                    "business_days": int(bdays),
-                    "maturity_date": point["maturity_date"],
-                    "contract_id": point["contract_id"],
-                    "option_type": point["option_type"],
-                    "strike": point["strike"],
-                    "price": point["price"],
-                    "spot": point["spot"],
-                    "percent_strike": point["percent_strike"],
-                    "implied_vol": point["implied_vol"],
-                    "passes_precalib_filter": "true" if passes_precalib_filter else "false",
-                    "filter_reason": filter_reason,
-                    "weight_sum": point["weight_sum"],
-                }
-            )
-
-        passing_points = [
-            point
-            for point in points
-            if not (
-                float(max_precalib_iv) > 0 and float(point["implied_vol"]) > float(max_precalib_iv)
-            )
-        ]
-        if len(passing_points) < min_strikes_per_expiry:
+        if len(points) < min_strikes_per_expiry:
             continue
 
         business_days_list.append(int(bdays))
-        percent_strikes.append([float(p["percent_strike"]) for p in passing_points])
-        vols.append([float(p["implied_vol"]) for p in passing_points])
+        percent_strikes.append([float(p["percent_strike"]) for p in points])
+        vols.append([float(p["implied_vol"]) for p in points])
 
-    minute_key = _to_utc_minute_string(minute_ts)
     if precalib_writer is not None and precalib_rows:
         for row in precalib_rows:
-            precalib_writer.writerow(
-                {
-                    "snapshot_time_utc": minute_key,
-                    "business_days": row["business_days"],
-                    "maturity_date": row["maturity_date"],
-                    "contract_id": row["contract_id"],
-                    "option_type": row["option_type"],
-                    "strike": row["strike"],
-                    "price": row["price"],
-                    "spot": row["spot"],
-                    "percent_strike": row["percent_strike"],
-                    "implied_vol": row["implied_vol"],
-                    "passes_precalib_filter": row["passes_precalib_filter"],
-                    "filter_reason": row["filter_reason"],
-                    "weight_sum": row["weight_sum"],
-                }
-            )
+            precalib_writer.writerow(row)
         stats["precalib_rows_written"] += len(precalib_rows)
         stats["precalib_minutes_written"] += 1
 
