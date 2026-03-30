@@ -295,6 +295,72 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         self.assertEqual(stats["precalib_rows_written"], 2)
         self.assertEqual(stats["precalib_minutes_written"], 1)
 
+    def test_finalize_minute_surface_threads_calibration_diagnostics_into_stats(self):
+        minute_ts = pd.Timestamp("2025-11-14T18:03:00Z")
+        candidates = [
+            self._make_candidate(
+                contract_id="TY110O26",
+                strike=110.0,
+                option_type=OptionType.PUT,
+                price=0.25,
+                weight=1.0,
+                trade_ts="2025-11-14T18:03:11Z",
+            ),
+            self._make_candidate(
+                contract_id="TY110O26",
+                strike=110.0,
+                option_type=OptionType.PUT,
+                price=0.50,
+                weight=3.0,
+                trade_ts="2025-11-14T18:03:47Z",
+            ),
+        ]
+
+        stats = defaultdict(int)
+        results = {}
+
+        def _fake_calibration(**kwargs):
+            kwargs["stats"]["qls_boundary_retry_slices"] += 1
+            kwargs["stats"]["qls_fallback_attempt_slices"] += 1
+            kwargs["stats"]["qls_fallback_success_slices"] += 1
+
+            class _CalibrationResult:
+                params = {
+                    "a": [0.01],
+                    "b": [0.02],
+                    "rho": [0.1],
+                    "m": [0.0],
+                    "sigma": [0.2],
+                    "business_days": [94],
+                }
+
+            return _CalibrationResult()
+
+        with patch(
+            "scripts.generate_surface.common.minute_svi_common.SviCalibrationQuasiExplicit",
+            side_effect=_fake_calibration,
+        ) as calibration_cls:
+            _finalize_minute_surface(
+                minute_ts=minute_ts,
+                valuation_date=minute_ts.date(),
+                candidates=candidates,
+                implied_vols=[0.20, 0.30],
+                min_strikes_per_expiry=1,
+                min_expiries_per_minute=1,
+                max_precalib_iv=DEFAULT_MAX_PRECALIB_IV,
+                vol_daycount=self._vol_daycount(),
+                results=results,
+                stats=stats,
+                precalib_writer=None,
+            )
+
+        self.assertIn("2025-11-14T18:03:00Z", results)
+        self.assertEqual(stats["calibrated_minutes"], 1)
+        self.assertEqual(stats["qls_boundary_retry_slices"], 1)
+        self.assertEqual(stats["qls_fallback_attempt_slices"], 1)
+        self.assertEqual(stats["qls_fallback_success_slices"], 1)
+        self.assertIs(calibration_cls.call_args.kwargs["stats"], stats)
+
     def test_finalize_minute_surface_flags_filtered_points_and_skips_calibration_if_strikes_drop_below_minimum(self):
         minute_ts = pd.Timestamp("2025-11-14T18:03:00Z")
         candidates = [

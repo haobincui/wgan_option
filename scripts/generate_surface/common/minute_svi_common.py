@@ -790,6 +790,7 @@ def _finalize_minute_surface(
             business_days=business_days_list,
             vol_daycount=vol_daycount,
             valuation_date=valuation_date,
+            stats=stats,
         )
         params = _to_json_native(calibration.params)
     except Exception:
@@ -1105,6 +1106,11 @@ def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinut
     logger.info("  skip_precalib_iv_above_cap=%d", stats["skip_precalib_iv_above_cap"])
     logger.info("  skip_sample_insufficient=%d", stats["skip_sample_insufficient"])
     logger.info("  skip_calibration_exception=%d", stats["skip_calibration_exception"])
+    logger.info("  qls_boundary_retry_slices=%d", stats["qls_boundary_retry_slices"])
+    logger.info("  qls_fallback_attempt_slices=%d", stats["qls_fallback_attempt_slices"])
+    logger.info("  qls_fallback_success_slices=%d", stats["qls_fallback_success_slices"])
+    logger.info("  qls_boundary_reject_slices=%d", stats["qls_boundary_reject_slices"])
+    logger.info("  qls_stage1_kept_slices=%d", stats["qls_stage1_kept_slices"])
     logger.info("  skip_contract_parse=%d", stats["skip_contract_parse"])
     logger.info("  skip_empty_file=%d", stats["skip_empty_file"])
     logger.info("  skip_bad_gzip=%d", stats["skip_bad_gzip"])

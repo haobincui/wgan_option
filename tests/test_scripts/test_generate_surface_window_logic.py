@@ -1,3 +1,4 @@
+import csv
 import json
 import logging
 import sys
@@ -20,6 +21,7 @@ from quantlib.calculation.analytics.position.instruments.features import OptionT
 from quantlib.calendar.daycount import DayCountBusN  # noqa: E402
 from quantlib.calendar.holidays import usd_calendar  # noqa: E402
 from scripts.generate_surface.common.minute_svi_common import (  # noqa: E402
+    PRECALIB_CSV_HEADERS,
     ContractMeta,
     MinuteTradeRow,
     _make_expiry_dt_utc,
@@ -28,6 +30,9 @@ from scripts.generate_surface.common.minute_svi_common import (  # noqa: E402
 )
 from scripts.generate_surface.common import minute_svi_excel_common as excel_common  # noqa: E402
 from scripts.generate_surface.common import minute_svi_window_common as window_common  # noqa: E402
+from scripts.generate_surface.surface_cpu.generate_minute_svi_params import (  # noqa: E402
+    _process_minute as cpu_process_minute,
+)
 
 
 class TestGenerateSurfaceWindowLogic(unittest.TestCase):
@@ -274,6 +279,57 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
 
             written = json.loads(Path(args.output_json).read_text(encoding="utf-8"))
             self.assertEqual(written, surfaces)
+
+    def test_window_precalib_csv_uses_excel_compatible_headers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = self._write_trade_csv(
+                tmpdir,
+                [
+                    {"#RIC": "FUT_PRIOR", "Date-Time": "2026-03-09T14:30:00Z", "Price": 112.5, "Volume": 1.0},
+                    {"#RIC": "OPTP110", "Date-Time": "2026-03-09T14:34:00Z", "Price": 0.25, "Volume": 1.0},
+                    {"#RIC": "OPTP111", "Date-Time": "2026-03-09T14:35:00Z", "Price": 0.35, "Volume": 1.0},
+                    {"#RIC": "FUT_WIN", "Date-Time": "2026-03-09T14:36:00Z", "Price": 112.7, "Volume": 1.0},
+                    {"#RIC": "OPTC112", "Date-Time": "2026-03-09T14:36:00Z", "Price": 0.45, "Volume": 1.0},
+                    {"#RIC": "OPTC113", "Date-Time": "2026-03-09T14:40:00Z", "Price": 0.55, "Volume": 1.0},
+                ],
+            )
+            args = self._make_args(tmpdir, csv_path)
+            args.save_precalib_csv = True
+
+            with patch.object(
+                window_common,
+                "_build_rows_for_minute",
+                side_effect=self._fake_build_rows_for_minute,
+            ):
+                surfaces = window_common.generate_surfaces_for_datetime_windows(
+                    args=args,
+                    target_datetimes=[self.TARGET_TS],
+                    process_minute_fn=cpu_process_minute,
+                    window_minutes=5,
+                )
+                logging.shutdown()
+
+            precalib_path = Path(args.precalib_csv)
+            with precalib_path.open(newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+
+            self.assertEqual(reader.fieldnames, PRECALIB_CSV_HEADERS)
+            self.assertTrue(rows)
+            self.assertNotIn("snapshot_time_utc", rows[0])
+            self.assertIn("calibration_datetime_utc", rows[0])
+            self.assertEqual(
+                sorted({row["calibration_datetime_utc"] for row in rows}),
+                ["2026-03-09T14:35:00Z", "2026-03-09T14:40:00Z"],
+            )
+            self.assertEqual(
+                surfaces["2026-03-09T14:35:00Z"]["backward"]["snapshot_time_utc"],
+                "2026-03-09T14:35:00Z",
+            )
+            self.assertEqual(
+                surfaces["2026-03-09T14:35:00Z"]["forward"]["snapshot_time_utc"],
+                "2026-03-09T14:40:00Z",
+            )
 
     def test_generate_surfaces_for_datetime_windows_keeps_null_side_when_calibration_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:

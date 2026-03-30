@@ -1,10 +1,14 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
 from .holidays import HolidayCalendar, embedded_calendar, usd_calendar, gbp_calendar
 
-
+@dataclass(frozen=True)
 class DayCount(ABC):
+    name: str
+    days_in_year: int
+    
     @abstractmethod
     def __call__(self, start: date, end: date) -> float:
         pass
@@ -13,9 +17,10 @@ class DayCount(ABC):
 @dataclass(frozen=True)
 class DayCountAct365(DayCount):
     name: str = 'ACT365'
+    days_in_year: int = 365
 
     def __call__(self, start: date, end: date) -> float:
-        return (end - start).days / 365
+        return (end - start).days / self.days_in_year
 
 
 @dataclass(frozen=True)
