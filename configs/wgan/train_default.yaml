@@ -29,6 +29,10 @@ disc_hidden_dim: 256
 
 # Optimization
 learning_rate: 0.0002
+use_reduce_lr_on_plateau: false
+reduce_lr_factor: 0.5
+reduce_lr_patience: 8
+reduce_lr_min_lr: 1.0e-5
 num_epochs: 100
 batch_size: 16
 beta_1: 0.5

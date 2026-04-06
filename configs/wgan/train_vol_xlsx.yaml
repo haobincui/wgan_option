@@ -13,6 +13,10 @@ disc_hidden_dim: 256
 
 # Optimization
 learning_rate: 0.0002
+use_reduce_lr_on_plateau: true
+reduce_lr_factor: 0.5
+reduce_lr_patience: 8
+reduce_lr_min_lr: 1.0e-5
 num_epochs: 100
 batch_size: 16
 beta_1: 0.5
@@ -34,6 +38,9 @@ seed: 42
 cuda: true
 num_workers: 0
 save_every: 10
+use_early_stopping: false
+early_stopping_patience: 10
+early_stopping_min_delta: 0.0
 
 # Paths
 models_path: outputs/vol_xlsx/checkpoints

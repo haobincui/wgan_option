@@ -1,8 +1,8 @@
 # vol_xlsx Training Review
 
-This directory records the analysis of the latest training run currently stored in `outputs/vol_xlsx`.
+This directory records the analysis of the latest training run currently stored in `outputs/vol_xlsx_20260406-02`.
 
-- Review target: `outputs/vol_xlsx`
+- Review target: `outputs/vol_xlsx_20260406-02`
 - Config snapshot: `outputs/vol_xlsx/metrics/run_config_20260406_125835.yaml`
 - Metrics file: `outputs/vol_xlsx/metrics/training_metrics.json`
 - Curve plot: `outputs/vol_xlsx/metrics/loss_curves.png`

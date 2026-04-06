@@ -1,4 +1,5 @@
 import importlib.util
+import csv
 import json
 import sys
 import tempfile
@@ -16,6 +17,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from wgan_option.config import Config, load_config, parse_cli_overrides  # noqa: E402
 from wgan_option.models.gan_model import WGAN_GP  # noqa: E402
+from wgan_option.train_svi_xlsx import SviXlsxTrainer  # noqa: E402
 from wgan_option.utils.merged_xlsx import (  # noqa: E402
     create_svi_xlsx_dataloaders,
     create_vol_surface_xlsx_dataloaders,
@@ -69,6 +71,15 @@ def _build_test_wgan(config: Config) -> WGAN_GP:
     model.g_optimizer = torch.optim.Adam(model.G.parameters(), lr=config.learning_rate, betas=(config.beta_1, config.beta_2))
     model.d_optimizer = torch.optim.Adam(model.D.parameters(), lr=config.learning_rate, betas=(config.beta_1, config.beta_2))
     return model
+
+
+def _build_small_wgan_loader():
+    dataset = torch.utils.data.TensorDataset(
+        torch.zeros((1, 1, 2, 2), dtype=torch.float32),
+        torch.zeros((1, 2), dtype=torch.float32),
+        torch.zeros((1, 1, 2, 2), dtype=torch.float32),
+    )
+    return torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
 
 
 class TestTrainMergedXlsx(unittest.TestCase):
@@ -276,18 +287,39 @@ class TestTrainMergedXlsx(unittest.TestCase):
         self.assertTrue(config.use_calendar_constraint)
         self.assertTrue(config.use_butterfly_constraint)
         self.assertTrue(config.use_smooth_constraint)
+        self.assertFalse(config.use_early_stopping)
+        self.assertEqual(config.early_stopping_patience, 10)
+        self.assertEqual(config.early_stopping_min_delta, 0.0)
+        self.assertFalse(config.use_reduce_lr_on_plateau)
+        self.assertEqual(config.reduce_lr_factor, 0.5)
+        self.assertEqual(config.reduce_lr_patience, 8)
+        self.assertEqual(config.reduce_lr_min_lr, 1e-5)
 
         overrides = parse_cli_overrides(
             [
                 "use_calendar_constraint=false",
                 "use_butterfly_constraint=true",
                 "use_smooth_constraint=off",
+                "use_early_stopping=true",
+                "early_stopping_patience=15",
+                "early_stopping_min_delta=0.05",
+                "use_reduce_lr_on_plateau=true",
+                "reduce_lr_factor=0.25",
+                "reduce_lr_patience=3",
+                "reduce_lr_min_lr=1e-6",
             ]
         )
         overridden = load_config(config_path="configs/wgan/train_default.yaml", overrides=overrides)
         self.assertFalse(overridden.use_calendar_constraint)
         self.assertTrue(overridden.use_butterfly_constraint)
         self.assertFalse(overridden.use_smooth_constraint)
+        self.assertTrue(overridden.use_early_stopping)
+        self.assertEqual(overridden.early_stopping_patience, 15)
+        self.assertEqual(overridden.early_stopping_min_delta, 0.05)
+        self.assertTrue(overridden.use_reduce_lr_on_plateau)
+        self.assertEqual(overridden.reduce_lr_factor, 0.25)
+        self.assertEqual(overridden.reduce_lr_patience, 3)
+        self.assertEqual(overridden.reduce_lr_min_lr, 1e-6)
 
         with self.assertRaises(ValueError):
             parse_cli_overrides(["use_unknown_constraint=false"])
@@ -354,6 +386,10 @@ class TestTrainMergedXlsx(unittest.TestCase):
 
             self.assertTrue(any(path.name.startswith("run_config_") for path in metrics_dir.iterdir()))
             self.assertFalse((metrics_dir / "loss_curves.png").exists())
+            self.assertFalse((metrics_dir / "training_metrics.csv").exists())
+            self.assertFalse((metrics_dir / "best_checkpoint.json").exists())
+            self.assertFalse((models_dir / "generator_best.pt").exists())
+            self.assertFalse((models_dir / "discriminator_best.pt").exists())
 
     def test_train_vol_script_full_run_saves_loss_curves(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -397,6 +433,22 @@ class TestTrainMergedXlsx(unittest.TestCase):
             self.assertTrue(metrics_rows)
             self.assertIn("g_calendar", metrics_rows[0])
             self.assertIn("val_calendar", metrics_rows[0])
+            self.assertIn("g_lr", metrics_rows[0])
+            self.assertIn("d_lr", metrics_rows[0])
+            csv_path = metrics_dir / "training_metrics.csv"
+            self.assertTrue(csv_path.exists())
+            with csv_path.open(encoding="utf-8", newline="") as handle:
+                csv_rows = list(csv.DictReader(handle))
+            self.assertEqual(len(csv_rows), 1)
+            self.assertIn("g_lr", csv_rows[0])
+            self.assertIn("d_lr", csv_rows[0])
+            best_path = metrics_dir / "best_checkpoint.json"
+            self.assertTrue(best_path.exists())
+            best_payload = json.loads(best_path.read_text(encoding="utf-8"))
+            self.assertEqual(best_payload["monitor_metric"], "val_recon")
+            self.assertEqual(best_payload["best_epoch"], 1)
+            self.assertTrue((models_dir / "generator_best.pt").exists())
+            self.assertTrue((models_dir / "discriminator_best.pt").exists())
 
     def test_train_svi_script_dry_run_succeeds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -432,6 +484,9 @@ class TestTrainMergedXlsx(unittest.TestCase):
             self.assertTrue(stats_path.exists())
             self.assertTrue(any(path.name.startswith("run_config_") for path in metrics_dir.iterdir()))
             self.assertFalse((metrics_dir / "loss_curves.png").exists())
+            self.assertFalse((metrics_dir / "training_metrics.csv").exists())
+            self.assertFalse((metrics_dir / "best_checkpoint.json").exists())
+            self.assertFalse((models_dir / "svi_regressor_best.pt").exists())
 
     def test_train_svi_script_full_run_saves_loss_curves(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -470,6 +525,219 @@ class TestTrainMergedXlsx(unittest.TestCase):
             plot_path = metrics_dir / "loss_curves.png"
             self.assertTrue(plot_path.exists())
             self.assertGreater(plot_path.stat().st_size, 0)
+            metrics_rows = json.loads((metrics_dir / "training_metrics.json").read_text(encoding="utf-8"))
+            self.assertTrue(metrics_rows)
+            self.assertIn("lr", metrics_rows[0])
+            csv_path = metrics_dir / "training_metrics.csv"
+            self.assertTrue(csv_path.exists())
+            with csv_path.open(encoding="utf-8", newline="") as handle:
+                csv_rows = list(csv.DictReader(handle))
+            self.assertEqual(len(csv_rows), 1)
+            self.assertIn("lr", csv_rows[0])
+            best_path = metrics_dir / "best_checkpoint.json"
+            self.assertTrue(best_path.exists())
+            best_payload = json.loads(best_path.read_text(encoding="utf-8"))
+            self.assertEqual(best_payload["monitor_metric"], "val_regression")
+            self.assertEqual(best_payload["best_epoch"], 1)
+            self.assertTrue((models_dir / "svi_regressor_best.pt").exists())
+
+    def test_wgan_early_stopping_saves_best_checkpoint_before_last_epoch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metrics_dir = Path(tmpdir) / "metrics"
+            models_dir = Path(tmpdir) / "models"
+            config = Config(
+                cuda=False,
+                learning_rate=0.1,
+                num_epochs=5,
+                batch_size=1,
+                discriminator_iter=1,
+                noise_dim=4,
+                gen_hidden_dim=8,
+                disc_hidden_dim=8,
+                models_path=str(models_dir),
+                outputs_path=str(models_dir),
+                metrics_path=str(metrics_dir),
+                save_every=10,
+                use_early_stopping=True,
+                early_stopping_patience=2,
+                early_stopping_min_delta=0.0,
+                use_reduce_lr_on_plateau=True,
+                reduce_lr_factor=0.5,
+                reduce_lr_patience=0,
+                reduce_lr_min_lr=0.01,
+            )
+            model = _build_test_wgan(config)
+            train_loader = _build_small_wgan_loader()
+            val_loader = _build_small_wgan_loader()
+            model._evaluate = Mock(
+                side_effect=[
+                    {"val_recon": 0.20, "val_calendar": 0.01, "val_butterfly": 0.01},
+                    {"val_recon": 0.25, "val_calendar": 0.01, "val_butterfly": 0.01},
+                    {"val_recon": 0.30, "val_calendar": 0.01, "val_butterfly": 0.01},
+                ]
+            )
+
+            model.train(train_loader, val_loader)
+
+            metrics_rows = json.loads((metrics_dir / "training_metrics.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(metrics_rows), 3)
+            self.assertAlmostEqual(metrics_rows[0]["g_lr"], 0.1, places=6)
+            self.assertAlmostEqual(metrics_rows[0]["d_lr"], 0.1, places=6)
+            self.assertAlmostEqual(metrics_rows[2]["g_lr"], 0.05, places=6)
+            self.assertAlmostEqual(metrics_rows[2]["d_lr"], 0.05, places=6)
+            with (metrics_dir / "training_metrics.csv").open(encoding="utf-8", newline="") as handle:
+                csv_rows = list(csv.DictReader(handle))
+            self.assertAlmostEqual(float(csv_rows[2]["g_lr"]), 0.05, places=6)
+            self.assertAlmostEqual(float(csv_rows[2]["d_lr"]), 0.05, places=6)
+            best_payload = json.loads((metrics_dir / "best_checkpoint.json").read_text(encoding="utf-8"))
+            self.assertEqual(best_payload["monitor_metric"], "val_recon")
+            self.assertEqual(best_payload["best_epoch"], 1)
+            self.assertAlmostEqual(best_payload["best_metric"], 0.20, places=6)
+            self.assertTrue((models_dir / "generator_best.pt").exists())
+            self.assertTrue((models_dir / "discriminator_best.pt").exists())
+            self.assertTrue((models_dir / "generator.pt").exists())
+            self.assertTrue((models_dir / "discriminator.pt").exists())
+            self.assertAlmostEqual(model.g_optimizer.param_groups[0]["lr"], 0.025, places=6)
+            self.assertAlmostEqual(model.d_optimizer.param_groups[0]["lr"], 0.025, places=6)
+
+    def test_wgan_training_without_validation_skips_best_checkpoint_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metrics_dir = Path(tmpdir) / "metrics"
+            models_dir = Path(tmpdir) / "models"
+            config = Config(
+                cuda=False,
+                learning_rate=0.1,
+                num_epochs=2,
+                batch_size=1,
+                discriminator_iter=1,
+                noise_dim=4,
+                gen_hidden_dim=8,
+                disc_hidden_dim=8,
+                models_path=str(models_dir),
+                outputs_path=str(models_dir),
+                metrics_path=str(metrics_dir),
+                save_every=10,
+                use_early_stopping=True,
+                early_stopping_patience=1,
+                use_reduce_lr_on_plateau=True,
+                reduce_lr_factor=0.5,
+                reduce_lr_patience=0,
+                reduce_lr_min_lr=0.01,
+            )
+            model = _build_test_wgan(config)
+
+            model.train(_build_small_wgan_loader(), None)
+
+            metrics_rows = json.loads((metrics_dir / "training_metrics.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(metrics_rows), 2)
+            self.assertTrue((metrics_dir / "training_metrics.csv").exists())
+            self.assertTrue(all(abs(row["g_lr"] - 0.1) < 1e-9 for row in metrics_rows))
+            self.assertTrue(all(abs(row["d_lr"] - 0.1) < 1e-9 for row in metrics_rows))
+            self.assertFalse((metrics_dir / "best_checkpoint.json").exists())
+            self.assertFalse((models_dir / "generator_best.pt").exists())
+            self.assertFalse((models_dir / "discriminator_best.pt").exists())
+            self.assertAlmostEqual(model.g_optimizer.param_groups[0]["lr"], 0.1, places=6)
+            self.assertAlmostEqual(model.d_optimizer.param_groups[0]["lr"], 0.1, places=6)
+
+    def test_svi_early_stopping_saves_best_checkpoint_before_last_epoch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = self._write_svi_workbook(tmpdir)
+            metrics_dir = Path(tmpdir) / "metrics"
+            models_dir = Path(tmpdir) / "models"
+            config = Config(
+                data_path=str(workbook_path),
+                sheet_name="news_direction_audit",
+                text_embedding_mode="hd",
+                train_ratio=0.67,
+                batch_size=2,
+                num_epochs=5,
+                learning_rate=0.1,
+                num_workers=0,
+                cuda=False,
+                max_slices=4,
+                svi_hidden_dim=16,
+                models_path=str(models_dir),
+                outputs_path=str(models_dir),
+                metrics_path=str(metrics_dir),
+                normalization_stats_path=str(metrics_dir / "normalization_stats.json"),
+                use_early_stopping=True,
+                early_stopping_patience=2,
+                early_stopping_min_delta=0.0,
+                use_reduce_lr_on_plateau=True,
+                reduce_lr_factor=0.5,
+                reduce_lr_patience=0,
+                reduce_lr_min_lr=0.01,
+            )
+            trainer = SviXlsxTrainer(config)
+            trainer._run_epoch = Mock(
+                side_effect=[
+                    {"train_total": 1.0, "train_regression": 0.8, "train_count": 0.2},
+                    {"val_total": 0.6, "val_regression": 0.5, "val_count": 0.1},
+                    {"train_total": 0.9, "train_regression": 0.7, "train_count": 0.2},
+                    {"val_total": 0.7, "val_regression": 0.6, "val_count": 0.1},
+                    {"train_total": 0.85, "train_regression": 0.65, "train_count": 0.2},
+                    {"val_total": 0.8, "val_regression": 0.7, "val_count": 0.1},
+                ]
+            )
+
+            trainer.start_train()
+
+            metrics_rows = json.loads((metrics_dir / "training_metrics.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(metrics_rows), 3)
+            self.assertAlmostEqual(metrics_rows[0]["lr"], 0.1, places=6)
+            self.assertAlmostEqual(metrics_rows[2]["lr"], 0.05, places=6)
+            with (metrics_dir / "training_metrics.csv").open(encoding="utf-8", newline="") as handle:
+                csv_rows = list(csv.DictReader(handle))
+            self.assertAlmostEqual(float(csv_rows[2]["lr"]), 0.05, places=6)
+            best_payload = json.loads((metrics_dir / "best_checkpoint.json").read_text(encoding="utf-8"))
+            self.assertEqual(best_payload["monitor_metric"], "val_regression")
+            self.assertEqual(best_payload["best_epoch"], 1)
+            self.assertAlmostEqual(best_payload["best_metric"], 0.5, places=6)
+            self.assertTrue((models_dir / "svi_regressor_best.pt").exists())
+            self.assertTrue((models_dir / "svi_regressor.pt").exists())
+            self.assertIsNotNone(trainer.optimizer)
+            self.assertAlmostEqual(trainer.optimizer.param_groups[0]["lr"], 0.025, places=6)
+
+    def test_svi_training_without_validation_skips_best_checkpoint_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = self._write_svi_workbook(tmpdir)
+            metrics_dir = Path(tmpdir) / "metrics"
+            models_dir = Path(tmpdir) / "models"
+            config = Config(
+                data_path=str(workbook_path),
+                sheet_name="news_direction_audit",
+                text_embedding_mode="hd",
+                train_ratio=1.0,
+                batch_size=2,
+                num_epochs=2,
+                learning_rate=0.1,
+                num_workers=0,
+                cuda=False,
+                max_slices=4,
+                svi_hidden_dim=16,
+                models_path=str(models_dir),
+                outputs_path=str(models_dir),
+                metrics_path=str(metrics_dir),
+                normalization_stats_path=str(metrics_dir / "normalization_stats.json"),
+                use_early_stopping=True,
+                early_stopping_patience=1,
+                use_reduce_lr_on_plateau=True,
+                reduce_lr_factor=0.5,
+                reduce_lr_patience=0,
+                reduce_lr_min_lr=0.01,
+            )
+            trainer = SviXlsxTrainer(config)
+
+            trainer.start_train()
+
+            metrics_rows = json.loads((metrics_dir / "training_metrics.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(metrics_rows), 2)
+            self.assertTrue((metrics_dir / "training_metrics.csv").exists())
+            self.assertTrue(all(abs(row["lr"] - 0.1) < 1e-9 for row in metrics_rows))
+            self.assertFalse((metrics_dir / "best_checkpoint.json").exists())
+            self.assertFalse((models_dir / "svi_regressor_best.pt").exists())
+            self.assertIsNotNone(trainer.optimizer)
+            self.assertAlmostEqual(trainer.optimizer.param_groups[0]["lr"], 0.1, places=6)
 
     def test_plot_training_curves_skips_missing_metrics(self):
         with tempfile.TemporaryDirectory() as tmpdir:

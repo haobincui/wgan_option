@@ -46,6 +46,10 @@ class Config:
 
     # Optimization
     learning_rate: float = 0.0002
+    use_reduce_lr_on_plateau: bool = False
+    reduce_lr_factor: float = 0.5
+    reduce_lr_patience: int = 8
+    reduce_lr_min_lr: float = 1e-5
     num_epochs: int = 100
     batch_size: int = 16
     beta_1: float = 0.5
@@ -77,6 +81,9 @@ class Config:
     metrics_path: str = "outputs/metrics"
     normalization_stats_path: str = "outputs/metrics/normalization_stats.json"
     save_every: int = 10
+    use_early_stopping: bool = False
+    early_stopping_patience: int = 10
+    early_stopping_min_delta: float = 0.0
 
     # SVI regressor
     svi_hidden_dim: int = 256

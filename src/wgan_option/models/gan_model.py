@@ -1,4 +1,3 @@
-import json
 import math
 import os
 import random
@@ -10,10 +9,12 @@ import torch
 import torch.nn.functional as F
 from torch import autograd
 from torch.optim import Adam
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from wgan_option.config import Config
 from wgan_option.models.discriminator import Discriminator
 from wgan_option.models.generator import Generator
+from wgan_option.utils.training_artifacts import write_best_checkpoint, write_metrics_csv, write_metrics_json
 from wgan_option.utils.visualization import plot_training_curves
 
 
@@ -85,6 +86,44 @@ class WGAN_GP:
 
     def _to_device(self, tensor: torch.Tensor) -> torch.Tensor:
         return tensor.to(self.device, non_blocking=True)
+
+    @staticmethod
+    def _optimizer_lr(optimizer) -> float:
+        return float(optimizer.param_groups[0]["lr"])
+
+    def _create_plateau_scheduler(self, optimizer) -> ReduceLROnPlateau:
+        return ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=float(self.config.reduce_lr_factor),
+            patience=int(self.config.reduce_lr_patience),
+            min_lr=float(self.config.reduce_lr_min_lr),
+        )
+
+    def _step_plateau_scheduler(
+        self,
+        *,
+        scheduler: Optional[ReduceLROnPlateau],
+        optimizer,
+        metric_name: str,
+        metric_value: float,
+        logger,
+        label: str,
+    ) -> None:
+        if scheduler is None:
+            return
+        old_lr = self._optimizer_lr(optimizer)
+        scheduler.step(metric_value)
+        new_lr = self._optimizer_lr(optimizer)
+        if not math.isclose(old_lr, new_lr):
+            logger.info(
+                "%s ReduceLROnPlateau lowered LR from %.6g to %.6g using %s=%.6f",
+                label,
+                old_lr,
+                new_lr,
+                metric_name,
+                metric_value,
+            )
 
     def _normal_cdf(self, x: torch.Tensor) -> torch.Tensor:
         return 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
@@ -229,22 +268,36 @@ class WGAN_GP:
 
     def _init_metrics_file(self):
         self._metrics_file = os.path.join(self.metrics_path, "training_metrics.json")
+        self._metrics_csv_file = os.path.join(self.metrics_path, "training_metrics.csv")
+        self._best_checkpoint_file = os.path.join(self.metrics_path, "best_checkpoint.json")
         self._metrics_rows = []
-        with open(self._metrics_file, "w", encoding="utf-8") as f:
-            json.dump([], f)
+        write_metrics_json([], self._metrics_file)
+        for stale_path in (
+            self._metrics_csv_file,
+            self._best_checkpoint_file,
+            os.path.join(self.model_path, "generator_best.pt"),
+            os.path.join(self.model_path, "discriminator_best.pt"),
+        ):
+            if os.path.exists(stale_path):
+                os.remove(stale_path)
 
     def _append_metrics_row(self, row):
         self._metrics_rows.append(row)
-        with open(self._metrics_file, "w", encoding="utf-8") as f:
-            json.dump(self._metrics_rows, f, indent=2, ensure_ascii=False)
+        self._write_metrics(self._metrics_rows)
 
     def _write_metrics(self, metrics_rows):
-        output_file = os.path.join(self.metrics_path, "training_metrics.json")
-        with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(metrics_rows, f, indent=2, ensure_ascii=False)
+        write_metrics_json(metrics_rows, self._metrics_file)
+        write_metrics_csv(metrics_rows, self._metrics_csv_file)
 
-    def save_model(self, epoch: Optional[int] = None):
-        suffix = f"_epoch_{epoch:04d}" if epoch is not None else ""
+    def save_model(self, epoch: Optional[int] = None, *, label: Optional[str] = None) -> Dict[str, str]:
+        if epoch is not None and label is not None:
+            raise ValueError("Specify either epoch or label when saving a model, not both.")
+
+        suffix = ""
+        if label:
+            suffix = f"_{label}"
+        elif epoch is not None:
+            suffix = f"_epoch_{epoch:04d}"
         generator_path = os.path.join(self.model_path, f"generator{suffix}.pt")
         discriminator_path = os.path.join(self.model_path, f"discriminator{suffix}.pt")
 
@@ -264,6 +317,10 @@ class WGAN_GP:
             },
             discriminator_path,
         )
+        return {
+            "generator": generator_path,
+            "discriminator": discriminator_path,
+        }
 
     def _save_loss_curves(self, metrics_rows, logger) -> None:
         output_path = os.path.join(self.metrics_path, "loss_curves.png")
@@ -289,6 +346,49 @@ class WGAN_GP:
 
         metrics_rows = []
         num_batches = len(train_loader)
+        monitor_metric = "val_recon"
+        best_metric = None
+        best_epoch = None
+        patience = max(1, int(self.config.early_stopping_patience))
+        min_delta = float(self.config.early_stopping_min_delta)
+        best_tracking_enabled = val_loader is not None
+        early_stopping_enabled = bool(self.config.use_early_stopping and best_tracking_enabled)
+        g_scheduler: Optional[ReduceLROnPlateau] = None
+        d_scheduler: Optional[ReduceLROnPlateau] = None
+        epochs_without_improvement = 0
+
+        if not self.config.use_reduce_lr_on_plateau:
+            logger.info("ReduceLROnPlateau is disabled.")
+        elif not best_tracking_enabled:
+            logger.info("ReduceLROnPlateau requested but disabled because no validation split is available.")
+        else:
+            g_scheduler = self._create_plateau_scheduler(self.g_optimizer)
+            d_scheduler = self._create_plateau_scheduler(self.d_optimizer)
+            logger.info(
+                "ReduceLROnPlateau enabled for generator and discriminator using %s (factor=%.3f, patience=%d, min_lr=%.6g).",
+                monitor_metric,
+                float(self.config.reduce_lr_factor),
+                int(self.config.reduce_lr_patience),
+                float(self.config.reduce_lr_min_lr),
+            )
+
+        if not best_tracking_enabled:
+            logger.info("Validation unavailable; best-checkpoint tracking disabled.")
+            if self.config.use_early_stopping:
+                logger.info("Early stopping requested but disabled because no validation split is available.")
+        elif early_stopping_enabled:
+            logger.info(
+                "Best-checkpoint tracking enabled using %s. Early stopping active (patience=%d, min_delta=%.6f).",
+                monitor_metric,
+                patience,
+                min_delta,
+            )
+        else:
+            logger.info(
+                "Best-checkpoint tracking enabled using %s. Early stopping is disabled.",
+                monitor_metric,
+            )
+
         for epoch in range(1, self.num_epochs + 1):
             running: Dict[str, list] = {}
             for batch_idx, (current_surface, text_embedding, real_future) in enumerate(train_loader, 1):
@@ -318,6 +418,8 @@ class WGAN_GP:
                 **{key: float(np.mean(values)) for key, values in running.items() if values},
             }
             epoch_stats.update(self._evaluate(val_loader))
+            epoch_stats["g_lr"] = self._optimizer_lr(self.g_optimizer)
+            epoch_stats["d_lr"] = self._optimizer_lr(self.d_optimizer)
             metrics_rows.append(epoch_stats)
             self._append_metrics_row(epoch_stats)
 
@@ -336,9 +438,70 @@ class WGAN_GP:
                 val_info,
             )
 
+            if best_tracking_enabled and monitor_metric in epoch_stats:
+                current_metric = float(epoch_stats[monitor_metric])
+                if best_metric is None or current_metric < (best_metric - min_delta):
+                    best_metric = current_metric
+                    best_epoch = epoch
+                    epochs_without_improvement = 0
+                    artifact_paths = self.save_model(label="best")
+                    write_best_checkpoint(
+                        {
+                            "monitor_metric": monitor_metric,
+                            "best_epoch": int(epoch),
+                            "best_metric": current_metric,
+                            "artifacts": artifact_paths,
+                        },
+                        self._best_checkpoint_file,
+                    )
+                    logger.info(
+                        "New best checkpoint saved at epoch %d with %s=%.6f",
+                        epoch,
+                        monitor_metric,
+                        current_metric,
+                    )
+                elif early_stopping_enabled:
+                    epochs_without_improvement += 1
+                    logger.info(
+                        "Early stopping patience %d/%d without %s improvement (current=%.6f, best=%.6f at epoch %d)",
+                        epochs_without_improvement,
+                        patience,
+                        monitor_metric,
+                        current_metric,
+                        best_metric,
+                        best_epoch,
+                    )
+
+                self._step_plateau_scheduler(
+                    scheduler=g_scheduler,
+                    optimizer=self.g_optimizer,
+                    metric_name=monitor_metric,
+                    metric_value=current_metric,
+                    logger=logger,
+                    label="Generator",
+                )
+                self._step_plateau_scheduler(
+                    scheduler=d_scheduler,
+                    optimizer=self.d_optimizer,
+                    metric_name=monitor_metric,
+                    metric_value=current_metric,
+                    logger=logger,
+                    label="Discriminator",
+                )
+
             if epoch % self.config.save_every == 0:
                 self.save_model(epoch)
                 logger.info("Checkpoint saved at epoch %d", epoch)
+
+            if early_stopping_enabled and epochs_without_improvement >= patience:
+                logger.info(
+                    "Early stopping triggered at epoch %d. Best %s=%.6f at epoch %d.",
+                    epoch,
+                    monitor_metric,
+                    best_metric,
+                    best_epoch,
+                )
+                break
 
         self.save_model()
         self._write_metrics(metrics_rows)
