@@ -224,4 +224,3 @@ Therefore this implementation is fully runnable for architecture validation, but
 - generator: `src/wgan_option/models/generator.py`
 - discriminator: `src/wgan_option/models/discriminator.py`
 - training and losses: `src/wgan_option/models/gan_model.py`
-- train entry: `src/wgan_option/train.py`, `scripts/train.py`

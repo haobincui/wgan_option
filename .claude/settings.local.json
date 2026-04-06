@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import torch; import numpy; import pandas; import yaml; import openpyxl; print\\('All core dependencies OK'\\); print\\('torch:', torch.__version__\\); print\\('numpy:', numpy.__version__\\); print\\('pandas:', pandas.__version__\\)\")",
+      "Bash(conda env:*)",
+      "Bash(/Users/haobincui/miniconda3/envs/py312/bin/python -c \"import torch; import numpy; import pandas; import yaml; print\\('torch:', torch.__version__\\); print\\('numpy:', numpy.__version__\\); print\\('pandas:', pandas.__version__\\); print\\('OK'\\)\")",
+      "Bash(/Users/haobincui/miniconda3/envs/option_data_processor/bin/python -c \"import torch; import numpy; import pandas; import yaml; print\\('torch:', torch.__version__\\); print\\('numpy:', numpy.__version__\\); print\\('pandas:', pandas.__version__\\); print\\('OK'\\)\")",
+      "Bash(/Users/haobincui/miniconda3/envs/py312/bin/python -c \"import openpyxl; print\\('openpyxl:', openpyxl.__version__\\)\")",
+      "Bash(/Users/haobincui/miniconda3/envs/py312/bin/python -c \"import wgan_option; print\\('wgan_option importable'\\)\")",
+      "Bash(/Users/haobincui/miniconda3/envs/py312/bin/python -c \"import sys; sys.path.insert\\(0, 'src'\\); import wgan_option; print\\('wgan_option importable'\\)\")",
+      "Bash(/Users/haobincui/miniconda3/envs/py312/bin/pip list:*)",
+      "Bash(/Users/haobincui/miniconda3/envs/py312/bin/python -c ':*)",
+      "Bash(/Users/haobincui/miniconda3/envs/py312/bin/python scripts/train/train_vol.py --dry-run)",
+      "Bash(/Users/haobincui/miniconda3/envs/py312/bin/pip show:*)",
+      "Bash(PYTHONPATH=src /Users/haobincui/miniconda3/envs/py312/bin/python scripts/train/train_vol.py --dry-run)",
+      "Bash(PYTHONPATH=src /Users/haobincui/miniconda3/envs/py312/bin/python scripts/train/train_svi.py --dry-run)",
+      "Bash(PYTHONPATH=src /Users/haobincui/miniconda3/envs/py312/bin/python scripts/train/main.py --help)",
+      "Bash(PYTHONPATH=src /Users/haobincui/miniconda3/envs/py312/bin/python scripts/train/main.py vol-xlsx --dry-run)",
+      "Bash(PYTHONPATH=src /Users/haobincui/miniconda3/envs/py312/bin/python -m pytest tests/test_scripts/test_train_xlsx.py -v)",
+      "Bash(PYTHONPATH=src /Users/haobincui/miniconda3/envs/py312/bin/python -m unittest tests.test_scripts.test_train_xlsx -v)",
+      "Bash(/Users/haobincui/miniconda3/envs/py312/bin/python scripts/train/train_svi.py --dry-run)",
+      "Bash(/Users/haobincui/miniconda3/envs/py312/bin/python scripts/train/main.py vol-xlsx --dry-run)",
+      "Bash(/Users/haobincui/miniconda3/envs/py312/bin/python scripts/train/main.py svi-xlsx --dry-run)"
+    ]
+  }
+}

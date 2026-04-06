@@ -1,0 +1,39 @@
+# Data
+data_path: data/processed_excel_20260330-01/merged_vol.xlsx
+sheet_name: gan_input_ready
+text_embedding_mode: hd
+train_ratio: 0.8
+
+# Model dimensions
+channels: 1
+embedding_dim: 1024
+noise_dim: 32
+gen_hidden_dim: 512
+disc_hidden_dim: 256
+
+# Optimization
+learning_rate: 0.0002
+num_epochs: 100
+batch_size: 16
+beta_1: 0.5
+beta_2: 0.9
+discriminator_iter: 5
+lambda_gp: 10.0
+
+# Modified loss weights
+lambda_recon: 10.0
+lambda_calendar: 2.0
+lambda_butterfly: 2.0
+lambda_smooth: 0.1
+
+# Runtime
+seed: 42
+cuda: true
+num_workers: 0
+save_every: 10
+
+# Paths
+models_path: outputs/vol_xlsx/checkpoints
+outputs_path: outputs/vol_xlsx/checkpoints
+samples_path: outputs/vol_xlsx/samples
+metrics_path: outputs/vol_xlsx/metrics

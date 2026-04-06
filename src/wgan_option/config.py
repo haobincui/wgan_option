@@ -18,6 +18,9 @@ class Config:
     embedding_column: str = "HD_embedding"
     news_date_column: str = "PD"
     processed_cache_path: str = "data/processed/bond_option_dataset.pt"
+    data_path: str = ""
+    sheet_name: str = "gan_input_ready"
+    text_embedding_mode: str = "hd"
 
     # Surface grid
     strike_bins: int = 16
@@ -55,19 +58,26 @@ class Config:
     lambda_calendar: float = 2.0
     lambda_butterfly: float = 2.0
     lambda_smooth: float = 0.1
+    count_loss_weight: float = 0.2
 
     # Runtime
     seed: int = 42
     cuda: bool = torch.cuda.is_available()
     num_workers: int = 0
     use_cache: bool = True
+    max_slices: int = 4
 
     # Paths
     models_path: str = "outputs/checkpoints"
     outputs_path: str = "outputs/checkpoints"
     samples_path: str = "outputs/samples"
     metrics_path: str = "outputs/metrics"
+    normalization_stats_path: str = "outputs/metrics/normalization_stats.json"
     save_every: int = 10
+
+    # SVI regressor
+    svi_hidden_dim: int = 256
+    svi_dropout: float = 0.1
 
 
 def config_to_dict(config: Config) -> Dict[str, Any]:

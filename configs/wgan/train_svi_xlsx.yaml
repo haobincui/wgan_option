@@ -1,0 +1,32 @@
+# Data
+data_path: data/processed_excel_20260330-01/merged_svi.xlsx
+sheet_name: news_direction_audit
+text_embedding_mode: hd
+train_ratio: 0.8
+max_slices: 4
+
+# Model dimensions
+embedding_dim: 1024
+svi_hidden_dim: 256
+svi_dropout: 0.1
+
+# Optimization
+learning_rate: 0.0002
+num_epochs: 100
+batch_size: 16
+beta_1: 0.5
+beta_2: 0.9
+count_loss_weight: 0.2
+
+# Runtime
+seed: 42
+cuda: true
+num_workers: 0
+save_every: 10
+
+# Paths
+models_path: outputs/svi_xlsx/checkpoints
+outputs_path: outputs/svi_xlsx/checkpoints
+samples_path: outputs/svi_xlsx/samples
+metrics_path: outputs/svi_xlsx/metrics
+normalization_stats_path: outputs/svi_xlsx/metrics/normalization_stats.json
