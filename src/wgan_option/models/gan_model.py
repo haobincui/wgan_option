@@ -1,4 +1,4 @@
-import csv
+import json
 import math
 import os
 import random
@@ -223,14 +223,21 @@ class WGAN_GP:
             "val_butterfly": float(np.mean(butterfly)) if butterfly else 0.0,
         }
 
+    def _init_metrics_file(self):
+        self._metrics_file = os.path.join(self.metrics_path, "training_metrics.json")
+        self._metrics_rows = []
+        with open(self._metrics_file, "w", encoding="utf-8") as f:
+            json.dump([], f)
+
+    def _append_metrics_row(self, row):
+        self._metrics_rows.append(row)
+        with open(self._metrics_file, "w", encoding="utf-8") as f:
+            json.dump(self._metrics_rows, f, indent=2, ensure_ascii=False)
+
     def _write_metrics(self, metrics_rows):
-        output_file = os.path.join(self.metrics_path, "training_metrics.csv")
-        fieldnames = sorted({key for row in metrics_rows for key in row.keys()})
-        with open(output_file, "w", newline="", encoding="utf-8") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            for row in metrics_rows:
-                writer.writerow(row)
+        output_file = os.path.join(self.metrics_path, "training_metrics.json")
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(metrics_rows, f, indent=2, ensure_ascii=False)
 
     def save_model(self, epoch: Optional[int] = None):
         suffix = f"_epoch_{epoch:04d}" if epoch is not None else ""
@@ -255,10 +262,16 @@ class WGAN_GP:
         )
 
     def train(self, train_loader, val_loader=None):
+        import logging
+        logger = logging.getLogger("wgan_option.trainer")
+
+        self._init_metrics_file()
+
         metrics_rows = []
+        num_batches = len(train_loader)
         for epoch in range(1, self.num_epochs + 1):
             running: Dict[str, list] = {}
-            for current_surface, text_embedding, real_future in train_loader:
+            for batch_idx, (current_surface, text_embedding, real_future) in enumerate(train_loader, 1):
                 current_surface = self._to_device(current_surface)
                 text_embedding = self._to_device(text_embedding)
                 real_future = self._to_device(real_future)
@@ -273,25 +286,39 @@ class WGAN_GP:
                 for key, value in g_stats.items():
                     running.setdefault(key, []).append(value)
 
+                if batch_idx == 1 or batch_idx % 20 == 0 or batch_idx == num_batches:
+                    logger.info(
+                        "[Epoch %04d/%04d] Batch %d/%d  D=%.4f G=%.4f",
+                        epoch, self.num_epochs, batch_idx, num_batches,
+                        d_stats.get("d_total", 0.0), g_stats.get("g_total", 0.0),
+                    )
+
             epoch_stats = {
                 "epoch": epoch,
                 **{key: float(np.mean(values)) for key, values in running.items() if values},
             }
             epoch_stats.update(self._evaluate(val_loader))
             metrics_rows.append(epoch_stats)
+            self._append_metrics_row(epoch_stats)
 
-            if epoch == 1 or epoch % 5 == 0:
-                print(
-                    f"[Epoch {epoch:04d}/{self.num_epochs}] "
-                    f"D={epoch_stats.get('d_total', 0.0):.4f} "
-                    f"G={epoch_stats.get('g_total', 0.0):.4f} "
-                    f"Recon={epoch_stats.get('g_recon', 0.0):.4f} "
-                    f"Cal={epoch_stats.get('g_calendar', 0.0):.4f} "
-                    f"Bfly={epoch_stats.get('g_butterfly', 0.0):.4f}"
-                )
+            val_info = ""
+            if "val_recon" in epoch_stats:
+                val_info = f" ValRecon={epoch_stats['val_recon']:.4f}"
+
+            logger.info(
+                "[Epoch %04d/%04d] D=%.4f G=%.4f Recon=%.4f Cal=%.4f Bfly=%.4f%s",
+                epoch, self.num_epochs,
+                epoch_stats.get("d_total", 0.0),
+                epoch_stats.get("g_total", 0.0),
+                epoch_stats.get("g_recon", 0.0),
+                epoch_stats.get("g_calendar", 0.0),
+                epoch_stats.get("g_butterfly", 0.0),
+                val_info,
+            )
 
             if epoch % self.config.save_every == 0:
                 self.save_model(epoch)
+                logger.info("Checkpoint saved at epoch %d", epoch)
 
         self.save_model()
         self._write_metrics(metrics_rows)

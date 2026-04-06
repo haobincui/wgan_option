@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import json
 import logging
 import os
@@ -70,8 +69,18 @@ class SviXlsxTrainer:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
         self.logger.info("Normalization stats saved to: %s", output_path)
 
+    def _log_device_info(self):
+        if torch.cuda.is_available():
+            self.logger.info("CUDA available: %s (%.1f GB)", torch.cuda.get_device_name(0), torch.cuda.get_device_properties(0).total_mem / 1024**3)
+        else:
+            self.logger.info("CUDA not available, using CPU")
+        self.logger.info("Device: %s", self.device)
+
     def setup(self):
-        self.logger.info("*** Load merged SVI dataset ***")
+        self._log_device_info()
+
+        self.logger.info("*** Loading merged SVI dataset ***")
+        self.logger.info("Data source: %s (sheet: %s)", self.config.data_path, self.config.sheet_name)
         self.bundle = create_svi_xlsx_dataloaders(self.config)
         self.logger.info(
             "Dataset ready: train_samples=%s, val_samples=%s, input_dim=%s, regression_dim=%s, embedding_dim=%s",
@@ -82,7 +91,7 @@ class SviXlsxTrainer:
             self.bundle.embedding_dim,
         )
 
-        self.logger.info("*** Initialize SVI regressor ***")
+        self.logger.info("*** Initializing SVI regressor ***")
         self.model = SviRegressor(
             current_input_dim=self.bundle.current_input_dim,
             embedding_dim=self.bundle.embedding_dim,
@@ -91,6 +100,8 @@ class SviXlsxTrainer:
             hidden_dim=self.config.svi_hidden_dim,
             dropout=self.config.svi_dropout,
         ).to(self.device)
+        total_params = sum(p.numel() for p in self.model.parameters())
+        self.logger.info("Model initialized: %s parameters", total_params)
         self.optimizer = Adam(
             self.model.parameters(),
             lr=self.config.learning_rate,
@@ -156,14 +167,21 @@ class SviXlsxTrainer:
             f"{prefix}_count": float(np.mean(running["count"])) if running["count"] else 0.0,
         }
 
+    def _init_metrics_file(self):
+        self._metrics_file = os.path.join(self.config.metrics_path, "training_metrics.json")
+        self._metrics_rows = []
+        with open(self._metrics_file, "w", encoding="utf-8") as f:
+            json.dump([], f)
+
+    def _append_metrics_row(self, row):
+        self._metrics_rows.append(row)
+        with open(self._metrics_file, "w", encoding="utf-8") as f:
+            json.dump(self._metrics_rows, f, indent=2, ensure_ascii=False)
+
     def _write_metrics(self, metrics_rows):
-        output_file = os.path.join(self.config.metrics_path, "training_metrics.csv")
-        fieldnames = sorted({key for row in metrics_rows for key in row.keys()})
-        with open(output_file, "w", newline="", encoding="utf-8") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            for row in metrics_rows:
-                writer.writerow(row)
+        output_file = os.path.join(self.config.metrics_path, "training_metrics.json")
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(metrics_rows, f, indent=2, ensure_ascii=False)
 
     def save_model(self, epoch: Optional[int] = None):
         assert self.model is not None
@@ -189,26 +207,34 @@ class SviXlsxTrainer:
         self._save_run_config()
         assert self.bundle is not None
         metrics_rows = []
-        self.logger.info("*** Start SVI training ***")
+        self._init_metrics_file()
+        self.logger.info("*** Start SVI training: %s epochs, batch_size=%s, lr=%s ***",
+                         self.config.num_epochs, self.config.batch_size, self.config.learning_rate)
         for epoch in range(1, int(self.config.num_epochs) + 1):
             epoch_stats = {"epoch": epoch}
             epoch_stats.update(self._run_epoch(self.bundle.train_loader, train=True))
             if self.bundle.val_loader is not None:
                 epoch_stats.update(self._run_epoch(self.bundle.val_loader, train=False))
             metrics_rows.append(epoch_stats)
+            self._append_metrics_row(epoch_stats)
 
-            if epoch == 1 or epoch % 5 == 0:
-                self.logger.info(
-                    "[Epoch %04d/%04d] TrainTotal=%.4f TrainReg=%.4f TrainCount=%.4f",
-                    epoch,
-                    int(self.config.num_epochs),
-                    epoch_stats.get("train_total", 0.0),
-                    epoch_stats.get("train_regression", 0.0),
-                    epoch_stats.get("train_count", 0.0),
-                )
+            val_info = ""
+            if "val_total" in epoch_stats:
+                val_info = f" ValTotal={epoch_stats['val_total']:.4f} ValReg={epoch_stats.get('val_regression', 0.0):.4f}"
+
+            self.logger.info(
+                "[Epoch %04d/%04d] TrainTotal=%.4f TrainReg=%.4f TrainCount=%.4f%s",
+                epoch,
+                int(self.config.num_epochs),
+                epoch_stats.get("train_total", 0.0),
+                epoch_stats.get("train_regression", 0.0),
+                epoch_stats.get("train_count", 0.0),
+                val_info,
+            )
 
             if epoch % int(self.config.save_every) == 0:
                 self.save_model(epoch)
+                self.logger.info("Checkpoint saved at epoch %d", epoch)
 
         self.save_model()
         self._write_metrics(metrics_rows)

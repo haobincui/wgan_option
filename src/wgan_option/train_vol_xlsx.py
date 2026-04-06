@@ -14,7 +14,10 @@ class VolSurfaceXlsxTrainer(WGANTrainer):
     """Run the existing WGAN-GP on merged vol-surface workbook rows."""
 
     def setup(self):
-        self.logger.info("*** Load merged vol-surface dataset ***")
+        self._log_device_info()
+
+        self.logger.info("*** Loading merged vol-surface dataset ***")
+        self.logger.info("Data source: %s (sheet: %s)", self.config.data_path, self.config.sheet_name)
         self.bundle = create_vol_surface_xlsx_dataloaders(self.config)
         self.logger.info(
             "Dataset ready: train_samples=%s, val_samples=%s, surface_shape=(%s, %s), embedding_dim=%s",
@@ -25,13 +28,18 @@ class VolSurfaceXlsxTrainer(WGANTrainer):
             self.bundle.embedding_dim,
         )
 
-        self.logger.info("*** Initialize model ***")
+        self.logger.info("*** Initializing model ***")
         self.model = WGAN_GP(
             config=self.config,
             strike_grid=self.bundle.strike_grid,
             maturity_grid_days=self.bundle.maturity_grid_days,
             embedding_dim=self.bundle.embedding_dim,
         )
+        total_params = sum(p.numel() for p in self.model.G.parameters()) + sum(p.numel() for p in self.model.D.parameters())
+        self.logger.info("Model initialized: G params=%s, D params=%s, total=%s",
+                         sum(p.numel() for p in self.model.G.parameters()),
+                         sum(p.numel() for p in self.model.D.parameters()),
+                         total_params)
 
 
 def main(config: Optional[Config] = None):
