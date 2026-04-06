@@ -14,6 +14,7 @@ from torch.optim import Adam
 from wgan_option.config import Config
 from wgan_option.models.discriminator import Discriminator
 from wgan_option.models.generator import Generator
+from wgan_option.utils.visualization import plot_training_curves
 
 
 class WGAN_GP:
@@ -63,6 +64,9 @@ class WGAN_GP:
         self.lambda_calendar = config.lambda_calendar
         self.lambda_butterfly = config.lambda_butterfly
         self.lambda_smooth = config.lambda_smooth
+        self.use_calendar_constraint = config.use_calendar_constraint
+        self.use_butterfly_constraint = config.use_butterfly_constraint
+        self.use_smooth_constraint = config.use_smooth_constraint
         self.num_epochs = config.num_epochs
 
         self.model_path = config.models_path
@@ -158,13 +162,13 @@ class WGAN_GP:
         bfly_penalty = self.butterfly_arbitrage_penalty(fake_future)
         smooth_penalty = self.smoothness_penalty(fake_future)
 
-        g_loss = (
-            adv_loss
-            + self.lambda_recon * recon_loss
-            + self.lambda_calendar * cal_penalty
-            + self.lambda_butterfly * bfly_penalty
-            + self.lambda_smooth * smooth_penalty
-        )
+        g_loss = adv_loss + self.lambda_recon * recon_loss
+        if self.use_calendar_constraint:
+            g_loss = g_loss + self.lambda_calendar * cal_penalty
+        if self.use_butterfly_constraint:
+            g_loss = g_loss + self.lambda_butterfly * bfly_penalty
+        if self.use_smooth_constraint:
+            g_loss = g_loss + self.lambda_smooth * smooth_penalty
         g_loss.backward()
         self.g_optimizer.step()
 
@@ -261,6 +265,22 @@ class WGAN_GP:
             discriminator_path,
         )
 
+    def _save_loss_curves(self, metrics_rows, logger) -> None:
+        output_path = os.path.join(self.metrics_path, "loss_curves.png")
+        plot_training_curves(
+            metrics_rows,
+            title="WGAN Vol Training Loss Curves",
+            metric_groups=(
+                ("Primary losses", ("g_recon", "val_recon", "g_total", "d_total", "gp")),
+                (
+                    "Constraint losses",
+                    ("g_calendar", "g_butterfly", "g_smooth", "val_calendar", "val_butterfly"),
+                ),
+            ),
+            output_path=output_path,
+        )
+        logger.info("Loss curve plot saved to: %s", output_path)
+
     def train(self, train_loader, val_loader=None):
         import logging
         logger = logging.getLogger("wgan_option.trainer")
@@ -322,3 +342,7 @@ class WGAN_GP:
 
         self.save_model()
         self._write_metrics(metrics_rows)
+        try:
+            self._save_loss_curves(metrics_rows, logger)
+        except Exception as exc:
+            logger.warning("Failed to save loss curve plot: %s", exc)

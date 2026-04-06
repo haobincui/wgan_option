@@ -6,7 +6,7 @@ surface_builder:
 
   # Shared raw option data source for surface-related jobs.
   option_data_glob: data/raw/option_data/**/*.csv.gz
-  output_dir: data/processed_excel_20260327-01
+  output_dir: data/processed_excel_20260330-01
 
   # Daily surface generation settings (used by scripts/generate_surface/main.py daily-surface).
   daily_surface:

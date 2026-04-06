@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import numpy as np
 import pandas as pd
 import torch
 
@@ -13,11 +14,13 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from wgan_option.config import Config  # noqa: E402
+from wgan_option.config import Config, load_config, parse_cli_overrides  # noqa: E402
+from wgan_option.models.gan_model import WGAN_GP  # noqa: E402
 from wgan_option.utils.merged_xlsx import (  # noqa: E402
     create_svi_xlsx_dataloaders,
     create_vol_surface_xlsx_dataloaders,
 )
+from wgan_option.utils.visualization import plot_training_curves  # noqa: E402
 
 
 def _load_script_module(path: Path, module_name: str):
@@ -34,6 +37,38 @@ def _surface_values(base: float):
 
 def _json_text(values):
     return json.dumps(list(values), ensure_ascii=False)
+
+
+class _DummyGenerator(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.bias = torch.nn.Parameter(torch.tensor(0.5))
+
+    def forward(self, current_surface, text_embedding):
+        return current_surface + self.bias
+
+
+class _DummyDiscriminator(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.scale = torch.nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, future_surface, current_surface, text_embedding):
+        return future_surface.mean(dim=(1, 2, 3)) * self.scale
+
+
+def _build_test_wgan(config: Config) -> WGAN_GP:
+    model = WGAN_GP(
+        config=config,
+        strike_grid=np.asarray([0.9, 1.1], dtype=np.float32),
+        maturity_grid_days=np.asarray([30.0, 60.0], dtype=np.float32),
+        embedding_dim=2,
+    )
+    model.G = _DummyGenerator().to(model.device)
+    model.D = _DummyDiscriminator().to(model.device)
+    model.g_optimizer = torch.optim.Adam(model.G.parameters(), lr=config.learning_rate, betas=(config.beta_1, config.beta_2))
+    model.d_optimizer = torch.optim.Adam(model.D.parameters(), lr=config.learning_rate, betas=(config.beta_1, config.beta_2))
+    return model
 
 
 class TestTrainMergedXlsx(unittest.TestCase):
@@ -236,6 +271,59 @@ class TestTrainMergedXlsx(unittest.TestCase):
             self.assertEqual(int(future_mask.shape[1]), 4)
             self.assertEqual(future_count.dtype, torch.int64)
 
+    def test_shared_wgan_config_loads_constraint_switches_and_cli_overrides(self):
+        config = load_config(config_path="configs/wgan/train_default.yaml")
+        self.assertTrue(config.use_calendar_constraint)
+        self.assertTrue(config.use_butterfly_constraint)
+        self.assertTrue(config.use_smooth_constraint)
+
+        overrides = parse_cli_overrides(
+            [
+                "use_calendar_constraint=false",
+                "use_butterfly_constraint=true",
+                "use_smooth_constraint=off",
+            ]
+        )
+        overridden = load_config(config_path="configs/wgan/train_default.yaml", overrides=overrides)
+        self.assertFalse(overridden.use_calendar_constraint)
+        self.assertTrue(overridden.use_butterfly_constraint)
+        self.assertFalse(overridden.use_smooth_constraint)
+
+        with self.assertRaises(ValueError):
+            parse_cli_overrides(["use_unknown_constraint=false"])
+
+    def test_wgan_generator_loss_switches_disable_selected_constraints_only(self):
+        config = Config(
+            cuda=False,
+            learning_rate=0.0,
+            lambda_recon=0.0,
+            lambda_calendar=2.0,
+            lambda_butterfly=1.5,
+            lambda_smooth=0.25,
+            use_calendar_constraint=False,
+            use_butterfly_constraint=True,
+            use_smooth_constraint=False,
+            noise_dim=4,
+            gen_hidden_dim=8,
+            disc_hidden_dim=8,
+        )
+        model = _build_test_wgan(config)
+        model.calendar_arbitrage_penalty = Mock(return_value=torch.tensor(1.5, device=model.device))
+        model.butterfly_arbitrage_penalty = Mock(return_value=torch.tensor(2.0, device=model.device))
+        model.smoothness_penalty = Mock(return_value=torch.tensor(3.0, device=model.device))
+
+        stats = model._generator_step(
+            current_surface=torch.zeros((1, 1, 2, 2), device=model.device),
+            text_embedding=torch.zeros((1, 2), device=model.device),
+            real_future=torch.zeros((1, 1, 2, 2), device=model.device),
+        )
+
+        self.assertAlmostEqual(stats["g_calendar"], 1.5, places=6)
+        self.assertAlmostEqual(stats["g_butterfly"], 2.0, places=6)
+        self.assertAlmostEqual(stats["g_smooth"], 3.0, places=6)
+        expected_total = stats["g_adv"] + config.lambda_butterfly * stats["g_butterfly"]
+        self.assertAlmostEqual(stats["g_total"], expected_total, places=6)
+
     def test_train_vol_script_dry_run_succeeds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_vol_workbook(tmpdir)
@@ -265,6 +353,50 @@ class TestTrainMergedXlsx(unittest.TestCase):
             module.main(["--config", str(config_path), "--dry-run"])
 
             self.assertTrue(any(path.name.startswith("run_config_") for path in metrics_dir.iterdir()))
+            self.assertFalse((metrics_dir / "loss_curves.png").exists())
+
+    def test_train_vol_script_full_run_saves_loss_curves(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = self._write_vol_workbook(tmpdir)
+            metrics_dir = Path(tmpdir) / "vol_metrics"
+            models_dir = Path(tmpdir) / "vol_models"
+            config_path = Path(tmpdir) / "train_vol.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_path: {workbook_path}",
+                        "sheet_name: gan_input_ready",
+                        "text_embedding_mode: concat",
+                        "train_ratio: 0.67",
+                        "batch_size: 2",
+                        "num_epochs: 1",
+                        "save_every: 1",
+                        "discriminator_iter: 1",
+                        "noise_dim: 8",
+                        "gen_hidden_dim: 32",
+                        "disc_hidden_dim: 16",
+                        "num_workers: 0",
+                        "cuda: false",
+                        "use_calendar_constraint: false",
+                        f"models_path: {models_dir}",
+                        f"outputs_path: {models_dir}",
+                        f"samples_path: {Path(tmpdir) / 'vol_samples'}",
+                        f"metrics_path: {metrics_dir}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            module = _load_script_module(ROOT_DIR / "scripts/train/train_vol.py", "train_vol_full_script")
+            module.main(["--config", str(config_path)])
+
+            plot_path = metrics_dir / "loss_curves.png"
+            self.assertTrue(plot_path.exists())
+            self.assertGreater(plot_path.stat().st_size, 0)
+            metrics_rows = json.loads((metrics_dir / "training_metrics.json").read_text(encoding="utf-8"))
+            self.assertTrue(metrics_rows)
+            self.assertIn("g_calendar", metrics_rows[0])
+            self.assertIn("val_calendar", metrics_rows[0])
 
     def test_train_svi_script_dry_run_succeeds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -299,6 +431,65 @@ class TestTrainMergedXlsx(unittest.TestCase):
 
             self.assertTrue(stats_path.exists())
             self.assertTrue(any(path.name.startswith("run_config_") for path in metrics_dir.iterdir()))
+            self.assertFalse((metrics_dir / "loss_curves.png").exists())
+
+    def test_train_svi_script_full_run_saves_loss_curves(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = self._write_svi_workbook(tmpdir)
+            metrics_dir = Path(tmpdir) / "svi_metrics"
+            models_dir = Path(tmpdir) / "svi_models"
+            stats_path = metrics_dir / "normalization_stats.json"
+            config_path = Path(tmpdir) / "train_svi.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_path: {workbook_path}",
+                        "sheet_name: news_direction_audit",
+                        "text_embedding_mode: hd",
+                        "train_ratio: 0.67",
+                        "batch_size: 2",
+                        "num_epochs: 1",
+                        "save_every: 1",
+                        "svi_hidden_dim: 16",
+                        "num_workers: 0",
+                        "cuda: false",
+                        "max_slices: 4",
+                        f"models_path: {models_dir}",
+                        f"outputs_path: {models_dir}",
+                        f"samples_path: {Path(tmpdir) / 'svi_samples'}",
+                        f"metrics_path: {metrics_dir}",
+                        f"normalization_stats_path: {stats_path}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            module = _load_script_module(ROOT_DIR / "scripts/train/train_svi.py", "train_svi_full_script")
+            module.main(["--config", str(config_path)])
+
+            plot_path = metrics_dir / "loss_curves.png"
+            self.assertTrue(plot_path.exists())
+            self.assertGreater(plot_path.stat().st_size, 0)
+
+    def test_plot_training_curves_skips_missing_metrics(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plot_path = Path(tmpdir) / "metrics" / "loss_curves.png"
+            output_path = plot_training_curves(
+                [
+                    {"epoch": 1, "train_total": 1.2, "train_count": 0.8},
+                    {"epoch": 2, "train_total": 0.9, "train_count": 0.6},
+                ],
+                title="Train-only Loss Curves",
+                metric_groups=(
+                    ("Primary losses", ("train_total", "val_total")),
+                    ("Count losses", ("train_count", "val_count")),
+                ),
+                output_path=plot_path,
+            )
+
+            self.assertEqual(output_path, plot_path)
+            self.assertTrue(plot_path.exists())
+            self.assertGreater(plot_path.stat().st_size, 0)
 
     def test_unified_train_main_dispatches_to_expected_subcommand(self):
         module = _load_script_module(ROOT_DIR / "scripts/train/main.py", "train_main_script")

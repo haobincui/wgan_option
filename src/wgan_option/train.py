@@ -51,7 +51,9 @@ class WGANTrainer:
         """Log compute device information."""
         import torch
         if torch.cuda.is_available():
-            self.logger.info("CUDA available: %s (%s)", torch.cuda.get_device_name(0), torch.cuda.get_device_properties(0).total_mem / 1024**3)
+            device_props = torch.cuda.get_device_properties(0)
+            total_memory_gb = getattr(device_props, "total_memory", 0) / 1024**3
+            self.logger.info("CUDA available: %s (%.1f GB)", torch.cuda.get_device_name(0), total_memory_gb)
         else:
             self.logger.info("CUDA not available, using CPU")
         self.logger.info("Device: %s", "cuda:0" if (self.config.cuda and torch.cuda.is_available()) else "cpu")

@@ -18,6 +18,7 @@ from torch.optim import Adam
 from wgan_option.config import Config, default_config, save_config_yaml
 from wgan_option.models.svi_regressor import SviRegressor
 from wgan_option.utils.merged_xlsx import SVI_FEATURE_ORDER, SviXlsxBundle, create_svi_xlsx_dataloaders
+from wgan_option.utils.visualization import plot_training_curves
 
 
 class SviXlsxTrainer:
@@ -71,7 +72,9 @@ class SviXlsxTrainer:
 
     def _log_device_info(self):
         if torch.cuda.is_available():
-            self.logger.info("CUDA available: %s (%.1f GB)", torch.cuda.get_device_name(0), torch.cuda.get_device_properties(0).total_mem / 1024**3)
+            device_props = torch.cuda.get_device_properties(0)
+            total_memory_gb = getattr(device_props, "total_memory", 0) / 1024**3
+            self.logger.info("CUDA available: %s (%.1f GB)", torch.cuda.get_device_name(0), total_memory_gb)
         else:
             self.logger.info("CUDA not available, using CPU")
         self.logger.info("Device: %s", self.device)
@@ -202,6 +205,19 @@ class SviXlsxTrainer:
             model_path,
         )
 
+    def _save_loss_curves(self, metrics_rows) -> None:
+        output_path = os.path.join(self.config.metrics_path, "loss_curves.png")
+        plot_training_curves(
+            metrics_rows,
+            title="SVI Training Loss Curves",
+            metric_groups=(
+                ("Primary losses", ("train_total", "val_total", "train_regression", "val_regression")),
+                ("Count losses", ("train_count", "val_count")),
+            ),
+            output_path=output_path,
+        )
+        self.logger.info("Loss curve plot saved to: %s", output_path)
+
     def start_train(self):
         self.setup()
         self._save_run_config()
@@ -238,6 +254,10 @@ class SviXlsxTrainer:
 
         self.save_model()
         self._write_metrics(metrics_rows)
+        try:
+            self._save_loss_curves(metrics_rows)
+        except Exception as exc:
+            self.logger.warning("Failed to save loss curve plot: %s", exc)
         self.logger.info("*** SVI training complete ***")
 
     def dry_run(self):
