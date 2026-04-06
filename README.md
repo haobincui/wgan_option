@@ -139,6 +139,8 @@ reduce_lr_patience: 8
 reduce_lr_min_lr: 1.0e-5
 ```
 
+The global config default is `false`, while individual experiment YAMLs can override it.
+
 Current monitor metrics:
 
 - WGAN vol path: `val_recon`
