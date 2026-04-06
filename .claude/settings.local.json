@@ -20,7 +20,8 @@
       "Bash(PYTHONPATH=src /Users/haobincui/miniconda3/envs/py312/bin/python -m unittest tests.test_scripts.test_train_xlsx -v)",
       "Bash(/Users/haobincui/miniconda3/envs/py312/bin/python scripts/train/train_svi.py --dry-run)",
       "Bash(/Users/haobincui/miniconda3/envs/py312/bin/python scripts/train/main.py vol-xlsx --dry-run)",
-      "Bash(/Users/haobincui/miniconda3/envs/py312/bin/python scripts/train/main.py svi-xlsx --dry-run)"
+      "Bash(/Users/haobincui/miniconda3/envs/py312/bin/python scripts/train/main.py svi-xlsx --dry-run)",
+      "Bash(chmod +x /Users/haobincui/Documents/wgan_option/run_train.sh)"
     ]
   }
 }
