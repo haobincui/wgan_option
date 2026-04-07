@@ -1,6 +1,7 @@
 import importlib.util
 import csv
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -83,6 +84,15 @@ def _build_small_wgan_loader():
 
 
 class TestTrainMergedXlsx(unittest.TestCase):
+    def _find_only_run_dir(self, root: Path) -> Path:
+        run_dirs = sorted(
+            path
+            for path in root.iterdir()
+            if path.is_dir() and re.fullmatch(r"\d{8}_\d{6}", path.name)
+        )
+        self.assertEqual(len(run_dirs), 1)
+        return run_dirs[0]
+
     def _write_vol_workbook(self, tmpdir: str) -> Path:
         path = Path(tmpdir) / "merged_vol.xlsx"
         strike_grid = [0.7 + 0.04 * idx for idx in range(16)]
@@ -191,6 +201,24 @@ class TestTrainMergedXlsx(unittest.TestCase):
         with pd.ExcelWriter(path, engine="openpyxl") as writer:
             df.to_excel(writer, sheet_name="news_direction_audit", index=False)
         return path
+
+    def _write_legacy_training_dir(
+        self,
+        outputs_root: Path,
+        *,
+        family: str,
+        legacy_suffix: str,
+        run_ts: str,
+    ) -> Path:
+        legacy_dir = outputs_root / f"{family}_{legacy_suffix}"
+        checkpoints_dir = legacy_dir / "checkpoints"
+        metrics_dir = legacy_dir / "metrics"
+        checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        (checkpoints_dir / "artifact.bin").write_bytes(b"checkpoint")
+        (metrics_dir / f"run_config_{run_ts}.yaml").write_text("seed: 42\n", encoding="utf-8")
+        (metrics_dir / "training_metrics.json").write_text("[]\n", encoding="utf-8")
+        return legacy_dir
 
     def test_vol_loader_parses_embeddings_and_uses_chronological_split(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -324,6 +352,52 @@ class TestTrainMergedXlsx(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_cli_overrides(["use_unknown_constraint=false"])
 
+    def test_load_config_derives_training_paths_from_output_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "train_vol_output_root.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "data_path: data/example.xlsx",
+                        "sheet_name: gan_input_ready",
+                        "output_root: outputs/vol_xlsx",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path=str(config_path))
+
+            self.assertEqual(config.output_root, "outputs/vol_xlsx")
+            self.assertEqual(config.models_path, "outputs/vol_xlsx/checkpoints")
+            self.assertEqual(config.outputs_path, "outputs/vol_xlsx/checkpoints")
+            self.assertEqual(config.samples_path, "outputs/vol_xlsx/samples")
+            self.assertEqual(config.metrics_path, "outputs/vol_xlsx/metrics")
+            self.assertEqual(
+                config.normalization_stats_path,
+                "outputs/vol_xlsx/metrics/normalization_stats.json",
+            )
+
+    def test_load_config_rejects_output_root_with_explicit_legacy_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "train_conflict.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "data_path: data/example.xlsx",
+                        "sheet_name: gan_input_ready",
+                        "metrics_path: outputs/custom_metrics",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError):
+                load_config(
+                    config_path=str(config_path),
+                    overrides={"output_root": "outputs/vol_xlsx"},
+                )
+
     def test_wgan_generator_loss_switches_disable_selected_constraints_only(self):
         config = Config(
             cuda=False,
@@ -359,8 +433,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
     def test_train_vol_script_dry_run_succeeds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_vol_workbook(tmpdir)
-            metrics_dir = Path(tmpdir) / "vol_metrics"
-            models_dir = Path(tmpdir) / "vol_models"
+            output_root = Path(tmpdir) / "vol_xlsx"
             config_path = Path(tmpdir) / "train_vol.yaml"
             config_path.write_text(
                 "\n".join(
@@ -372,10 +445,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
                         "batch_size: 2",
                         "num_workers: 0",
                         "cuda: false",
-                        f"models_path: {models_dir}",
-                        f"outputs_path: {models_dir}",
-                        f"samples_path: {Path(tmpdir) / 'vol_samples'}",
-                        f"metrics_path: {metrics_dir}",
+                        f"output_root: {output_root}",
                     ]
                 ),
                 encoding="utf-8",
@@ -384,6 +454,11 @@ class TestTrainMergedXlsx(unittest.TestCase):
             module = _load_script_module(ROOT_DIR / "scripts/train/train_vol.py", "train_vol_script")
             module.main(["--config", str(config_path), "--dry-run"])
 
+            run_dir = self._find_only_run_dir(output_root)
+            metrics_dir = run_dir / "metrics"
+            models_dir = run_dir / "checkpoints"
+            samples_dir = run_dir / "samples"
+            self.assertTrue(samples_dir.exists())
             self.assertTrue(any(path.name.startswith("run_config_") for path in metrics_dir.iterdir()))
             self.assertFalse((metrics_dir / "loss_curves.png").exists())
             self.assertFalse((metrics_dir / "training_metrics.csv").exists())
@@ -394,8 +469,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
     def test_train_vol_script_full_run_saves_loss_curves(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_vol_workbook(tmpdir)
-            metrics_dir = Path(tmpdir) / "vol_metrics"
-            models_dir = Path(tmpdir) / "vol_models"
+            output_root = Path(tmpdir) / "vol_xlsx"
             config_path = Path(tmpdir) / "train_vol.yaml"
             config_path.write_text(
                 "\n".join(
@@ -414,10 +488,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
                         "num_workers: 0",
                         "cuda: false",
                         "use_calendar_constraint: false",
-                        f"models_path: {models_dir}",
-                        f"outputs_path: {models_dir}",
-                        f"samples_path: {Path(tmpdir) / 'vol_samples'}",
-                        f"metrics_path: {metrics_dir}",
+                        f"output_root: {output_root}",
                     ]
                 ),
                 encoding="utf-8",
@@ -426,6 +497,11 @@ class TestTrainMergedXlsx(unittest.TestCase):
             module = _load_script_module(ROOT_DIR / "scripts/train/train_vol.py", "train_vol_full_script")
             module.main(["--config", str(config_path)])
 
+            run_dir = self._find_only_run_dir(output_root)
+            metrics_dir = run_dir / "metrics"
+            models_dir = run_dir / "checkpoints"
+            samples_dir = run_dir / "samples"
+            self.assertTrue(samples_dir.exists())
             plot_path = metrics_dir / "loss_curves.png"
             self.assertTrue(plot_path.exists())
             self.assertGreater(plot_path.stat().st_size, 0)
@@ -453,9 +529,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
     def test_train_svi_script_dry_run_succeeds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_svi_workbook(tmpdir)
-            metrics_dir = Path(tmpdir) / "svi_metrics"
-            models_dir = Path(tmpdir) / "svi_models"
-            stats_path = metrics_dir / "normalization_stats.json"
+            output_root = Path(tmpdir) / "svi_xlsx"
             config_path = Path(tmpdir) / "train_svi.yaml"
             config_path.write_text(
                 "\n".join(
@@ -468,11 +542,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
                         "num_workers: 0",
                         "cuda: false",
                         "max_slices: 4",
-                        f"models_path: {models_dir}",
-                        f"outputs_path: {models_dir}",
-                        f"samples_path: {Path(tmpdir) / 'svi_samples'}",
-                        f"metrics_path: {metrics_dir}",
-                        f"normalization_stats_path: {stats_path}",
+                        f"output_root: {output_root}",
                     ]
                 ),
                 encoding="utf-8",
@@ -481,6 +551,12 @@ class TestTrainMergedXlsx(unittest.TestCase):
             module = _load_script_module(ROOT_DIR / "scripts/train/train_svi.py", "train_svi_script")
             module.main(["--config", str(config_path), "--dry-run"])
 
+            run_dir = self._find_only_run_dir(output_root)
+            metrics_dir = run_dir / "metrics"
+            models_dir = run_dir / "checkpoints"
+            samples_dir = run_dir / "samples"
+            stats_path = metrics_dir / "normalization_stats.json"
+            self.assertTrue(samples_dir.exists())
             self.assertTrue(stats_path.exists())
             self.assertTrue(any(path.name.startswith("run_config_") for path in metrics_dir.iterdir()))
             self.assertFalse((metrics_dir / "loss_curves.png").exists())
@@ -491,9 +567,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
     def test_train_svi_script_full_run_saves_loss_curves(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_svi_workbook(tmpdir)
-            metrics_dir = Path(tmpdir) / "svi_metrics"
-            models_dir = Path(tmpdir) / "svi_models"
-            stats_path = metrics_dir / "normalization_stats.json"
+            output_root = Path(tmpdir) / "svi_xlsx"
             config_path = Path(tmpdir) / "train_svi.yaml"
             config_path.write_text(
                 "\n".join(
@@ -509,11 +583,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
                         "num_workers: 0",
                         "cuda: false",
                         "max_slices: 4",
-                        f"models_path: {models_dir}",
-                        f"outputs_path: {models_dir}",
-                        f"samples_path: {Path(tmpdir) / 'svi_samples'}",
-                        f"metrics_path: {metrics_dir}",
-                        f"normalization_stats_path: {stats_path}",
+                        f"output_root: {output_root}",
                     ]
                 ),
                 encoding="utf-8",
@@ -522,6 +592,11 @@ class TestTrainMergedXlsx(unittest.TestCase):
             module = _load_script_module(ROOT_DIR / "scripts/train/train_svi.py", "train_svi_full_script")
             module.main(["--config", str(config_path)])
 
+            run_dir = self._find_only_run_dir(output_root)
+            metrics_dir = run_dir / "metrics"
+            models_dir = run_dir / "checkpoints"
+            samples_dir = run_dir / "samples"
+            self.assertTrue(samples_dir.exists())
             plot_path = metrics_dir / "loss_curves.png"
             self.assertTrue(plot_path.exists())
             self.assertGreater(plot_path.stat().st_size, 0)
@@ -682,6 +757,9 @@ class TestTrainMergedXlsx(unittest.TestCase):
 
             trainer.start_train()
 
+            run_dir = self._find_only_run_dir(Path(tmpdir))
+            metrics_dir = run_dir / "metrics"
+            models_dir = run_dir / "models"
             metrics_rows = json.loads((metrics_dir / "training_metrics.json").read_text(encoding="utf-8"))
             self.assertEqual(len(metrics_rows), 3)
             self.assertAlmostEqual(metrics_rows[0]["lr"], 0.1, places=6)
@@ -730,6 +808,9 @@ class TestTrainMergedXlsx(unittest.TestCase):
 
             trainer.start_train()
 
+            run_dir = self._find_only_run_dir(Path(tmpdir))
+            metrics_dir = run_dir / "metrics"
+            models_dir = run_dir / "models"
             metrics_rows = json.loads((metrics_dir / "training_metrics.json").read_text(encoding="utf-8"))
             self.assertEqual(len(metrics_rows), 2)
             self.assertTrue((metrics_dir / "training_metrics.csv").exists())
@@ -738,6 +819,41 @@ class TestTrainMergedXlsx(unittest.TestCase):
             self.assertFalse((models_dir / "svi_regressor_best.pt").exists())
             self.assertIsNotNone(trainer.optimizer)
             self.assertAlmostEqual(trainer.optimizer.param_groups[0]["lr"], 0.1, places=6)
+
+    def test_migrate_training_outputs_moves_legacy_runs_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs_root = Path(tmpdir) / "outputs"
+            legacy_vol = self._write_legacy_training_dir(
+                outputs_root,
+                family="vol_xlsx",
+                legacy_suffix="20260406-04",
+                run_ts="20260406_151145",
+            )
+            legacy_svi = self._write_legacy_training_dir(
+                outputs_root,
+                family="svi_xlsx",
+                legacy_suffix="20260406-01",
+                run_ts="20260406_131051",
+            )
+
+            module = _load_script_module(
+                ROOT_DIR / "scripts/train/migrate_training_outputs.py",
+                "migrate_training_outputs_script",
+            )
+            migrated = module.main(["--outputs-root", str(outputs_root)])
+
+            vol_target = outputs_root / "vol_xlsx" / "20260406_151145"
+            svi_target = outputs_root / "svi_xlsx" / "20260406_131051"
+            self.assertEqual(sorted(path.name for path in migrated), ["20260406_131051", "20260406_151145"])
+            self.assertFalse(legacy_vol.exists())
+            self.assertFalse(legacy_svi.exists())
+            self.assertTrue((vol_target / "checkpoints" / "artifact.bin").exists())
+            self.assertTrue((svi_target / "metrics" / "training_metrics.json").exists())
+            self.assertTrue((vol_target / "samples").exists())
+            self.assertTrue((svi_target / "samples").exists())
+
+            rerun = module.main(["--outputs-root", str(outputs_root)])
+            self.assertEqual(rerun, [])
 
     def test_plot_training_curves_skips_missing_metrics(self):
         with tempfile.TemporaryDirectory() as tmpdir:

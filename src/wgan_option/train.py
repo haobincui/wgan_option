@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from wgan_option.config import Config, default_config, save_config_yaml
@@ -15,10 +16,15 @@ class WGANTrainer:
     """High-level trainer wrapper around dataloading + model lifecycle."""
 
     def __init__(self, config: Config):
-        self.config = config
+        self.run_dir: Optional[Path] = None
+        self.config = self._prepare_runtime_config(config)
         self._logger: Optional[logging.Logger] = None
         self.bundle: Optional[ForecastDataBundle] = None
         self.model: Optional[WGAN_GP] = None
+
+    def _prepare_runtime_config(self, config: Config) -> Config:
+        """Allow subclasses to rewrite config paths before training starts."""
+        return config
 
     @property
     def logger(self) -> logging.Logger:
@@ -89,6 +95,8 @@ class WGANTrainer:
 
     def start_train(self):
         """Execute full training run."""
+        if self.run_dir is not None:
+            self.logger.info("Training artifacts will be written under: %s", self.run_dir)
         self.setup()
         self._save_run_config()
         self.logger.info("*** Start training: %s epochs, batch_size=%s, lr=%s ***",
@@ -100,6 +108,8 @@ class WGANTrainer:
 
     def dry_run(self):
         """Run setup and config snapshot without fitting the model."""
+        if self.run_dir is not None:
+            self.logger.info("Training artifacts will be written under: %s", self.run_dir)
         self.setup()
         self._save_run_config()
         self.logger.info("Dry run finished. Training was not started.")

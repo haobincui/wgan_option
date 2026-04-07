@@ -8,6 +8,7 @@ import os
 import sys
 from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Optional
 
 import numpy as np
@@ -20,6 +21,7 @@ from wgan_option.config import Config, default_config, save_config_yaml
 from wgan_option.models.svi_regressor import SviRegressor
 from wgan_option.utils.merged_xlsx import SVI_FEATURE_ORDER, SviXlsxBundle, create_svi_xlsx_dataloaders
 from wgan_option.utils.training_artifacts import write_best_checkpoint, write_metrics_csv, write_metrics_json
+from wgan_option.utils.training_run_paths import prepare_timestamped_training_config
 from wgan_option.utils.visualization import plot_training_curves
 
 
@@ -27,12 +29,16 @@ class SviXlsxTrainer:
     """Train a supervised MLP regressor on paired SVI samples."""
 
     def __init__(self, config: Config):
-        self.config = config
+        self.run_dir: Optional[Path] = None
+        self.config, self.run_dir = prepare_timestamped_training_config(
+            config,
+            include_normalization_stats=True,
+        )
         self._logger: Optional[logging.Logger] = None
         self.bundle: Optional[SviXlsxBundle] = None
         self.model: Optional[SviRegressor] = None
         self.optimizer: Optional[Adam] = None
-        self.device = torch.device("cuda:0" if (config.cuda and torch.cuda.is_available()) else "cpu")
+        self.device = torch.device("cuda:0" if (self.config.cuda and torch.cuda.is_available()) else "cpu")
 
     @property
     def logger(self) -> logging.Logger:
@@ -271,6 +277,8 @@ class SviXlsxTrainer:
         self.logger.info("Loss curve plot saved to: %s", output_path)
 
     def start_train(self):
+        if self.run_dir is not None:
+            self.logger.info("Training artifacts will be written under: %s", self.run_dir)
         self.setup()
         self._save_run_config()
         assert self.bundle is not None
@@ -408,6 +416,8 @@ class SviXlsxTrainer:
         self.logger.info("*** SVI training complete ***")
 
     def dry_run(self):
+        if self.run_dir is not None:
+            self.logger.info("Training artifacts will be written under: %s", self.run_dir)
         self.setup()
         self._save_run_config()
         self.logger.info("Dry run finished. Training was not started.")

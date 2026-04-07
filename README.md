@@ -243,6 +243,7 @@ Project and experiment design:
 
 Training diagnostics:
 
+- [docs/gan_model_detailed_architecture.md](docs/gan_model_detailed_architecture.md)
 - [docs/training_loss_curves.md](docs/training_loss_curves.md)
 - [docs/reduce_lr_on_plateau.md](docs/reduce_lr_on_plateau.md)
 

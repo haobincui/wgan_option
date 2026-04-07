@@ -43,7 +43,4 @@ early_stopping_patience: 10
 early_stopping_min_delta: 0.0
 
 # Paths
-models_path: outputs/vol_xlsx/checkpoints
-outputs_path: outputs/vol_xlsx/checkpoints
-samples_path: outputs/vol_xlsx/samples
-metrics_path: outputs/vol_xlsx/metrics
+output_root: outputs/vol_xlsx

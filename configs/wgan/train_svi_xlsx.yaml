@@ -32,8 +32,4 @@ early_stopping_patience: 10
 early_stopping_min_delta: 0.0
 
 # Paths
-models_path: outputs/svi_xlsx/checkpoints
-outputs_path: outputs/svi_xlsx/checkpoints
-samples_path: outputs/svi_xlsx/samples
-metrics_path: outputs/svi_xlsx/metrics
-normalization_stats_path: outputs/svi_xlsx/metrics/normalization_stats.json
+output_root: outputs/svi_xlsx

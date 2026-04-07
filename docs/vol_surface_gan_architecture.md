@@ -6,6 +6,7 @@ It should be read together with:
 
 - `docs/input_vol.md`
 - `docs/input_svi.md`
+- `docs/gan_model_detailed_architecture.md`
 - `docs/training_loss_curves.md`
 - `docs/reduce_lr_on_plateau.md`
 

@@ -8,6 +8,13 @@ import torch
 import yaml
 
 DEFAULT_CONFIG_PATH = "configs/wgan/train_default.yaml"
+LEGACY_OUTPUT_PATH_FIELDS = (
+    "models_path",
+    "outputs_path",
+    "samples_path",
+    "metrics_path",
+    "normalization_stats_path",
+)
 
 
 @dataclass
@@ -75,6 +82,7 @@ class Config:
     max_slices: int = 4
 
     # Paths
+    output_root: str = ""
     models_path: str = "outputs/checkpoints"
     outputs_path: str = "outputs/checkpoints"
     samples_path: str = "outputs/samples"
@@ -101,6 +109,51 @@ def _validate_config_keys(data: Dict[str, Any], source: str):
     unknown_keys = sorted(set(data.keys()) - valid_keys)
     if unknown_keys:
         raise ValueError(f"Unknown config keys in {source}: {unknown_keys}")
+
+
+def derive_training_output_paths(output_root: str) -> Dict[str, Any]:
+    """Expand one merged-xlsx output root into concrete artifact paths."""
+
+    normalized_output_root = str(output_root).strip()
+    if not normalized_output_root:
+        raise ValueError("output_root must be a non-empty path when deriving training output paths.")
+
+    root = Path(normalized_output_root)
+    return {
+        "models_path": str(root / "checkpoints"),
+        "outputs_path": str(root / "checkpoints"),
+        "samples_path": str(root / "samples"),
+        "metrics_path": str(root / "metrics"),
+        "normalization_stats_path": str(root / "metrics" / "normalization_stats.json"),
+    }
+
+
+def _apply_output_root(
+    loaded_values: Dict[str, Any],
+    *,
+    yaml_values: Dict[str, Any],
+    overrides: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Resolve the single output_root entrypoint into concrete internal paths."""
+
+    output_root = str(loaded_values.get("output_root", "")).strip()
+    if not output_root:
+        return loaded_values
+
+    explicit_legacy_fields = sorted(
+        field_name
+        for field_name in LEGACY_OUTPUT_PATH_FIELDS
+        if field_name in yaml_values or (overrides is not None and field_name in overrides)
+    )
+    if explicit_legacy_fields:
+        raise ValueError(
+            "output_root cannot be combined with explicit legacy path fields. "
+            f"Remove these fields and keep only output_root: {explicit_legacy_fields}"
+        )
+
+    loaded_values["output_root"] = output_root
+    loaded_values.update(derive_training_output_paths(output_root))
+    return loaded_values
 
 
 def _parse_bool(raw: str) -> bool:
@@ -163,6 +216,12 @@ def load_config(config_path: Optional[str] = None, overrides: Optional[Dict[str,
     if overrides:
         _validate_config_keys(overrides, source="cli overrides")
         loaded_values.update(overrides)
+
+    loaded_values = _apply_output_root(
+        loaded_values,
+        yaml_values=yaml_values,
+        overrides=overrides,
+    )
 
     return Config(**loaded_values)
 

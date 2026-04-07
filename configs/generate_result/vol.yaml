@@ -1,0 +1,36 @@
+# Data
+data_path: data/processed_excel_20260330-01/merged_vol.xlsx
+sheet_name: gan_input_ready
+text_embedding_mode: hd
+train_ratio: 0.8
+
+# Runtime
+cuda: true
+seed: 42
+num_workers: 0
+
+# Checkpoints
+checkpoint_path: ""
+models_path: outputs/vol_xlsx
+metrics_path: outputs/vol_xlsx
+
+# Sample selection
+split: val
+selection_mode: first_n
+sample_id: ""
+row_index: -1
+limit: 5
+
+# Outputs
+output_dir: outputs/generate_result/vol
+save_plots: true
+save_json: true
+plot_style: heatmap_diff
+
+# Unused by vol mode, kept to share one schema with svi mode
+strike_bins: 16
+maturity_bins: 16
+moneyness_min: 0.7
+moneyness_max: 1.3
+maturity_min_days: 7
+maturity_max_days: 365

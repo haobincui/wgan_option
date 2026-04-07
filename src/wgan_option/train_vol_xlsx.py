@@ -8,10 +8,16 @@ from wgan_option.config import Config, default_config
 from wgan_option.models.gan_model import WGAN_GP
 from wgan_option.train import WGANTrainer
 from wgan_option.utils.merged_xlsx import create_vol_surface_xlsx_dataloaders
+from wgan_option.utils.training_run_paths import prepare_timestamped_training_config
 
 
 class VolSurfaceXlsxTrainer(WGANTrainer):
     """Run the existing WGAN-GP on merged vol-surface workbook rows."""
+
+    def _prepare_runtime_config(self, config: Config) -> Config:
+        resolved_config, run_dir = prepare_timestamped_training_config(config)
+        self.run_dir = run_dir
+        return resolved_config
 
     def setup(self):
         self._log_device_info()
