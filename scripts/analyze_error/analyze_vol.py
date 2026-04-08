@@ -1,4 +1,4 @@
-"""Generate future vol surfaces from a trained WGAN checkpoint."""
+"""Analyze generated-vs-target vol surface errors with bootstrap MSE statistics."""
 
 from __future__ import annotations
 
@@ -13,19 +13,23 @@ if str(ROOT_DIR) not in sys.path:
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from scripts.generate_result.common import (  # noqa: E402
-    compute_surface_metrics,
+from scripts.analyze_error.bootstrap import bootstrap_from_error_rows  # noqa: E402
+from scripts.analyze_error.common import (  # noqa: E402
+    compute_error_metrics,
     prepare_run_output_dir,
+    resolve_analysis_config,
     resolve_checkpoint_path,
-    resolve_result_config,
-    safe_sample_filename,
     select_samples_from_split,
     split_metadata,
+    write_bootstrap_outputs,
     write_resolved_config,
     write_summary_csv,
-    save_payload_json,
 )
-from scripts.generate_result.plot_surface import plot_surface_payload  # noqa: E402
+from scripts.analyze_error.plotting import (  # noqa: E402
+    plot_bootstrap_mean_histogram,
+    plot_mse_histogram,
+)
+from wgan_option.analysis_config import DEFAULT_VOL_ANALYSIS_CONFIG_PATH  # noqa: E402
 from wgan_option.utils.inference_helpers import (  # noqa: E402
     build_inference_device,
     ensure_matching_embedding_dim,
@@ -36,10 +40,10 @@ from wgan_option.utils.merged_xlsx import load_vol_surface_samples, select_order
 
 
 def main(argv: Optional[Iterable[str]] = None) -> Path:
-    config = resolve_result_config(
+    config = resolve_analysis_config(
         argv=argv,
-        description="Generate future vol surfaces from a trained WGAN checkpoint.",
-        default_config_path="configs/generate_result/vol.yaml",
+        description="Analyze target-vs-generated vol surface errors and bootstrap mean MSE.",
+        default_config_path=DEFAULT_VOL_ANALYSIS_CONFIG_PATH,
     )
 
     all_samples = load_vol_surface_samples(config)
@@ -56,11 +60,8 @@ def main(argv: Optional[Iterable[str]] = None) -> Path:
 
     device = build_inference_device(config.cuda)
     model, train_config, embedding_dim = load_vol_generator(checkpoint_path, selected_samples[0], device)
-
-    sample_json_dir = run_dir / "samples"
-    plot_dir = run_dir / "plots"
-    summary_rows = []
     split_meta = split_metadata(split_selection)
+    error_rows = []
 
     for sample in selected_samples:
         ensure_matching_embedding_dim(
@@ -75,26 +76,18 @@ def main(argv: Optional[Iterable[str]] = None) -> Path:
             seed=int(config.seed),
             device=device,
         )
-
-        current_surface = sample.current_surface[0]
-        real_surface = sample.target_surface[0]
-        metrics = compute_surface_metrics(generated_surface, real_surface)
-
-        payload = {
-            "sample_id": sample.sample_id,
-            "mode": "vol",
-            "strike_grid": sample.strike_grid.astype(float).tolist(),
-            "maturity_days_grid": sample.maturity_grid_days.astype(float).tolist(),
-            "current_surface": current_surface.astype(float).tolist(),
-            "generated_surface": generated_surface.astype(float).tolist(),
-            "real_surface": real_surface.astype(float).tolist(),
-            "metrics": metrics,
-            "metadata": {
-                "checkpoint_path": str(checkpoint_path),
+        target_surface = sample.target_surface[0]
+        error_surface = target_surface - generated_surface
+        metrics = compute_error_metrics(error_surface)
+        error_rows.append(
+            {
+                "mode": "vol",
+                "sample_id": sample.sample_id,
                 "global_index": int(sample.global_index),
                 "news_timestamp_utc": sample.timestamp,
                 "current_snapshot_time_utc": sample.current_snapshot_time_utc,
                 "target_snapshot_time_utc": sample.target_snapshot_time_utc,
+                "checkpoint_path": str(checkpoint_path),
                 "pair_quality_label": str(sample.metadata.get("pair_quality_label", "")),
                 "current_weighted_iv_rmse": (
                     None
@@ -106,32 +99,37 @@ def main(argv: Optional[Iterable[str]] = None) -> Path:
                     if sample.metadata.get("target_weighted_iv_rmse") is None
                     else float(sample.metadata["target_weighted_iv_rmse"])
                 ),
-                "selection_mode": config.selection_mode,
-                **split_meta,
-            },
-        }
-
-        output_stem = f"{sample.global_index:04d}_{safe_sample_filename(sample.sample_id)}"
-        if config.save_json:
-            save_payload_json(payload, sample_json_dir / f"{output_stem}.json")
-        if config.save_plots:
-            plot_surface_payload(payload, plot_dir / f"{output_stem}.png")
-
-        summary_rows.append(
-            {
-                "sample_id": sample.sample_id,
-                "mode": "vol",
-                "global_index": int(sample.global_index),
-                "news_timestamp_utc": sample.timestamp,
-                "current_snapshot_time_utc": sample.current_snapshot_time_utc,
-                "target_snapshot_time_utc": sample.target_snapshot_time_utc,
-                "checkpoint_path": str(checkpoint_path),
                 **split_meta,
                 **metrics,
             }
         )
 
-    write_summary_csv(summary_rows, run_dir / "summary.csv")
+    write_summary_csv(error_rows, run_dir / "errors.csv")
+    bootstrap_summary, bootstrap_distribution = bootstrap_from_error_rows(
+        error_rows,
+        bootstrap_samples=int(config.bootstrap_samples),
+        confidence_level=float(config.confidence_level),
+        seed=int(config.bootstrap_seed),
+    )
+    write_bootstrap_outputs(
+        summary=bootstrap_summary,
+        distribution=bootstrap_distribution,
+        run_dir=run_dir,
+        save_distribution=bool(config.save_bootstrap_distribution),
+    )
+    if config.save_mse_histogram:
+        plot_mse_histogram(
+            error_rows,
+            run_dir / "mse_histogram.png",
+            bins=int(config.histogram_bins),
+        )
+    if config.save_bootstrap_histogram:
+        plot_bootstrap_mean_histogram(
+            bootstrap_distribution,
+            bootstrap_summary,
+            run_dir / "bootstrap_mean_mse_histogram.png",
+            bins=int(config.histogram_bins),
+        )
     return run_dir
 
 

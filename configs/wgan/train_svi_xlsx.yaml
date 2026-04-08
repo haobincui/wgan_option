@@ -32,4 +32,4 @@ early_stopping_patience: 10
 early_stopping_min_delta: 0.0
 
 # Paths
-output_root: outputs/svi_xlsx
+output_root: outputs/training/svi_xlsx

@@ -7,7 +7,6 @@ import logging
 import os
 import sys
 from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -21,7 +20,7 @@ from wgan_option.config import Config, default_config, save_config_yaml
 from wgan_option.models.svi_regressor import SviRegressor
 from wgan_option.utils.merged_xlsx import SVI_FEATURE_ORDER, SviXlsxBundle, create_svi_xlsx_dataloaders
 from wgan_option.utils.training_artifacts import write_best_checkpoint, write_metrics_csv, write_metrics_json
-from wgan_option.utils.training_run_paths import prepare_timestamped_training_config
+from wgan_option.utils.training_run_paths import prepare_timestamped_training_config, training_run_config_path
 from wgan_option.utils.visualization import plot_training_curves
 
 
@@ -59,10 +58,8 @@ class SviXlsxTrainer:
         return self._logger
 
     def _save_run_config(self):
-        os.makedirs(self.config.metrics_path, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = os.path.join(self.config.metrics_path, f"run_config_{timestamp}.yaml")
-        save_config_yaml(self.config, output_path)
+        output_path = training_run_config_path(self.config, self.run_dir)
+        save_config_yaml(self.config, str(output_path))
         self.logger.info("Resolved config saved to: %s", output_path)
 
     def _save_normalization_stats(self):

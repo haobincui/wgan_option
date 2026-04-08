@@ -93,6 +93,20 @@ def _create_training_output_directories(
         Path(config.normalization_stats_path).parent.mkdir(parents=True, exist_ok=True)
 
 
+def training_run_timestamp(run_dir: Path | None) -> str:
+    """Return the canonical timestamp for one training run."""
+
+    if run_dir is not None and str(run_dir.name).strip():
+        return run_dir.name
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def training_run_config_path(config: Config, run_dir: Path | None) -> Path:
+    """Return the metrics-side config snapshot path for one training run."""
+
+    return Path(config.metrics_path) / f"run_config_{training_run_timestamp(run_dir)}.yaml"
+
+
 def prepare_timestamped_training_config(
     config: Config,
     *,

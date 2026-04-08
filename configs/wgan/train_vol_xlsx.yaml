@@ -43,4 +43,4 @@ early_stopping_patience: 10
 early_stopping_min_delta: 0.0
 
 # Paths
-output_root: outputs/vol_xlsx
+output_root: outputs/training/vol_xlsx

@@ -248,9 +248,9 @@ Conceptually, this is a pragmatic implementation of the research direction descr
 
 Common output areas:
 
-- [outputs/vol_xlsx](/Users/haobincui/Documents/wgan_option/outputs/vol_xlsx)
+- [outputs/training/vol_xlsx](/Users/haobincui/Documents/wgan_option/outputs/training/vol_xlsx)
   - merged vol training artifacts
-- [outputs/svi_xlsx](/Users/haobincui/Documents/wgan_option/outputs/svi_xlsx)
+- [outputs/training/svi_xlsx](/Users/haobincui/Documents/wgan_option/outputs/training/svi_xlsx)
   - merged SVI training artifacts
 - [outputs/checkpoints](/Users/haobincui/Documents/wgan_option/outputs/checkpoints)
   - legacy training artifacts
@@ -311,7 +311,7 @@ python -m unittest discover -s tests/test_vol -p 'test_svi_calibration.py'
 - Do not assume `merge_svi.py` already produces `current_svi -> future_svi` rows. It does not.
 - Do not train SVI from `merged_svi.xlsx` sheet `gan_input_ready`; pair from `news_direction_audit`.
 - Do not assume the root [scripts/train.py](/Users/haobincui/Documents/wgan_option/scripts/train.py) knows about merged xlsx workflows. It is still the legacy entrypoint.
-- Do not overwrite `outputs/checkpoints` when working on merged-xlsx training. Use the dedicated `outputs/vol_xlsx` and `outputs/svi_xlsx` trees.
+- Do not overwrite `outputs/checkpoints` when working on merged-xlsx training. Use the dedicated `outputs/training/vol_xlsx` and `outputs/training/svi_xlsx` trees.
 - Keep the `backward/current` and `forward/future` distinction explicit in any new feature touching merged SVI or merged vol data.
 - The repo uses `apply_patch`-style manual edits well; avoid ad hoc file rewriting patterns when making small focused changes.
 - Do not treat `docs/input_svi.md` and `docs/input_vol.md` as mere documentation cosmetics. They are part of the thesis design record.

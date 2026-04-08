@@ -2,12 +2,12 @@
 
 This document explains the metric names that appear in:
 
-- `outputs/vol_xlsx/metrics/training_metrics.json`
-- `outputs/vol_xlsx/metrics/training_metrics.csv`
-- `outputs/vol_xlsx/metrics/loss_curves.png`
-- `outputs/svi_xlsx/metrics/training_metrics.json`
-- `outputs/svi_xlsx/metrics/training_metrics.csv`
-- `outputs/svi_xlsx/metrics/loss_curves.png`
+- `outputs/training/vol_xlsx/<run_ts>/metrics/training_metrics.json`
+- `outputs/training/vol_xlsx/<run_ts>/metrics/training_metrics.csv`
+- `outputs/training/vol_xlsx/<run_ts>/metrics/loss_curves.png`
+- `outputs/training/svi_xlsx/<run_ts>/metrics/training_metrics.json`
+- `outputs/training/svi_xlsx/<run_ts>/metrics/training_metrics.csv`
+- `outputs/training/svi_xlsx/<run_ts>/metrics/loss_curves.png`
 
 It is based on the current implementation in:
 

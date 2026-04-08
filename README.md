@@ -150,8 +150,8 @@ Current monitor metrics:
 
 Typical output trees:
 
-- `outputs/vol_xlsx`
-- `outputs/svi_xlsx`
+- `outputs/training/vol_xlsx`
+- `outputs/training/svi_xlsx`
 - `outputs/checkpoints` for the legacy path
 
 Typical metrics artifacts:

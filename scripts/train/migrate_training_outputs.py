@@ -1,4 +1,4 @@
-"""One-time migration helper for historical merged-xlsx training directories."""
+"""Migration helper for historical merged-xlsx training directories."""
 
 from __future__ import annotations
 
@@ -19,20 +19,24 @@ if str(SRC_DIR) not in sys.path:
 LEGACY_DIR_PATTERN = re.compile(r"^(vol_xlsx|svi_xlsx)_(\d{8}-\d+)$")
 RUN_CONFIG_PATTERN = re.compile(r"^run_config_(\d{8}_\d{6})\.ya?ml$")
 FALLBACK_SUFFIX_PATTERN = re.compile(r"^(\d{8})-(\d+)$")
+RUN_DIR_PATTERN = re.compile(r"^\d{8}_\d{6}$")
+TRAINING_ROOT_NAME = "training"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Migrate historical merged-xlsx training outputs into root/<run_ts>/...")
+    parser = argparse.ArgumentParser(
+        description="Migrate historical merged-xlsx training outputs into outputs/training/{vol_xlsx|svi_xlsx}/<run_ts>/..."
+    )
     parser.add_argument(
         "--outputs-root",
         default="outputs",
-        help="Root outputs directory that contains legacy vol_xlsx_* / svi_xlsx_* folders.",
+        help="Root outputs directory that contains historical vol_xlsx / svi_xlsx training folders.",
     )
     return parser
 
 
-def _infer_run_timestamp(legacy_dir: Path) -> str:
-    metrics_dir = legacy_dir / "metrics"
+def _infer_run_timestamp(source_dir: Path) -> str:
+    metrics_dir = source_dir / "metrics"
     run_configs = sorted(metrics_dir.glob("run_config_*.yaml")) + sorted(metrics_dir.glob("run_config_*.yml"))
     if len(run_configs) == 1:
         match = RUN_CONFIG_PATTERN.match(run_configs[0].name)
@@ -42,45 +46,70 @@ def _infer_run_timestamp(legacy_dir: Path) -> str:
     if len(run_configs) > 1:
         raise ValueError(f"Found multiple run_config files under {metrics_dir}, cannot infer a unique run timestamp.")
 
-    legacy_match = LEGACY_DIR_PATTERN.match(legacy_dir.name)
+    if RUN_DIR_PATTERN.match(source_dir.name):
+        return source_dir.name
+
+    legacy_match = LEGACY_DIR_PATTERN.match(source_dir.name)
     if not legacy_match:
-        raise ValueError(f"Legacy directory name does not match the expected pattern: {legacy_dir.name}")
+        raise ValueError(f"Source directory name does not match an expected training-run pattern: {source_dir.name}")
     suffix_match = FALLBACK_SUFFIX_PATTERN.match(legacy_match.group(2))
     if not suffix_match:
         raise ValueError(f"Legacy directory suffix does not match the expected pattern: {legacy_match.group(2)}")
     return f"{suffix_match.group(1)}_{int(suffix_match.group(2)):06d}"
 
 
-def _legacy_training_directories(outputs_root: Path) -> List[Path]:
-    legacy_dirs: List[Path] = []
+def _legacy_training_directories(outputs_root: Path) -> List[tuple[str, Path]]:
+    legacy_dirs: List[tuple[str, Path]] = []
     for candidate in sorted(outputs_root.iterdir()) if outputs_root.exists() else []:
-        if candidate.is_dir() and LEGACY_DIR_PATTERN.match(candidate.name):
-            legacy_dirs.append(candidate)
+        if not candidate.is_dir():
+            continue
+
+        legacy_match = LEGACY_DIR_PATTERN.match(candidate.name)
+        if legacy_match:
+            legacy_dirs.append((legacy_match.group(1), candidate))
+            continue
+
+        if candidate.name not in {"vol_xlsx", "svi_xlsx"}:
+            continue
+
+        for run_dir in sorted(path for path in candidate.iterdir() if path.is_dir() and RUN_DIR_PATTERN.match(path.name)):
+            legacy_dirs.append((candidate.name, run_dir))
     return legacy_dirs
 
 
+def _cleanup_empty_training_family_dirs(source_dir: Path, outputs_root: Path) -> None:
+    family_dir = source_dir.parent
+    if family_dir == outputs_root:
+        return
+    if family_dir.parent != outputs_root:
+        return
+    if family_dir.name not in {"vol_xlsx", "svi_xlsx"}:
+        return
+    if any(family_dir.iterdir()):
+        return
+    family_dir.rmdir()
+
+
 def migrate_training_outputs(outputs_root: str | Path) -> Tuple[List[Path], List[str]]:
-    """Move historical training runs into outputs/{vol_xlsx|svi_xlsx}/<run_ts>/."""
+    """Move historical training runs into outputs/training/{vol_xlsx|svi_xlsx}/<run_ts>/."""
 
     root = Path(outputs_root)
     migrated: List[Path] = []
     errors: List[str] = []
 
-    for legacy_dir in _legacy_training_directories(root):
-        match = LEGACY_DIR_PATTERN.match(legacy_dir.name)
-        assert match is not None
-        family = match.group(1)
+    for family, source_dir in _legacy_training_directories(root):
         try:
-            run_ts = _infer_run_timestamp(legacy_dir)
-            destination = root / family / run_ts
+            run_ts = _infer_run_timestamp(source_dir)
+            destination = root / TRAINING_ROOT_NAME / family / run_ts
             if destination.exists():
-                raise FileExistsError(f"Destination already exists: {destination}")
+                continue
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(legacy_dir), str(destination))
+            shutil.move(str(source_dir), str(destination))
             (destination / "samples").mkdir(parents=True, exist_ok=True)
+            _cleanup_empty_training_family_dirs(source_dir, root)
             migrated.append(destination)
         except Exception as exc:  # pragma: no cover - exercised via returned errors
-            errors.append(f"{legacy_dir}: {exc}")
+            errors.append(f"{source_dir}: {exc}")
 
     return migrated, errors
 

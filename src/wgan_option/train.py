@@ -1,15 +1,14 @@
 """Training orchestrator for conditional WGAN option-surface forecasting."""
 
 import logging
-import os
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from wgan_option.config import Config, default_config, save_config_yaml
 from wgan_option.models.gan_model import WGAN_GP
 from wgan_option.utils.dataloader import ForecastDataBundle, create_bond_option_forecast_dataloaders
+from wgan_option.utils.training_run_paths import training_run_config_path
 
 
 class WGANTrainer:
@@ -47,11 +46,9 @@ class WGANTrainer:
 
     def _save_run_config(self):
         """Save resolved runtime config under metrics directory."""
-        os.makedirs(self.config.metrics_path, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = os.path.join(self.config.metrics_path, f"run_config_{timestamp}.yaml")
-        save_config_yaml(self.config, output_path)
-        self.logger.info(f"Resolved config saved to: {output_path}")
+        output_path = training_run_config_path(self.config, self.run_dir)
+        save_config_yaml(self.config, str(output_path))
+        self.logger.info("Resolved config saved to: %s", output_path)
 
     def _log_device_info(self):
         """Log compute device information."""

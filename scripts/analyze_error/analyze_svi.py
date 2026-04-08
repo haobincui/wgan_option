@@ -1,4 +1,4 @@
-"""Generate future SVI params, reconstruct surfaces, and compare them."""
+"""Analyze SVI-model surface errors with bootstrap MSE statistics."""
 
 from __future__ import annotations
 
@@ -13,20 +13,24 @@ if str(ROOT_DIR) not in sys.path:
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from scripts.generate_result.common import (  # noqa: E402
+from scripts.analyze_error.bootstrap import bootstrap_from_error_rows  # noqa: E402
+from scripts.analyze_error.common import (  # noqa: E402
     build_surface_grids,
-    compute_surface_metrics,
+    compute_error_metrics,
     prepare_run_output_dir,
+    resolve_analysis_config,
     resolve_checkpoint_path,
-    resolve_result_config,
-    safe_sample_filename,
-    save_payload_json,
     select_samples_from_split,
     split_metadata,
+    write_bootstrap_outputs,
     write_resolved_config,
     write_summary_csv,
 )
-from scripts.generate_result.plot_surface import plot_surface_payload  # noqa: E402
+from scripts.analyze_error.plotting import (  # noqa: E402
+    plot_bootstrap_mean_histogram,
+    plot_mse_histogram,
+)
+from wgan_option.analysis_config import DEFAULT_SVI_ANALYSIS_CONFIG_PATH  # noqa: E402
 from wgan_option.utils.inference_helpers import (  # noqa: E402
     build_inference_device,
     infer_future_svi,
@@ -37,10 +41,10 @@ from wgan_option.utils.merged_xlsx import load_svi_paired_samples, select_ordere
 
 
 def main(argv: Optional[Iterable[str]] = None) -> Path:
-    config = resolve_result_config(
+    config = resolve_analysis_config(
         argv=argv,
-        description="Generate future SVI params, reconstruct surfaces, and compare them.",
-        default_config_path="configs/generate_result/svi.yaml",
+        description="Analyze target-vs-generated SVI-reconstructed surface errors and bootstrap mean MSE.",
+        default_config_path=DEFAULT_SVI_ANALYSIS_CONFIG_PATH,
     )
 
     all_samples = load_svi_paired_samples(config)
@@ -60,12 +64,9 @@ def main(argv: Optional[Iterable[str]] = None) -> Path:
     embedding_dim = int(checkpoint["embedding_dim"])
     max_slices = int(checkpoint["max_slices"])
     normalization_stats = checkpoint["normalization_stats"]
-
     strike_grid, maturity_days_grid = build_surface_grids(config)
-    sample_json_dir = run_dir / "samples"
-    plot_dir = run_dir / "plots"
-    summary_rows = []
     split_meta = split_metadata(split_selection)
+    error_rows = []
 
     for sample in selected_samples:
         predicted_svi, current_count, predicted_count = infer_future_svi(
@@ -76,67 +77,29 @@ def main(argv: Optional[Iterable[str]] = None) -> Path:
             normalization_stats=normalization_stats,
             device=device,
         )
-
-        current_surface = reconstruct_svi_surface(
-            sample.current_svi,
-            strike_grid=strike_grid,
-            maturity_days_grid=maturity_days_grid,
-        )
         generated_surface = reconstruct_svi_surface(
             predicted_svi,
             strike_grid=strike_grid,
             maturity_days_grid=maturity_days_grid,
         )
-        real_surface = reconstruct_svi_surface(
+        target_surface = reconstruct_svi_surface(
             sample.future_svi,
             strike_grid=strike_grid,
             maturity_days_grid=maturity_days_grid,
         )
-        metrics = compute_surface_metrics(generated_surface, real_surface)
-
-        payload = {
-            "sample_id": sample.sample_id,
-            "mode": "svi",
-            "strike_grid": strike_grid.astype(float).tolist(),
-            "maturity_days_grid": maturity_days_grid.astype(float).tolist(),
-            "current_surface": current_surface.astype(float).tolist(),
-            "generated_surface": generated_surface.astype(float).tolist(),
-            "real_surface": real_surface.astype(float).tolist(),
-            "metrics": metrics,
-            "metadata": {
-                "checkpoint_path": str(checkpoint_path),
-                "global_index": int(sample.global_index),
-                "news_row_id": int(sample.news_row_id),
-                "news_timestamp_utc": sample.timestamp,
-                "current_timestamp_utc": sample.current_timestamp_utc,
-                "future_timestamp_utc": sample.future_timestamp_utc,
-                "current_slice_count": int(current_count),
-                "predicted_slice_count": int(predicted_count),
-                "real_future_slice_count": int(len(sample.future_svi["business_days"])),
-                "current_svi": sample.current_svi,
-                "predicted_future_svi": predicted_svi,
-                "real_future_svi": sample.future_svi,
-                "selection_mode": config.selection_mode,
-                **split_meta,
-            },
-        }
-
-        output_stem = f"{sample.global_index:04d}_{safe_sample_filename(sample.sample_id)}"
-        if config.save_json:
-            save_payload_json(payload, sample_json_dir / f"{output_stem}.json")
-        if config.save_plots:
-            plot_surface_payload(payload, plot_dir / f"{output_stem}.png")
-
-        summary_rows.append(
+        error_surface = target_surface - generated_surface
+        metrics = compute_error_metrics(error_surface)
+        error_rows.append(
             {
-                "sample_id": sample.sample_id,
                 "mode": "svi",
+                "sample_id": sample.sample_id,
                 "global_index": int(sample.global_index),
                 "news_row_id": int(sample.news_row_id),
                 "news_timestamp_utc": sample.timestamp,
                 "current_timestamp_utc": sample.current_timestamp_utc,
                 "future_timestamp_utc": sample.future_timestamp_utc,
                 "checkpoint_path": str(checkpoint_path),
+                "current_slice_count": int(current_count),
                 "predicted_slice_count": int(predicted_count),
                 "real_future_slice_count": int(len(sample.future_svi["business_days"])),
                 **split_meta,
@@ -144,7 +107,32 @@ def main(argv: Optional[Iterable[str]] = None) -> Path:
             }
         )
 
-    write_summary_csv(summary_rows, run_dir / "summary.csv")
+    write_summary_csv(error_rows, run_dir / "errors.csv")
+    bootstrap_summary, bootstrap_distribution = bootstrap_from_error_rows(
+        error_rows,
+        bootstrap_samples=int(config.bootstrap_samples),
+        confidence_level=float(config.confidence_level),
+        seed=int(config.bootstrap_seed),
+    )
+    write_bootstrap_outputs(
+        summary=bootstrap_summary,
+        distribution=bootstrap_distribution,
+        run_dir=run_dir,
+        save_distribution=bool(config.save_bootstrap_distribution),
+    )
+    if config.save_mse_histogram:
+        plot_mse_histogram(
+            error_rows,
+            run_dir / "mse_histogram.png",
+            bins=int(config.histogram_bins),
+        )
+    if config.save_bootstrap_histogram:
+        plot_bootstrap_mean_histogram(
+            bootstrap_distribution,
+            bootstrap_summary,
+            run_dir / "bootstrap_mean_mse_histogram.png",
+            bins=int(config.histogram_bins),
+        )
     return run_dir
 
 

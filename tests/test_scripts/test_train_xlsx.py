@@ -220,6 +220,23 @@ class TestTrainMergedXlsx(unittest.TestCase):
         (metrics_dir / "training_metrics.json").write_text("[]\n", encoding="utf-8")
         return legacy_dir
 
+    def _write_nested_training_run_dir(
+        self,
+        outputs_root: Path,
+        *,
+        family: str,
+        run_ts: str,
+    ) -> Path:
+        run_dir = outputs_root / family / run_ts
+        checkpoints_dir = run_dir / "checkpoints"
+        metrics_dir = run_dir / "metrics"
+        checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        (checkpoints_dir / "artifact.bin").write_bytes(b"checkpoint")
+        (metrics_dir / f"run_config_{run_ts}.yaml").write_text("seed: 42\n", encoding="utf-8")
+        (metrics_dir / "training_metrics.json").write_text("[]\n", encoding="utf-8")
+        return run_dir
+
     def test_vol_loader_parses_embeddings_and_uses_chronological_split(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_vol_workbook(tmpdir)
@@ -360,7 +377,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
                     [
                         "data_path: data/example.xlsx",
                         "sheet_name: gan_input_ready",
-                        "output_root: outputs/vol_xlsx",
+                        "output_root: outputs/training/vol_xlsx",
                     ]
                 ),
                 encoding="utf-8",
@@ -368,14 +385,14 @@ class TestTrainMergedXlsx(unittest.TestCase):
 
             config = load_config(config_path=str(config_path))
 
-            self.assertEqual(config.output_root, "outputs/vol_xlsx")
-            self.assertEqual(config.models_path, "outputs/vol_xlsx/checkpoints")
-            self.assertEqual(config.outputs_path, "outputs/vol_xlsx/checkpoints")
-            self.assertEqual(config.samples_path, "outputs/vol_xlsx/samples")
-            self.assertEqual(config.metrics_path, "outputs/vol_xlsx/metrics")
+            self.assertEqual(config.output_root, "outputs/training/vol_xlsx")
+            self.assertEqual(config.models_path, "outputs/training/vol_xlsx/checkpoints")
+            self.assertEqual(config.outputs_path, "outputs/training/vol_xlsx/checkpoints")
+            self.assertEqual(config.samples_path, "outputs/training/vol_xlsx/samples")
+            self.assertEqual(config.metrics_path, "outputs/training/vol_xlsx/metrics")
             self.assertEqual(
                 config.normalization_stats_path,
-                "outputs/vol_xlsx/metrics/normalization_stats.json",
+                "outputs/training/vol_xlsx/metrics/normalization_stats.json",
             )
 
     def test_load_config_rejects_output_root_with_explicit_legacy_paths(self):
@@ -395,7 +412,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_config(
                     config_path=str(config_path),
-                    overrides={"output_root": "outputs/vol_xlsx"},
+                    overrides={"output_root": "outputs/training/vol_xlsx"},
                 )
 
     def test_wgan_generator_loss_switches_disable_selected_constraints_only(self):
@@ -433,7 +450,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
     def test_train_vol_script_dry_run_succeeds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_vol_workbook(tmpdir)
-            output_root = Path(tmpdir) / "vol_xlsx"
+            output_root = Path(tmpdir) / "training" / "vol_xlsx"
             config_path = Path(tmpdir) / "train_vol.yaml"
             config_path.write_text(
                 "\n".join(
@@ -459,7 +476,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
             models_dir = run_dir / "checkpoints"
             samples_dir = run_dir / "samples"
             self.assertTrue(samples_dir.exists())
-            self.assertTrue(any(path.name.startswith("run_config_") for path in metrics_dir.iterdir()))
+            self.assertTrue((metrics_dir / f"run_config_{run_dir.name}.yaml").exists())
             self.assertFalse((metrics_dir / "loss_curves.png").exists())
             self.assertFalse((metrics_dir / "training_metrics.csv").exists())
             self.assertFalse((metrics_dir / "best_checkpoint.json").exists())
@@ -469,7 +486,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
     def test_train_vol_script_full_run_saves_loss_curves(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_vol_workbook(tmpdir)
-            output_root = Path(tmpdir) / "vol_xlsx"
+            output_root = Path(tmpdir) / "training" / "vol_xlsx"
             config_path = Path(tmpdir) / "train_vol.yaml"
             config_path.write_text(
                 "\n".join(
@@ -502,6 +519,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
             models_dir = run_dir / "checkpoints"
             samples_dir = run_dir / "samples"
             self.assertTrue(samples_dir.exists())
+            self.assertTrue((metrics_dir / f"run_config_{run_dir.name}.yaml").exists())
             plot_path = metrics_dir / "loss_curves.png"
             self.assertTrue(plot_path.exists())
             self.assertGreater(plot_path.stat().st_size, 0)
@@ -529,7 +547,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
     def test_train_svi_script_dry_run_succeeds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_svi_workbook(tmpdir)
-            output_root = Path(tmpdir) / "svi_xlsx"
+            output_root = Path(tmpdir) / "training" / "svi_xlsx"
             config_path = Path(tmpdir) / "train_svi.yaml"
             config_path.write_text(
                 "\n".join(
@@ -558,7 +576,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
             stats_path = metrics_dir / "normalization_stats.json"
             self.assertTrue(samples_dir.exists())
             self.assertTrue(stats_path.exists())
-            self.assertTrue(any(path.name.startswith("run_config_") for path in metrics_dir.iterdir()))
+            self.assertTrue((metrics_dir / f"run_config_{run_dir.name}.yaml").exists())
             self.assertFalse((metrics_dir / "loss_curves.png").exists())
             self.assertFalse((metrics_dir / "training_metrics.csv").exists())
             self.assertFalse((metrics_dir / "best_checkpoint.json").exists())
@@ -567,7 +585,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
     def test_train_svi_script_full_run_saves_loss_curves(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_svi_workbook(tmpdir)
-            output_root = Path(tmpdir) / "svi_xlsx"
+            output_root = Path(tmpdir) / "training" / "svi_xlsx"
             config_path = Path(tmpdir) / "train_svi.yaml"
             config_path.write_text(
                 "\n".join(
@@ -597,6 +615,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
             models_dir = run_dir / "checkpoints"
             samples_dir = run_dir / "samples"
             self.assertTrue(samples_dir.exists())
+            self.assertTrue((metrics_dir / f"run_config_{run_dir.name}.yaml").exists())
             plot_path = metrics_dir / "loss_curves.png"
             self.assertTrue(plot_path.exists())
             self.assertGreater(plot_path.stat().st_size, 0)
@@ -829,12 +848,18 @@ class TestTrainMergedXlsx(unittest.TestCase):
                 legacy_suffix="20260406-04",
                 run_ts="20260406_151145",
             )
-            legacy_svi = self._write_legacy_training_dir(
+            nested_svi = self._write_nested_training_run_dir(
                 outputs_root,
                 family="svi_xlsx",
-                legacy_suffix="20260406-01",
                 run_ts="20260406_131051",
             )
+            skipped_vol = self._write_nested_training_run_dir(
+                outputs_root,
+                family="vol_xlsx",
+                run_ts="20260406_123402",
+            )
+            existing_destination = outputs_root / "training" / "vol_xlsx" / "20260406_123402"
+            existing_destination.mkdir(parents=True, exist_ok=True)
 
             module = _load_script_module(
                 ROOT_DIR / "scripts/train/migrate_training_outputs.py",
@@ -842,15 +867,16 @@ class TestTrainMergedXlsx(unittest.TestCase):
             )
             migrated = module.main(["--outputs-root", str(outputs_root)])
 
-            vol_target = outputs_root / "vol_xlsx" / "20260406_151145"
-            svi_target = outputs_root / "svi_xlsx" / "20260406_131051"
+            vol_target = outputs_root / "training" / "vol_xlsx" / "20260406_151145"
+            svi_target = outputs_root / "training" / "svi_xlsx" / "20260406_131051"
             self.assertEqual(sorted(path.name for path in migrated), ["20260406_131051", "20260406_151145"])
             self.assertFalse(legacy_vol.exists())
-            self.assertFalse(legacy_svi.exists())
+            self.assertFalse(nested_svi.exists())
             self.assertTrue((vol_target / "checkpoints" / "artifact.bin").exists())
             self.assertTrue((svi_target / "metrics" / "training_metrics.json").exists())
             self.assertTrue((vol_target / "samples").exists())
             self.assertTrue((svi_target / "samples").exists())
+            self.assertTrue(skipped_vol.exists())
 
             rerun = module.main(["--outputs-root", str(outputs_root)])
             self.assertEqual(rerun, [])
