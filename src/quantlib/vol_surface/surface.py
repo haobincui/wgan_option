@@ -167,7 +167,12 @@ class InterpolatedImpliedVolSurface(ImpliedVolSurface):
 
     def implied_vol(self, forward: float, strike: float, expiration_date: date) -> float:
 
-        days = self.calendar.count_business_days(self.valuation_date, expiration_date, False, True)
+        days = self.calendar.count_business_days(
+            self.valuation_date,
+            expiration_date,
+            include_start=False,
+            include_end=True,
+        )
         if days < 0:
             raise ValueError(f'valuation date {self.valuation_date.isoformat()} '
                              f'is after the last expiration date of the original vol surface')
@@ -224,7 +229,12 @@ class InterpolatedImpliedVolSurface(ImpliedVolSurface):
                              f'is before the original valuation date {self.valuation_date.isoformat()}')
         new_business_days = []
         new_vols = []
-        n = self.calendar.count_business_days(self.valuation_date, new_valuation_date, False, True)
+        n = self.calendar.count_business_days(
+            self.valuation_date,
+            new_valuation_date,
+            include_start=False,
+            include_end=True,
+        )
         if n > self.business_days[-1]:
             raise ValueError(f'new valuation date {new_valuation_date.isoformat()} '
                              f'is after the last expiration date of the original vol surface')
@@ -305,12 +315,22 @@ class InterpolatedPercentStrikeImpliedVolSurface(ImpliedVolSurface):
         self.interp2d = interp2d
 
     def implied_vol(self, forward: float, strike: float, expiration_date: date) -> float:
-        days = self.calendar.count_business_days(self.valuation_date, expiration_date, False, True)
+        days = self.calendar.count_business_days(
+            self.valuation_date,
+            expiration_date,
+            include_start=False,
+            include_end=True,
+        )
         percent = strike / forward
         return self.interp2d(percent, days)
 
     def implied_vol_by_spot(self, spot: float, strike: float, expiration_date: date) -> float:
-        days = self.calendar.count_business_days(self.valuation_date, expiration_date, False, True)
+        days = self.calendar.count_business_days(
+            self.valuation_date,
+            expiration_date,
+            include_start=False,
+            include_end=True,
+        )
         percent = strike / spot
         return self.interp2d(percent, days)
 
@@ -328,7 +348,12 @@ class InterpolatedPercentStrikeImpliedVolSurface(ImpliedVolSurface):
                              f'is before the original valuation date {self.valuation_date.isoformat()}')
         new_business_days = []
         new_vols = []
-        n = self.calendar.count_business_days(self.valuation_date, new_valuation_date, False, True)
+        n = self.calendar.count_business_days(
+            self.valuation_date,
+            new_valuation_date,
+            include_start=False,
+            include_end=True,
+        )
         if n > self.business_days[-1]:
             raise ValueError(f'new valuation date {new_valuation_date.isoformat()} '
                              f'is after the last expiration date of the original vol surface')
@@ -372,8 +397,25 @@ class InterpolatedPercentStrikeImpliedVolSurfaceByTenors(ImpliedVolSurface):
         # TODO: type of all fields in surface/curve is string caused by __future__.annotation, need special conversion
         self.bus_adj = BusinessDayConvention.MODIFIED_FOLLOWING
         self.eom = EomConvention.NONE
-        dates = [plus_period(self.valuation_date, p, self.bus_adj, self.calendar, self.eom) for p in periods]
-        business_days = [self.calendar.count_business_days(self.valuation_date, d, False, True) for d in dates]
+        dates = [
+            plus_period(
+                self.valuation_date,
+                p,
+                adj=self.bus_adj,
+                calendar=self.calendar,
+                eom=self.eom,
+            )
+            for p in periods
+        ]
+        business_days = [
+            self.calendar.count_business_days(
+                self.valuation_date,
+                d,
+                include_start=False,
+                include_end=True,
+            )
+            for d in dates
+        ]
         for i in range(1, len(business_days)):
             if business_days[i] <= business_days[i - 1]:
                 raise ValueError(f'期限必须递增[{self.tenors[i]}]<=[{self.tenors[i - 1]}]')

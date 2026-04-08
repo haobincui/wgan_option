@@ -344,7 +344,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
             [
                 "use_calendar_constraint=false",
                 "use_butterfly_constraint=true",
-                "use_smooth_constraint=off",
+                "use_smooth_constraint=false",
                 "use_early_stopping=true",
                 "early_stopping_patience=15",
                 "early_stopping_min_delta=0.05",
@@ -368,6 +368,15 @@ class TestTrainMergedXlsx(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             parse_cli_overrides(["use_unknown_constraint=false"])
+
+        for invalid_bool in [
+            "use_smooth_constraint=off",
+            "use_smooth_constraint=yes",
+            "use_smooth_constraint=1",
+        ]:
+            with self.subTest(invalid_bool=invalid_bool):
+                with self.assertRaises(ValueError):
+                    parse_cli_overrides([invalid_bool])
 
     def test_load_config_derives_training_paths_from_output_root(self):
         with tempfile.TemporaryDirectory() as tmpdir:

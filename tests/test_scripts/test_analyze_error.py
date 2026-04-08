@@ -317,6 +317,15 @@ class TestAnalyzeErrorScripts(unittest.TestCase):
             self.assertEqual(config.bootstrap_samples, 250)
             self.assertFalse(config.save_bootstrap_distribution)
 
+            for invalid_bool in [
+                "save_mse_histogram=off",
+                "save_bootstrap_histogram=yes",
+                "save_bootstrap_distribution=1",
+            ]:
+                with self.subTest(invalid_bool=invalid_bool):
+                    with self.assertRaises(ValueError):
+                        parse_analysis_overrides([invalid_bool])
+
     def test_bootstrap_mean_mse_is_repeatable_for_fixed_seed(self):
         summary_a, distribution_a = bootstrap_mean_mse(
             [0.1, 0.2, 0.3],

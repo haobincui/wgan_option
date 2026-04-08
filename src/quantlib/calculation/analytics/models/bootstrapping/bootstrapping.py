@@ -81,9 +81,10 @@ class Bootstrapping:
         daycount = act_365
         cap_prices = []
         taus = [daycount(valuation_date, expiration_date) for expiration_date in expiration_dates]
-        reset_dates = [plus_period(
-            expiration_date, reset_timedelta
-        ) for expiration_date in expiration_dates]
+        reset_dates = [
+            plus_period(expiration_date, reset_timedelta)
+            for expiration_date in expiration_dates
+        ]
 
         reset_taus = [daycount(
             expiration_date, reset_date
@@ -91,9 +92,18 @@ class Bootstrapping:
 
         for idx in range(len(cap_vols)):
             cap_price = np.sum(
-                [caplet_black_price(
-                    forward_rates[i], strike_rate, cap_vols[idx], discount_factors[idx], reset_taus[i], taus[i]
-                ) for i in range(idx + 1)])
+                [
+                    caplet_black_price(
+                        forward_rate=forward_rates[i],
+                        strike_rate=strike_rate,
+                        vol=cap_vols[idx],
+                        bond_price=discount_factors[idx],
+                        reset_tau=reset_taus[i],
+                        option_tau=taus[i],
+                    )
+                    for i in range(idx + 1)
+                ]
+            )
             cap_prices.append(float(cap_price))
 
         return cap_prices
@@ -123,9 +133,10 @@ class Bootstrapping:
         caplet_prices = []
         cap_prices = []
         taus = [daycount(valuation_date, expiration_date) for expiration_date in expiration_dates]
-        reset_dates = [plus_period(
-            expiration_date, reset_timedelta
-        ) for expiration_date in expiration_dates]
+        reset_dates = [
+            plus_period(expiration_date, reset_timedelta)
+            for expiration_date in expiration_dates
+        ]
 
         reset_taus = [daycount(
             expiration_date, reset_date
@@ -133,9 +144,18 @@ class Bootstrapping:
 
         for idx in range(len(cap_vols)):
             cap_price = np.sum(
-                [caplet_black_price(
-                    forward_rates[i], strike_rate, cap_vols[idx], discount_factors[idx], reset_taus[i], taus[i]
-                ) for i in range(idx + 1)])
+                [
+                    caplet_black_price(
+                        forward_rate=forward_rates[i],
+                        strike_rate=strike_rate,
+                        vol=cap_vols[idx],
+                        bond_price=discount_factors[idx],
+                        reset_tau=reset_taus[i],
+                        option_tau=taus[i],
+                    )
+                    for i in range(idx + 1)
+                ]
+            )
             cap_prices.append(cap_price)
 
             if idx == 0:  # first caplet trade_price = cap trade_price
@@ -171,9 +191,10 @@ class Bootstrapping:
             cap_vols, expiration_dates, valuation_date, strike_rate, forward_rates,
             discount_factors, reset_timedelta, model_type
         )
-        reset_dates = [plus_period(
-            expiration_date, reset_timedelta
-        ) for expiration_date in expiration_dates]
+        reset_dates = [
+            plus_period(expiration_date, reset_timedelta)
+            for expiration_date in expiration_dates
+        ]
 
         reset_taus = [daycount(
             expiration_date, reset_date
@@ -194,17 +215,26 @@ class Bootstrapping:
         daycount = act_365
 
         taus = [daycount(valuation_date, expiration_date) for expiration_date in expiration_dates]
-        reset_dates = [plus_period(
-            expiration_date, reset_timedelta
-        ) for expiration_date in expiration_dates]
+        reset_dates = [
+            plus_period(expiration_date, reset_timedelta)
+            for expiration_date in expiration_dates
+        ]
 
         reset_taus = [daycount(
             expiration_date, reset_date
         ) for (expiration_date, reset_date) in zip(expiration_dates, reset_dates)]
 
-        vols = [caplet_black_vol(
-            caplet_prices[idx], forward_rates[idx], strike_rate, discount_factors[idx], reset_taus[idx], taus[idx]
-        ) for idx in range(len(caplet_prices))]
+        vols = [
+            caplet_black_vol(
+                caplet_price=caplet_prices[idx],
+                forward_rate=forward_rates[idx],
+                strike_rate=strike_rate,
+                bond_price=discount_factors[idx],
+                reset_tau=reset_taus[idx],
+                option_tau=taus[idx],
+            )
+            for idx in range(len(caplet_prices))
+        ]
 
         return vols
 
@@ -241,9 +271,10 @@ class Bootstrapping:
         cap_prices = np.cumsum(caplet_prices)
         daycount = act_365
         taus = [daycount(valuation_date, expiration_date) for expiration_date in expiration_dates]
-        reset_dates = [plus_period(
-            expiration_date, reset_timedelta
-        ) for expiration_date in expiration_dates]
+        reset_dates = [
+            plus_period(expiration_date, reset_timedelta)
+            for expiration_date in expiration_dates
+        ]
 
         reset_taus = [daycount(
             expiration_date, reset_date
@@ -254,9 +285,17 @@ class Bootstrapping:
         for idx in range(len(cap_prices)):
 
             def target_func(vol):
-                black_prices = [caplet_black_price(
-                    forward_rates[i], strike_rate, vol, discount_factors[i], reset_taus[i], taus[i]
-                ) for i in range(idx + 1)]
+                black_prices = [
+                    caplet_black_price(
+                        forward_rate=forward_rates[i],
+                        strike_rate=strike_rate,
+                        vol=vol,
+                        bond_price=discount_factors[i],
+                        reset_tau=reset_taus[i],
+                        option_tau=taus[i],
+                    )
+                    for i in range(idx + 1)
+                ]
 
                 black_price = np.sum(black_prices)
 
@@ -265,7 +304,12 @@ class Bootstrapping:
             try:
                 vol = brentq(
                     lambda x: cap_prices[idx] - np.sum([caplet_black_price(
-                        forward_rates[i], strike_rate, x, discount_factors[i], reset_taus[i], taus[i]
+                        forward_rate=forward_rates[i],
+                        strike_rate=strike_rate,
+                        vol=x,
+                        bond_price=discount_factors[i],
+                        reset_tau=reset_taus[i],
+                        option_tau=taus[i],
                     ) for i in range(idx + 1)]), 0, 1
                 )
             except:
@@ -286,9 +330,10 @@ class Bootstrapping:
                                                 reset_timedelta: Period) -> List[float]:
         daycount = act_365
         taus = [daycount(valuation_date, expiration_date) for expiration_date in expiration_dates]
-        reset_dates = [plus_period(
-            expiration_date, reset_timedelta
-        ) for expiration_date in expiration_dates]
+        reset_dates = [
+            plus_period(expiration_date, reset_timedelta)
+            for expiration_date in expiration_dates
+        ]
 
         reset_taus = [daycount(
             expiration_date, reset_date
@@ -305,9 +350,10 @@ class Bootstrapping:
                                                 reset_timedelta: Period) -> List[float]:
         daycount = act_365
         taus = [daycount(valuation_date, expiration_date) for expiration_date in expiration_dates]
-        reset_dates = [plus_period(
-            expiration_date, reset_timedelta
-        ) for expiration_date in expiration_dates]
+        reset_dates = [
+            plus_period(expiration_date, reset_timedelta)
+            for expiration_date in expiration_dates
+        ]
 
         reset_taus = [daycount(
             expiration_date, reset_date

@@ -42,7 +42,10 @@ class TermVolSurfaceByDays:
 
     def implied_vol(self, expiration_date: date) -> float:
         day = self.vol_daycount.calendar.count_business_days(
-            self.valuation_date, expiration_date, False, True
+            self.valuation_date,
+            expiration_date,
+            include_start=False,
+            include_end=True,
         )
         day = max(1.0, float(day))
         variance = max(self._interp_variance(day), 0.0)
@@ -89,7 +92,10 @@ class SviVolSurface:
 
     def implied_vol(self, forward: float, strike: float, expiration_date: date) -> float:
         day = self.vol_daycount.calendar.count_business_days(
-            self.valuation_date, expiration_date, False, True
+            self.valuation_date,
+            expiration_date,
+            include_start=False,
+            include_end=True,
         )
         day = max(1.0, float(day))
         lm = float(np.log(max(strike / forward, 1e-12)))

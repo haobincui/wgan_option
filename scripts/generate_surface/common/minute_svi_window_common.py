@@ -17,14 +17,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import pandas as pd
-import yaml
 
 if __package__ in {None, ""}:
-    ROOT_DIR = Path(__file__).resolve().parents[3]
-    if str(ROOT_DIR) not in sys.path:
-        sys.path.insert(0, str(ROOT_DIR))
+    import scripts._path_setup  # noqa: F401
     from scripts.generate_surface.common.config_utils import (  # noqa: E402
         build_config_scope,
+        load_surface_builder_section,
         resolve_config_variables,
     )
     from scripts.generate_surface.common.minute_svi_common import (  # noqa: E402
@@ -43,7 +41,7 @@ if __package__ in {None, ""}:
         ProcessMinuteFn,
     )
 else:
-    from .config_utils import build_config_scope, resolve_config_variables  # noqa: E402
+    from .config_utils import build_config_scope, load_surface_builder_section, resolve_config_variables  # noqa: E402
     from .minute_svi_common import (  # noqa: E402
         DEFAULT_CONFIG_PATH,
         PRECALIB_CSV_HEADERS,
@@ -97,29 +95,12 @@ def _coerce_target_datetime_defaults(value: Any) -> List[str]:
 
 
 def _load_window_config(config_path_value: str) -> Dict[str, Any]:
-    config_path = _resolve_config_path(config_path_value)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file does not exist: {config_path}")
-
-    with config_path.open("r", encoding="utf-8") as f:
-        raw_data = yaml.safe_load(f) or {}
-    if not isinstance(raw_data, dict):
-        raise ValueError(f"Config file must contain a YAML mapping: {config_path}")
-
-    config_root = raw_data.get("surface_builder", raw_data)
-    if not isinstance(config_root, dict):
-        raise ValueError(f"`surface_builder` must be a mapping in config file: {config_path}")
-
-    window_section = config_root.get("minute_svi_window")
-    if window_section is None:
-        window_section = {k: v for k, v in config_root.items() if k in SUPPORTED_MINUTE_SVI_WINDOW_CONFIG_KEYS}
-    if not isinstance(window_section, dict):
-        raise ValueError(f"`minute_svi_window` must be a mapping in config file: {config_path}")
-
-    unknown_keys = sorted(set(window_section.keys()) - SUPPORTED_MINUTE_SVI_WINDOW_CONFIG_KEYS)
-    if unknown_keys:
-        raise ValueError(f"Unknown minute_svi_window config keys in {config_path}: {unknown_keys}")
-    return resolve_config_variables(dict(window_section), extra_scope=build_config_scope(config_root))
+    _, config_root, window_section = load_surface_builder_section(
+        config_path_value,
+        section_key="minute_svi_window",
+        supported_keys=SUPPORTED_MINUTE_SVI_WINDOW_CONFIG_KEYS,
+    )
+    return resolve_config_variables(window_section, extra_scope=build_config_scope(config_root))
 
 
 def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:

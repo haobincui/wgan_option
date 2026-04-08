@@ -58,7 +58,12 @@ class ImpliedVolSurfaceAlgo:
         record_ids = []
         for day in group_map.keys():
             idxs = group_map.get(day)
-            tau = self.calendar.count_business_days(self.valuation_date, day, False, True)
+            tau = self.calendar.count_business_days(
+                self.valuation_date,
+                day,
+                include_start=False,
+                include_end=True,
+            )
             record_id = [raw_data['record_id'][idx] for idx in idxs]
             percent_strike = np.array(raw_data['strike1'][idxs]) / (
                     self.spot * np.exp((r - q) * tau / self.days_in_year))
@@ -153,8 +158,11 @@ class ImpliedVolSurfaceAlgo:
         percent_strike = filtrated_data['percent_strikes']
         business_days = filtrated_data['business_days']
 
-        vol_daycount = DayCountBusN(calendar=self.calendar,
-                                    days_in_year=self.days_in_year)
+        vol_daycount = DayCountBusN(
+            f"BUS{int(self.days_in_year)}",
+            self.calendar,
+            self.days_in_year,
+        )
         if use_qls_calibration:
             return SviCalibrationQuasiExplicit(vols=vols,
                                                percent_strikes=percent_strike,
@@ -172,8 +180,11 @@ class ImpliedVolSurfaceAlgo:
     def save_svi_params(svi_params: Dict[str, List[float]], valuation_date: date, calendar: HolidayCalendar,
                         days_in_year: int = 250, underlying: str = '000905.SH', ) -> pd.DataFrame:
 
-        vol_daycount = DayCountBusN(calendar=calendar,
-                                    days_in_year=days_in_year)
+        vol_daycount = DayCountBusN(
+            f"BUS{int(days_in_year)}",
+            calendar,
+            days_in_year,
+        )
         svi_dataclass = SviVolSurface(valuation_date=valuation_date,
                                       svi_params=svi_params,
                                       vol_daycount=vol_daycount)

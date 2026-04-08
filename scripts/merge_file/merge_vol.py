@@ -12,12 +12,33 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+if __package__ in {None, ""}:
+    _ROOT_DIR = Path(__file__).resolve().parents[2]
+    if str(_ROOT_DIR) not in sys.path:
+        sys.path.insert(0, str(_ROOT_DIR))
+
+import scripts._path_setup  # noqa: F401
 
 from scripts.generate_surface.common.minute_svi_excel_common import DEFAULT_SOURCE_TIMEZONE  # noqa: E402
 from scripts.merge_file import merge_svi  # noqa: E402
+from scripts.merge_file._merge_common import (  # noqa: E402
+    assign_raw_row_to_slice,
+    coerce_optional_numeric,
+    is_boundary_slice,
+    is_placeholder_slice,
+    load_json_direction_map,
+    load_news_base_frame,
+    load_precalib_csv,
+    max_abs_error,
+    normalize_bool,
+    normalize_optional_text,
+    offset_column_name,
+    resolve_existing_path,
+    serialize_list,
+    weighted_mae,
+    weighted_rmse,
+    write_workbook,
+)
 from wgan_option.config import default_config  # noqa: E402
 
 DEFAULT_NEWS_XLSX_PATH = merge_svi.DEFAULT_NEWS_XLSX_PATH
@@ -167,7 +188,7 @@ def _grid_definition() -> Tuple[List[float], List[float], str]:
     return (
         [float(value) for value in strike_grid.tolist()],
         [float(value) for value in maturity_days_grid.tolist()],
-        merge_svi._serialize_list([int(default_config.maturity_bins), int(default_config.strike_bins)]),
+        serialize_list([int(default_config.maturity_bins), int(default_config.strike_bins)]),
     )
 
 
@@ -283,15 +304,15 @@ def _base_pair_fields(news_row: pd.Series) -> Dict[str, Any]:
     return {
         "sample_id": f"news_{int(news_row['news_row_id'])}",
         "news_row_id": int(news_row["news_row_id"]),
-        "article_id": merge_svi._normalize_optional_text(news_row.get("ArticleID", "")),
-        "source_file": merge_svi._normalize_optional_text(news_row.get("SourceFile", "")),
-        "news_timestamp_utc": merge_svi._normalize_optional_text(news_row.get("timestamp_utc", "")),
-        "hd_text": merge_svi._normalize_optional_text(news_row.get("HD", "")),
-        "lp_text": merge_svi._normalize_optional_text(news_row.get("LP", "")),
-        "hd_embedding": merge_svi._normalize_optional_text(news_row.get("HD_embedding", "")),
-        "lp_embedding": merge_svi._normalize_optional_text(news_row.get("LP_embedding", "")),
-        "hd_dim": merge_svi._normalize_optional_text(news_row.get("HD_dim", "")),
-        "lp_dim": merge_svi._normalize_optional_text(news_row.get("LP_dim", "")),
+        "article_id": normalize_optional_text(news_row.get("ArticleID", "")),
+        "source_file": normalize_optional_text(news_row.get("SourceFile", "")),
+        "news_timestamp_utc": normalize_optional_text(news_row.get("timestamp_utc", "")),
+        "hd_text": normalize_optional_text(news_row.get("HD", "")),
+        "lp_text": normalize_optional_text(news_row.get("LP", "")),
+        "hd_embedding": normalize_optional_text(news_row.get("HD_embedding", "")),
+        "lp_embedding": normalize_optional_text(news_row.get("LP_embedding", "")),
+        "hd_dim": normalize_optional_text(news_row.get("HD_dim", "")),
+        "lp_dim": normalize_optional_text(news_row.get("LP_dim", "")),
     }
 
 
@@ -313,17 +334,17 @@ def _evaluate_side(
     slices: List[Dict[str, Any]] = []
     has_svi = False
     if json_entry is not None:
-        json_target_timestamp = merge_svi._normalize_optional_text(json_entry.get("json_target_timestamp_utc", ""))
+        json_target_timestamp = normalize_optional_text(json_entry.get("json_target_timestamp_utc", ""))
         slices = list(json_entry.get("slices", []))
         has_svi = bool(json_entry.get("has_svi_params", False))
 
     raw_point_count = len(raw_rows)
-    raw_pass_rows = [row for row in raw_rows if merge_svi._normalize_bool(row.get("passes_precalib_filter"))]
+    raw_pass_rows = [row for row in raw_rows if normalize_bool(row.get("passes_precalib_filter"))]
     raw_point_pass_count = len(raw_pass_rows)
 
     pass_assignments = [
         assignment
-        for assignment in (merge_svi._assign_raw_row_to_slice(raw_row, slices) for raw_row in raw_pass_rows)
+        for assignment in (assign_raw_row_to_slice(raw_row, slices) for raw_row in raw_pass_rows)
         if assignment is not None
     ]
     exact_slice_point_count = sum(1 for assignment in pass_assignments if assignment["is_exact"])
@@ -350,13 +371,13 @@ def _evaluate_side(
         if assignment["total_var_error"] is not None and assignment["weight"] > 0
     ]
 
-    weighted_iv_rmse = merge_svi._weighted_rmse(iv_errors, iv_weights)
-    weighted_iv_mae = merge_svi._weighted_mae(iv_errors, iv_weights)
-    max_abs_iv_error = merge_svi._max_abs_error(iv_errors)
-    weighted_total_var_rmse = merge_svi._weighted_rmse(total_var_errors, total_var_weights)
+    weighted_iv_rmse = weighted_rmse(iv_errors, iv_weights)
+    weighted_iv_mae = weighted_mae(iv_errors, iv_weights)
+    max_abs_iv_error = max_abs_error(iv_errors)
+    weighted_total_var_rmse = weighted_rmse(total_var_errors, total_var_weights)
 
-    placeholder_flag = int(bool(slices) and all(merge_svi._is_placeholder_slice(slice_row) for slice_row in slices))
-    boundary_flag = int(bool(slices) and any(merge_svi._is_boundary_slice(slice_row) for slice_row in slices))
+    placeholder_flag = int(bool(slices) and all(is_placeholder_slice(slice_row) for slice_row in slices))
+    boundary_flag = int(bool(slices) and any(is_boundary_slice(slice_row) for slice_row in slices))
     side_quality_label = _side_quality_label(
         has_svi=has_svi,
         placeholder_flag=placeholder_flag,
@@ -373,30 +394,30 @@ def _evaluate_side(
         "news_row_id": news_row_id,
         "side": side,
         "source_direction": source_direction,
-        "matched_snapshot_time_utc": merge_svi._normalize_optional_text(matched_snapshot),
+        "matched_snapshot_time_utc": normalize_optional_text(matched_snapshot),
         "json_target_timestamp_utc": json_target_timestamp,
         "has_svi": has_svi,
         "svi_slice_count": len(slices),
-        "svi_business_days_list": merge_svi._serialize_list([slice_row["business_days"] for slice_row in slices]) if slices else "",
-        "svi_a_list": merge_svi._serialize_list([slice_row["a"] for slice_row in slices]) if slices else "",
-        "svi_b_list": merge_svi._serialize_list([slice_row["b"] for slice_row in slices]) if slices else "",
-        "svi_rho_list": merge_svi._serialize_list([slice_row["rho"] for slice_row in slices]) if slices else "",
-        "svi_m_list": merge_svi._serialize_list([slice_row["m"] for slice_row in slices]) if slices else "",
-        "svi_sigma_list": merge_svi._serialize_list([slice_row["sigma"] for slice_row in slices]) if slices else "",
+        "svi_business_days_list": serialize_list([slice_row["business_days"] for slice_row in slices]) if slices else "",
+        "svi_a_list": serialize_list([slice_row["a"] for slice_row in slices]) if slices else "",
+        "svi_b_list": serialize_list([slice_row["b"] for slice_row in slices]) if slices else "",
+        "svi_rho_list": serialize_list([slice_row["rho"] for slice_row in slices]) if slices else "",
+        "svi_m_list": serialize_list([slice_row["m"] for slice_row in slices]) if slices else "",
+        "svi_sigma_list": serialize_list([slice_row["sigma"] for slice_row in slices]) if slices else "",
         "strike_grid": strike_grid_text,
         "maturity_days_grid": maturity_grid_text,
-        "surface_flat": merge_svi._serialize_list(surface_flat) if surface_flat else "",
-        "surface_min": merge_svi._coerce_optional_numeric(surface_min),
-        "surface_max": merge_svi._coerce_optional_numeric(surface_max),
-        "surface_mean": merge_svi._coerce_optional_numeric(surface_mean),
-        "surface_std": merge_svi._coerce_optional_numeric(surface_std),
+        "surface_flat": serialize_list(surface_flat) if surface_flat else "",
+        "surface_min": coerce_optional_numeric(surface_min),
+        "surface_max": coerce_optional_numeric(surface_max),
+        "surface_mean": coerce_optional_numeric(surface_mean),
+        "surface_std": coerce_optional_numeric(surface_std),
         "raw_point_count": raw_point_count,
         "raw_point_pass_count": raw_point_pass_count,
         "exact_slice_point_ratio": exact_slice_point_ratio,
-        "weighted_iv_rmse": merge_svi._coerce_optional_numeric(weighted_iv_rmse),
-        "weighted_iv_mae": merge_svi._coerce_optional_numeric(weighted_iv_mae),
-        "max_abs_iv_error": merge_svi._coerce_optional_numeric(max_abs_iv_error),
-        "weighted_total_var_rmse": merge_svi._coerce_optional_numeric(weighted_total_var_rmse),
+        "weighted_iv_rmse": coerce_optional_numeric(weighted_iv_rmse),
+        "weighted_iv_mae": coerce_optional_numeric(weighted_iv_mae),
+        "max_abs_iv_error": coerce_optional_numeric(max_abs_iv_error),
+        "weighted_total_var_rmse": coerce_optional_numeric(weighted_total_var_rmse),
         "boundary_flag": boundary_flag,
         "placeholder_flag": placeholder_flag,
         "side_quality_label": side_quality_label,
@@ -411,10 +432,10 @@ def _evaluate_side(
         "raw_point_count": raw_point_count,
         "raw_point_pass_count": raw_point_pass_count,
         "exact_slice_point_ratio": exact_slice_point_ratio,
-        "weighted_iv_rmse": merge_svi._coerce_optional_numeric(weighted_iv_rmse),
-        "weighted_iv_mae": merge_svi._coerce_optional_numeric(weighted_iv_mae),
-        "max_abs_iv_error": merge_svi._coerce_optional_numeric(max_abs_iv_error),
-        "weighted_total_var_rmse": merge_svi._coerce_optional_numeric(weighted_total_var_rmse),
+        "weighted_iv_rmse": coerce_optional_numeric(weighted_iv_rmse),
+        "weighted_iv_mae": coerce_optional_numeric(weighted_iv_mae),
+        "max_abs_iv_error": coerce_optional_numeric(max_abs_iv_error),
+        "weighted_total_var_rmse": coerce_optional_numeric(weighted_total_var_rmse),
         "boundary_flag": boundary_flag,
         "placeholder_flag": placeholder_flag,
         "side_quality_label": side_quality_label,
@@ -429,17 +450,17 @@ def build_workbook_frames(
     source_timezone: str = DEFAULT_SOURCE_TIMEZONE,
     offset_minutes: int = DEFAULT_OFFSET_MINUTES,
 ) -> Dict[str, pd.DataFrame]:
-    input_dir = merge_svi._resolve_existing_path(Path(input_dir), "Input directory")
+    input_dir = resolve_existing_path(Path(input_dir), "Input directory")
     if not input_dir.is_dir():
         raise NotADirectoryError(f"Input path must be a directory: {input_dir}")
 
-    news_xlsx_path = merge_svi._resolve_existing_path(Path(news_xlsx_path), "News xlsx")
-    csv_path = merge_svi._resolve_existing_path(input_dir / DEFAULT_CSV_NAME, "CSV")
-    json_path = merge_svi._resolve_existing_path(input_dir / DEFAULT_JSON_NAME, "JSON")
+    news_xlsx_path = resolve_existing_path(Path(news_xlsx_path), "News xlsx")
+    csv_path = resolve_existing_path(input_dir / DEFAULT_CSV_NAME, "CSV")
+    json_path = resolve_existing_path(input_dir / DEFAULT_JSON_NAME, "JSON")
 
-    news_df = merge_svi.load_news_base_frame(news_xlsx_path, source_timezone=source_timezone, offset_minutes=offset_minutes)
-    csv_df = merge_svi._load_precalib_csv(csv_path)
-    json_direction_map = merge_svi._load_json_direction_map(json_path)
+    news_df = load_news_base_frame(news_xlsx_path, source_timezone=source_timezone, offset_minutes=offset_minutes)
+    csv_df = load_precalib_csv(csv_path)
+    json_direction_map = load_json_direction_map(json_path)
     csv_groups = {
         str(timestamp): group.to_dict(orient="records")
         for timestamp, group in csv_df.groupby("calibration_datetime_utc", dropna=False)
@@ -447,17 +468,17 @@ def build_workbook_frames(
     }
 
     strike_grid, maturity_days_grid, surface_shape_text = _grid_definition()
-    strike_grid_text = merge_svi._serialize_list(strike_grid)
-    maturity_grid_text = merge_svi._serialize_list(maturity_days_grid)
+    strike_grid_text = serialize_list(strike_grid)
+    maturity_grid_text = serialize_list(maturity_days_grid)
 
-    offset_column = merge_svi._offset_column_name(offset_minutes)
+    offset_column = offset_column_name(offset_minutes)
     pair_rows: List[Dict[str, Any]] = []
     side_rows: List[Dict[str, Any]] = []
 
     for _, news_row in news_df.iterrows():
         base = _base_pair_fields(news_row)
-        current_snapshot = merge_svi._normalize_optional_text(news_row.get("timestamp_utc", "")).strip()
-        target_snapshot = merge_svi._normalize_optional_text(news_row.get(offset_column, "")).strip()
+        current_snapshot = normalize_optional_text(news_row.get("timestamp_utc", "")).strip()
+        target_snapshot = normalize_optional_text(news_row.get(offset_column, "")).strip()
 
         current_side_row, current_metrics = _evaluate_side(
             sample_id=base["sample_id"],
@@ -537,16 +558,6 @@ def build_workbook_frames(
         SIDE_DETAIL_SHEET: side_df,
         GAN_SHEET: gan_df,
     }
-
-
-def write_workbook(output_path: Path, workbook_frames: Mapping[str, pd.DataFrame]) -> Path:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        for sheet_name in (PAIR_AUDIT_SHEET, SIDE_DETAIL_SHEET, GAN_SHEET):
-            workbook_frames[sheet_name].to_excel(writer, sheet_name=sheet_name, index=False)
-    return output_path
-
-
 def main(argv: Optional[Iterable[str]] = None) -> Path:
     args = _parse_args(argv)
     input_dir = Path(args.input_dir).expanduser()

@@ -38,7 +38,7 @@ from scripts.generate_surface.surface_cpu.generate_minute_svi_params import (  #
 class TestGenerateMinuteSviParams(unittest.TestCase):
     def _vol_daycount(self) -> DayCountBusN:
         calendar = usd_calendar()
-        return DayCountBusN(name="BUS250USD", calendar=calendar, days_in_year=250)
+        return DayCountBusN("BUS250USD", calendar, 250)
 
     def _make_candidate(
         self,
@@ -229,7 +229,7 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         precalib_writer.writeheader()
 
         calendar = usd_calendar()
-        vol_daycount = DayCountBusN(name="BUS250USD", calendar=calendar, days_in_year=250)
+        vol_daycount = DayCountBusN("BUS250USD", calendar, 250)
         stats = defaultdict(int)
         results = {}
 

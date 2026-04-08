@@ -2,21 +2,31 @@
 
 ## Current State
 
-The current training pipeline in [dataloader.py](/Users/haobincui/Documents/wgan_option/src/wgan_option/utils/dataloader.py) builds supervised samples in this shape:
+This document remains the thesis-facing design and audit spec for SVI-based training data.
+For the command-oriented view of what is runnable today, see [current_executable_workflows.md](current_executable_workflows.md).
+
+The repo now has two executable training paths that matter for this design:
+
+- the legacy daily-surface WGAN path in [dataloader.py](/Users/haobincui/Documents/wgan_option/src/wgan_option/utils/dataloader.py) and `scripts/train.py`
+- the merged-SVI supervised path in `scripts/train/main.py svi-xlsx` and `src/wgan_option/train_svi_xlsx.py`
+
+The legacy daily path still builds supervised samples in this shape:
 
 - `current_surface`
 - `text_embedding`
 - `future_surface`
 
-Today, `src/wgan_option` does **not** consume minute SVI parameters directly.
-The current code path:
+The merged-SVI path now does consume minute-SVI-derived workbook rows, but it does so with one important distinction:
 
-- loads daily news embeddings from xlsx
-- aggregates embeddings by date
-- builds daily surface tensors from raw option trades
-- trains a model of `surface + text -> future_surface`
+- `merged_svi.xlsx` is still written as a direction-level audit workbook
+- executable pairing happens later inside `src/wgan_option/utils/merged_xlsx.py`
+- the current trainer reads `news_direction_audit` and pairs `backward` and `forward` rows by `news_row_id`
 
-So the new SVI-based workflow is a migration target, not a capability the training code already has.
+So this document should now be read as design target plus implementation notes:
+
+- the audit-oriented workbook design still matters for thesis traceability
+- direct merged-SVI training is now executable
+- `gan_input_ready` in this workbook is still a staging/export view, not the current trainer's actual sheet input
 
 ## Target Goal
 
@@ -191,7 +201,9 @@ Notes:
 
 - This table is derived from `news_direction_audit`.
 - Only rows with acceptable fit quality should be promoted into this table.
-- It is a staging dataset for the future GAN pipeline, not something the current `src/wgan_option` dataloader can read directly yet.
+- It remains a useful staging/export dataset for filtered direction-level rows.
+- The current executable SVI trainer does **not** read this sheet directly.
+- Today's runtime pairing path reads `news_direction_audit` and forms `backward -> forward` pairs by `news_row_id`.
 
 ## Field Provenance
 
@@ -300,29 +312,32 @@ We should work in this order:
 
 1. verify `SVI vs raw option data`
 2. select usable `news × direction` samples
-3. refactor `src/wgan_option` from surface forecasting to SVI forecasting
+3. pair usable `backward` and `forward` rows into forecasting examples
+4. compare SVI forecasting against other representations at the experiment level
 
 ### Migration Impact on Training Code
 
-Current training code:
+Current executable state:
 
-- reads daily news embeddings
-- builds surface tensors
-- trains on `current_surface + text_embedding -> future_surface`
+- legacy daily training still reads daily news embeddings, builds surface tensors, and trains on `current_surface + text_embedding -> future_surface`
+- merged-SVI training now reads `merged_svi.xlsx`
+- runtime sample pairing happens from `news_direction_audit`, not from `gan_input_ready`
+- the model input family is already `current_svi + text -> future_svi`
 
-Future training code should:
+Research-facing design implications:
 
-- read `gan_input_ready`
-- parse SVI list fields into model features
-- change the input from `surface + text` to `SVI + text`
-- change the target from `future_surface` to `future_svi`
+- `news_direction_audit` remains the canonical audit table for deciding whether a row is usable
+- `gan_input_ready` remains a filtered direction-level export, useful for lineage and sanity checks
+- any future schema change should preserve the distinction between direction-level audit data and runtime paired forecasting samples
 
 ## Validation Checklist
 
 When using this document as the input spec, confirm these points:
 
 - every field listed above can be mapped to the merged news workbook, the precalib CSV, the SVI JSON, or a deterministic computation based on them
-- the document does **not** claim that the current `src/wgan_option` code already supports direct SVI training
+- the document distinguishes thesis-facing audit design from the current executable SVI trainer
+- the current executable SVI trainer reads `news_direction_audit` and pairs rows by `news_row_id`
+- `gan_input_ready` in `merged_svi.xlsx` remains direction-level and is not the trainer's current sheet input
 - the canonical sample unit remains `news × direction`
 - `backward` always uses `timestamp_utc`
 - `forward` always uses `timestamp_utc_plus_5m`

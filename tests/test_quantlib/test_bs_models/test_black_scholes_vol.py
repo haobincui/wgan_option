@@ -26,6 +26,68 @@ from quantlib.calculation.analytics.position.pricer.config import blackscholes_d
 from quantlib.calculation.analytics.position.pricer.pricer import BlackScholesValuationModelSingleAssetAnalytic
 
 
+def _bs_price(*, strike, option_type, spot, vol, tau, r, q):
+    return black_scholes_price(
+        strike=strike,
+        option_type=option_type,
+        spot=spot,
+        vol=vol,
+        tau=tau,
+        r=r,
+        q=q,
+    )
+
+
+def _bs_vega(*, strike, option_type, spot, vol, tau, r, q):
+    return black_scholes_vega(
+        strike=strike,
+        option_type=option_type,
+        spot=spot,
+        vol=vol,
+        tau=tau,
+        r=r,
+        q=q,
+    )
+
+
+def _bs_iv(*, price, strike, option_type, spot, tau, r, q):
+    return black_scholes_implied_vol(
+        price=price,
+        strike=strike,
+        option_type=option_type,
+        spot=spot,
+        tau=tau,
+        r=r,
+        q=q,
+    )
+
+
+def _bs_price_torch(*, strike, option_type, spot, vol, tau, r, q, device):
+    return black_scholes_price_torch(
+        strike=strike,
+        option_type=option_type,
+        spot=spot,
+        vol=vol,
+        tau=tau,
+        r=r,
+        q=q,
+        device=device,
+    )
+
+
+def _bs_iv_torch(*, price, strike, option_type, spot, tau, r, q, device):
+    return black_scholes_implied_vol_torch(
+        price=price,
+        strike=strike,
+        option_type=option_type,
+        spot=spot,
+        tau=tau,
+        r=r,
+        q=q,
+        device=device,
+    )
+
+
 class TestBlackScholesVol(unittest.TestCase):
 
     def test_black_scholes_vol_brentq(self):
@@ -37,39 +99,39 @@ class TestBlackScholesVol(unittest.TestCase):
         tau = 20 / 252
 
         tau_1 = 10 / 252
-        price_tau_1 = black_scholes_price(strike, option_type, spot, 0.4, tau_1, r, q)
-        res_tau_1 = brentq(lambda x: price_tau_1 - black_scholes_price(strike, option_type, spot, x, tau_1, r, q),
+        price_tau_1 = _bs_price(strike=strike, option_type=option_type, spot=spot, vol=0.4, tau=tau_1, r=r, q=q)
+        res_tau_1 = brentq(lambda x: price_tau_1 - _bs_price(strike=strike, option_type=option_type, spot=spot, vol=x, tau=tau_1, r=r, q=q),
                            0.001, 10)
         self.assertAlmostEqual(0.4, res_tau_1, delta=1e-9)
 
         tau_2 = 200 / 252
-        price_tau_2 = black_scholes_price(strike, option_type, spot, 0.4, tau_2, r, q)
-        res_tau_2 = brentq(lambda x: price_tau_2 - black_scholes_price(strike, option_type, spot, x, tau_2, r, q),
+        price_tau_2 = _bs_price(strike=strike, option_type=option_type, spot=spot, vol=0.4, tau=tau_2, r=r, q=q)
+        res_tau_2 = brentq(lambda x: price_tau_2 - _bs_price(strike=strike, option_type=option_type, spot=spot, vol=x, tau=tau_2, r=r, q=q),
                            0.001, 10)
         self.assertAlmostEqual(0.4, res_tau_2, delta=1e-9)
 
         tau_3 = 3000 / 252
-        price_tau_3 = black_scholes_price(strike, option_type, spot, 0.4, tau_3, r, q)
-        res_tau_3 = brentq(lambda x: price_tau_3 - black_scholes_price(strike, option_type, spot, x, tau_3, r, q),
+        price_tau_3 = _bs_price(strike=strike, option_type=option_type, spot=spot, vol=0.4, tau=tau_3, r=r, q=q)
+        res_tau_3 = brentq(lambda x: price_tau_3 - _bs_price(strike=strike, option_type=option_type, spot=spot, vol=x, tau=tau_3, r=r, q=q),
                            0.001, 10)
         self.assertAlmostEqual(0.4, res_tau_3, delta=1e-9)
 
         strike_1 = 80
-        price_strike_1 = black_scholes_price(strike_1, option_type, spot, 0.4, tau, r, q)
+        price_strike_1 = _bs_price(strike=strike_1, option_type=option_type, spot=spot, vol=0.4, tau=tau, r=r, q=q)
 
-        res_strike_1 = brentq(lambda x: price_strike_1 - black_scholes_price(strike_1, option_type, spot, x, tau, r, q),
+        res_strike_1 = brentq(lambda x: price_strike_1 - _bs_price(strike=strike_1, option_type=option_type, spot=spot, vol=x, tau=tau, r=r, q=q),
                               0.001, 10)
         self.assertAlmostEqual(0.4, res_strike_1, delta=1e-9)
 
         strike_2 = 120
-        price_strike_2 = black_scholes_price(strike_2, option_type, spot, 0.4, tau, r, q)
-        res_strike_2 = brentq(lambda x: price_strike_2 - black_scholes_price(strike_2, option_type, spot, x, tau, r, q),
+        price_strike_2 = _bs_price(strike=strike_2, option_type=option_type, spot=spot, vol=0.4, tau=tau, r=r, q=q)
+        res_strike_2 = brentq(lambda x: price_strike_2 - _bs_price(strike=strike_2, option_type=option_type, spot=spot, vol=x, tau=tau, r=r, q=q),
                               0.001, 10)
         self.assertAlmostEqual(0.4, res_strike_2, delta=1e-9)
 
         strike_3 = 180
-        price_strike_3 = black_scholes_price(strike_3, option_type, spot, 0.4, tau, r, q)
-        res_strike_3 = brentq(lambda x: price_strike_3 - black_scholes_price(strike_3, option_type, spot, x, tau, r, q),
+        price_strike_3 = _bs_price(strike=strike_3, option_type=option_type, spot=spot, vol=0.4, tau=tau, r=r, q=q)
+        res_strike_3 = brentq(lambda x: price_strike_3 - _bs_price(strike=strike_3, option_type=option_type, spot=spot, vol=x, tau=tau, r=r, q=q),
                               0, 1)
         self.assertAlmostEqual(0.4, res_strike_3, delta=1e-9)
 
@@ -77,13 +139,39 @@ class TestBlackScholesVol(unittest.TestCase):
         def find_vol(price, strike, option_type, spot, tau, r, q):
             def _target_func(param):
                 current_vol = param
-                current_price = black_scholes_price(strike, option_type, spot, current_vol, tau, r, q)
+                current_price = _bs_price(
+                    strike=strike,
+                    option_type=option_type,
+                    spot=spot,
+                    vol=current_vol,
+                    tau=tau,
+                    r=r,
+                    q=q,
+                )
                 return squared_error(price, current_price)
 
             def _gradian(param):
                 current_vol = param
-                return -2 * (price - black_scholes_price(strike, option_type, spot, current_vol, tau, r, q)) * \
-                       black_scholes_vega(strike, option_type, spot, current_vol, tau, r, q)
+                return -2 * (
+                    price
+                    - _bs_price(
+                        strike=strike,
+                        option_type=option_type,
+                        spot=spot,
+                        vol=current_vol,
+                        tau=tau,
+                        r=r,
+                        q=q,
+                    )
+                ) * _bs_vega(
+                    strike=strike,
+                    option_type=option_type,
+                    spot=spot,
+                    vol=current_vol,
+                    tau=tau,
+                    r=r,
+                    q=q,
+                )
 
             initial_guess = np.array([1])
 
@@ -99,39 +187,39 @@ class TestBlackScholesVol(unittest.TestCase):
         q = 0.03
         option_type = OptionType.CALL
         tau = 20 / 252
-        price = black_scholes_price(strike, option_type, spot, 9, tau, r, q)
+        price = _bs_price(strike=strike, option_type=option_type, spot=spot, vol=9, tau=tau, r=r, q=q)
 
         res_tau = find_vol(price, strike, option_type, spot, tau, r, q)
 
         self.assertAlmostEqual(9, res_tau, delta=1e-6)
 
         tau_1 = 10 / 252
-        price_tau_1 = black_scholes_price(strike, option_type, spot, 0.1, tau_1, r, q)
+        price_tau_1 = _bs_price(strike=strike, option_type=option_type, spot=spot, vol=0.1, tau=tau_1, r=r, q=q)
         res_tau_1 = find_vol(price_tau_1, strike, option_type, spot, tau_1, r, q)
         self.assertAlmostEqual(0.1, res_tau_1, delta=1e-6)
 
         tau_2 = 80 / 252
-        price_tau_2 = black_scholes_price(strike, option_type, spot, 0.4, tau_2, r, q)
+        price_tau_2 = _bs_price(strike=strike, option_type=option_type, spot=spot, vol=0.4, tau=tau_2, r=r, q=q)
         res_tau_2 = find_vol(price_tau_2, strike, option_type, spot, tau_2, r, q)
         self.assertAlmostEqual(0.4, res_tau_2, delta=1e-6)
 
         tau_3 = 3000 / 252
-        price_tau_3 = black_scholes_price(strike, option_type, spot, 0.9, tau_3, r, q)
+        price_tau_3 = _bs_price(strike=strike, option_type=option_type, spot=spot, vol=0.9, tau=tau_3, r=r, q=q)
         res_tau_3 = find_vol(price_tau_3, strike, option_type, spot, tau_3, r, q)
         self.assertAlmostEqual(0.9, res_tau_3, delta=1e-6)
 
         strike_1 = 80
-        price_strike_1 = black_scholes_price(strike_1, option_type, spot, 0.6, tau, r, q)
+        price_strike_1 = _bs_price(strike=strike_1, option_type=option_type, spot=spot, vol=0.6, tau=tau, r=r, q=q)
         res_strike_1 = find_vol(price_strike_1, strike_1, option_type, spot, tau, r, q)
         self.assertAlmostEqual(0.6, res_strike_1, delta=1e-6)
 
         strike_2 = 120
-        price_strike_2 = black_scholes_price(strike_2, option_type, spot, 0.1, tau, r, q)
+        price_strike_2 = _bs_price(strike=strike_2, option_type=option_type, spot=spot, vol=0.1, tau=tau, r=r, q=q)
         res_strike_2 = find_vol(price_strike_2, strike_2, option_type, spot, tau, r, q)
         self.assertAlmostEqual(0.1, res_strike_2, delta=1e-6)
 
         strike_3 = 180
-        price_strike_3 = black_scholes_price(strike_3, option_type, spot, 0.4, tau, r, q)
+        price_strike_3 = _bs_price(strike=strike_3, option_type=option_type, spot=spot, vol=0.4, tau=tau, r=r, q=q)
         res_strike_3 = find_vol(price_strike_3, strike_3, option_type, spot, tau, r, q)
         self.assertAlmostEqual(0.4, res_strike_3, delta=1e-6)
 
@@ -262,7 +350,16 @@ class TestBlackScholesVol(unittest.TestCase):
         tau = 20 / 252
         tau = torch.tensor([tau], device=device)
 
-        price = black_scholes_price_torch(strike, option_type, spot, torch.tensor([9], device=device), tau, r, q, device)
+        price = _bs_price_torch(
+            strike=strike,
+            option_type=option_type,
+            spot=spot,
+            vol=torch.tensor([9], device=device),
+            tau=tau,
+            r=r,
+            q=q,
+            device=device,
+        )
 
         res_tau = find_vol(price, strike, option_type, spot, tau, r, q, device).cpu().numpy()
 
@@ -270,37 +367,91 @@ class TestBlackScholesVol(unittest.TestCase):
 
         tau_1 = 10 / 252
         tau_1 = torch.tensor([tau_1], device=device)
-        price_tau_1 = black_scholes_price_torch(strike, option_type, spot, torch.tensor([0.1], device=device), tau_1, r, q, device)
+        price_tau_1 = _bs_price_torch(
+            strike=strike,
+            option_type=option_type,
+            spot=spot,
+            vol=torch.tensor([0.1], device=device),
+            tau=tau_1,
+            r=r,
+            q=q,
+            device=device,
+        )
         res_tau_1 = find_vol(price_tau_1, strike, option_type, spot, tau_1, r, q, device).cpu().numpy()
         self.assertAlmostEqual(0.1, res_tau_1, delta=1e-5)
 
         tau_2 = 80 / 252
         tau_2 = torch.tensor([tau_2], device=device)
-        price_tau_2 = black_scholes_price_torch(strike, option_type, spot, torch.tensor([0.4], device=device), tau_2, r, q, device)
+        price_tau_2 = _bs_price_torch(
+            strike=strike,
+            option_type=option_type,
+            spot=spot,
+            vol=torch.tensor([0.4], device=device),
+            tau=tau_2,
+            r=r,
+            q=q,
+            device=device,
+        )
         res_tau_2 = find_vol(price_tau_2, strike, option_type, spot, tau_2, r, q, device).cpu().numpy()
         self.assertAlmostEqual(0.4, res_tau_2, delta=1e-5)
 
         tau_3 = 3000 / 252
         tau_3 = torch.tensor([tau_3], device=device)
-        price_tau_3 = black_scholes_price_torch(strike, option_type, spot, torch.tensor([0.9], device=device), tau_3, r, q, device)
+        price_tau_3 = _bs_price_torch(
+            strike=strike,
+            option_type=option_type,
+            spot=spot,
+            vol=torch.tensor([0.9], device=device),
+            tau=tau_3,
+            r=r,
+            q=q,
+            device=device,
+        )
         res_tau_3 = find_vol(price_tau_3, strike, option_type, spot, tau_3, r, q, device).cpu().numpy()
         self.assertAlmostEqual(0.9, res_tau_3, delta=1e-5)
 
         strike_1 = 80
         strike_1 = torch.tensor([strike_1], device=device)
-        price_strike_1 = black_scholes_price_torch(strike_1, option_type, spot, torch.tensor([0.6], device=device), tau, r, q, device)
+        price_strike_1 = _bs_price_torch(
+            strike=strike_1,
+            option_type=option_type,
+            spot=spot,
+            vol=torch.tensor([0.6], device=device),
+            tau=tau,
+            r=r,
+            q=q,
+            device=device,
+        )
         res_strike_1 = find_vol(price_strike_1, strike_1, option_type, spot, tau, r, q, device).cpu().numpy()
         self.assertAlmostEqual(0.6, res_strike_1, delta=1e-5)
 
         strike_2 = 120 / 100
         strike_2 = torch.tensor([strike_2], device=device)
-        price_strike_2 = black_scholes_price_torch(strike_2, option_type, spot / 100, torch.tensor([0.1], device=device), tau, r, q, device)
+        price_strike_2 = _bs_price_torch(
+            strike=strike_2,
+            option_type=option_type,
+            spot=spot / 100,
+            vol=torch.tensor([0.1], device=device),
+            tau=tau,
+            r=r,
+            q=q,
+            device=device,
+        )
         res_strike_2 = find_vol(price_strike_2, strike_2, option_type, spot / 100, tau, r, q, device).cpu().numpy()
         self.assertAlmostEqual(0.1, res_strike_2, delta=1e-1)
 
         strike_3 = 180
         strike_3 = torch.tensor([strike_3], device=device)
-        price_strike_3 = black_scholes_price_torch(strike_3, option_type, spot, torch.tensor([0.4], device=device), tau, r, q, device)
+        price_strike_3 = _bs_price_torch(
+            strike=strike_3,
+            option_type=option_type,
+            spot=spot,
+            vol=torch.tensor([0.4], device=device),
+            tau=tau,
+            r=r,
+            q=q,
+            device=device,
+        )
         res_strike_3 = find_vol(price_strike_3, strike_3, option_type, spot, tau, r, q, device).cpu().numpy()
         self.assertAlmostEqual(0.4, res_strike_3, delta=1e-5)
 
@@ -336,13 +487,27 @@ class TestBlackScholesVol(unittest.TestCase):
         option_type_put = OptionType.PUT
         option_type_put_torch = torch.tensor([option_type_put.value], dtype=torch.bool, device=device)
 
-        call_vols_torch = black_scholes_implied_vol_torch(prices_torch, strikes_torch, option_type_call_torch,
-                                                          spots_torch, taus_torch, r_torch, q_torch,
-                                                          device=device)
+        call_vols_torch = _bs_iv_torch(
+            price=prices_torch,
+            strike=strikes_torch,
+            option_type=option_type_call_torch,
+            spot=spots_torch,
+            tau=taus_torch,
+            r=r_torch,
+            q=q_torch,
+            device=device,
+        )
 
-        put_vols_torch = black_scholes_implied_vol_torch(prices_torch, strikes_torch, option_type_put_torch,
-                                                         spots_torch, taus_torch, r_torch, q_torch,
-                                                         device=device)
+        put_vols_torch = _bs_iv_torch(
+            price=prices_torch,
+            strike=strikes_torch,
+            option_type=option_type_put_torch,
+            spot=spots_torch,
+            tau=taus_torch,
+            r=r_torch,
+            q=q_torch,
+            device=device,
+        )
 
         target_call_vols = torch.tensor([nan, nan, nan, 0.1033, 0.1434, 0.1434, 0.1434, 0.1705, 0.1705,
                                          0.1705, 0.1033, 0.1033, 0.1033, nan, 0.1033, nan], device=device)
@@ -388,17 +553,51 @@ class TestBlackScholesVol(unittest.TestCase):
         option_type_put = OptionType.PUT
         option_type_put_torch = torch.tensor([option_type_put.value], dtype=torch.bool, device=device)
 
-        call_vols_torch = black_scholes_implied_vol_torch(prices_torch, strikes_torch, option_type_call_torch,
-                                                          spots_torch, taus_torch, r_torch, q_torch,
-                                                          device=device)
-        call_vols = [black_scholes_implied_vol(prices[i], strikes[i], option_type_call, *spots, taus[i], *r, *q)
-                     for i in range(len(prices))]
+        call_vols_torch = _bs_iv_torch(
+            price=prices_torch,
+            strike=strikes_torch,
+            option_type=option_type_call_torch,
+            spot=spots_torch,
+            tau=taus_torch,
+            r=r_torch,
+            q=q_torch,
+            device=device,
+        )
+        call_vols = [
+            _bs_iv(
+                price=prices[i],
+                strike=strikes[i],
+                option_type=option_type_call,
+                spot=spots[0],
+                tau=taus[i],
+                r=r[0],
+                q=q[0],
+            )
+            for i in range(len(prices))
+        ]
 
-        put_vols_torch = black_scholes_implied_vol_torch(prices_torch, strikes_torch, option_type_put_torch,
-                                                         spots_torch, taus_torch, r_torch, q_torch,
-                                                         device=device)
-        put_vols = [black_scholes_implied_vol(prices[i], strikes[i], option_type_put, *spots, taus[i], *r, *q)
-                    for i in range(len(prices))]
+        put_vols_torch = _bs_iv_torch(
+            price=prices_torch,
+            strike=strikes_torch,
+            option_type=option_type_put_torch,
+            spot=spots_torch,
+            tau=taus_torch,
+            r=r_torch,
+            q=q_torch,
+            device=device,
+        )
+        put_vols = [
+            _bs_iv(
+                price=prices[i],
+                strike=strikes[i],
+                option_type=option_type_put,
+                spot=spots[0],
+                tau=taus[i],
+                r=r[0],
+                q=q[0],
+            )
+            for i in range(len(prices))
+        ]
 
         for i in range(len(prices)):
             self.assertAlmostEqual(call_vols[i], call_vols_torch.cpu().numpy()[i], delta=1e-6)

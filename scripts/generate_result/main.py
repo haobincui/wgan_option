@@ -6,12 +6,12 @@ import sys
 from pathlib import Path
 from textwrap import dedent
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-SRC_DIR = ROOT_DIR / "src"
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
+if __package__ in {None, ""}:
+    _ROOT_DIR = Path(__file__).resolve().parents[2]
+    if str(_ROOT_DIR) not in sys.path:
+        sys.path.insert(0, str(_ROOT_DIR))
+
+import scripts._path_setup  # noqa: F401
 
 from scripts.generate_result.generate_svi import main as svi_generate_main  # noqa: E402
 from scripts.generate_result.generate_vol import main as vol_generate_main  # noqa: E402

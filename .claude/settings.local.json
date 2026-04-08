@@ -21,7 +21,23 @@
       "Bash(/Users/haobincui/miniconda3/envs/py312/bin/python scripts/train/train_svi.py --dry-run)",
       "Bash(/Users/haobincui/miniconda3/envs/py312/bin/python scripts/train/main.py vol-xlsx --dry-run)",
       "Bash(/Users/haobincui/miniconda3/envs/py312/bin/python scripts/train/main.py svi-xlsx --dry-run)",
-      "Bash(chmod +x /Users/haobincui/Documents/wgan_option/run_train.sh)"
+      "Bash(chmod +x /Users/haobincui/Documents/wgan_option/run_train.sh)",
+      "Bash(find /home/haobin_cui/research_files_space_2/wgan_option/scripts -name \"__init__.py\" -exec wc -l {} \\\\;)",
+      "Bash(wc -l /home/haobin_cui/research_files_space_2/wgan_option/scripts/analyze_error/*.py /home/haobin_cui/research_files_space_2/wgan_option/scripts/generate_result/*.py)",
+      "Bash(grep -n \"for sample in selected_samples\" /home/haobin_cui/research_files_space_2/wgan_option/scripts/analyze_error/*.py)",
+      "Bash(grep -n \"for sample in selected_samples\" /home/haobin_cui/research_files_space_2/wgan_option/scripts/generate_result/*.py)",
+      "Bash(grep -rn \"sys.path.insert\\\\|ROOT_DIR\\\\|SRC_DIR\" /home/haobin_cui/research_files_space_2/wgan_option/scripts/merge_file/*.py)",
+      "Bash(grep \"write_json\\\\|save_payload_json\" /home/haobin_cui/research_files_space_2/wgan_option/scripts/analyze_error/*.py /home/haobin_cui/research_files_space_2/wgan_option/scripts/generate_result/*.py)",
+      "Bash(python3)",
+      "Bash(python -c \"import scripts._path_setup; print\\('OK:', scripts._path_setup.ROOT_DIR\\)\")",
+      "Bash(python -m pytest tests/test_scripts/ -v --timeout=60)",
+      "Bash(pip list:*)",
+      "Bash(pip install:*)",
+      "Bash(python -m pytest tests/test_scripts/ -v)",
+      "Bash(git stash:*)",
+      "Bash(python -m pytest tests/test_scripts/test_merge_file.py -v)",
+      "Bash(python -m pytest tests/test_scripts/test_analyze_error.py tests/test_scripts/test_generate_result.py -v)",
+      "Bash(python -m pytest tests/test_scripts/test_generate_surface_config_jobs.py tests/test_scripts/test_generate_surface_main.py tests/test_scripts/test_daily_surface_config.py tests/test_scripts/test_generate_minute_svi_params.py -v)"
     ]
   }
 }

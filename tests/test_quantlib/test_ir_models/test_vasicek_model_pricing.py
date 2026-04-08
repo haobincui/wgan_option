@@ -34,9 +34,17 @@ class TestVasicekModelPricing(unittest.TestCase):
         short_rate = 0.025
         option_type = OptionType.CALL
         strike_price = 95 / 100
-        price = vasicek_bond_option_price(strike_price, option_type, long_term_rate, mean_revert_speed, short_rate, vol, tau_option, tau_bond)
+        price = vasicek_bond_option_price(
+            strike_price=strike_price,
+            option_type=option_type,
+            mean_revert_speed=long_term_rate,
+            long_term_rate=mean_revert_speed,
+            initial_short_rate=short_rate,
+            vol=vol,
+            tau_option=tau_option,
+            tau_bond=tau_bond,
+        )
         self.assertAlmostEqual(price, 0.04677906633865181, delta = 1e-14)
-
 
 
 

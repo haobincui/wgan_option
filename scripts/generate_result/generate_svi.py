@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
+import sys
 from typing import Iterable, Optional
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-SRC_DIR = ROOT_DIR / "src"
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
+if __package__ in {None, ""}:
+    _ROOT_DIR = Path(__file__).resolve().parents[2]
+    if str(_ROOT_DIR) not in sys.path:
+        sys.path.insert(0, str(_ROOT_DIR))
+
+import scripts._path_setup  # noqa: F401
 
 from scripts.generate_result.common import (  # noqa: E402
     build_surface_grids,

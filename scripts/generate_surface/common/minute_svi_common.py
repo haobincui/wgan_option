@@ -20,17 +20,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
-import yaml
 
-ROOT_DIR = Path(__file__).resolve().parents[3]
-SRC_DIR = ROOT_DIR / "src"
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
+import scripts._path_setup  # noqa: F401
 
 from scripts.generate_surface.common.config_utils import (  # noqa: E402
     build_config_scope,
+    load_surface_builder_section,
+    parse_bool_from_config,
+    resolve_config_path,
     resolve_config_variables,
 )
 from logger import LoggingConfig, setup_logging  # noqa: E402
@@ -138,30 +135,8 @@ ProcessMinuteFn = Callable[
 ]
 
 
-def _resolve_config_path(path_value: str) -> Path:
-    path = Path(path_value)
-    if path.is_absolute():
-        return path
-
-    cwd_path = Path.cwd() / path
-    if cwd_path.exists():
-        return cwd_path
-
-    return ROOT_DIR / path
-
-
-def _parse_bool_from_config(value: Any, key: str) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int) and value in {0, 1}:
-        return bool(value)
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "y", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "n", "off"}:
-            return False
-    raise ValueError(f"Invalid boolean value for `{key}` in config: {value!r}")
+_resolve_config_path = resolve_config_path
+_parse_bool_from_config = parse_bool_from_config
 
 
 def _parse_expiration_time_utc(value: Any, key: str = "expiration_time_utc") -> dt_time:
@@ -188,26 +163,11 @@ def _parse_expiration_time_utc(value: Any, key: str = "expiration_time_utc") -> 
 
 
 def _load_minute_svi_config(config_path_value: str) -> Dict[str, Any]:
-    config_path = _resolve_config_path(config_path_value)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file does not exist: {config_path}")
-
-    with config_path.open("r", encoding="utf-8") as f:
-        raw_data = yaml.safe_load(f) or {}
-    if not isinstance(raw_data, dict):
-        raise ValueError(f"Config file must contain a YAML mapping: {config_path}")
-
-    config_root = raw_data.get("surface_builder", raw_data)
-    if not isinstance(config_root, dict):
-        raise ValueError(f"`surface_builder` must be a mapping in config file: {config_path}")
-
-    minute_section = config_root.get("minute_svi")
-    if minute_section is None:
-        minute_section = {k: v for k, v in config_root.items() if k in SUPPORTED_MINUTE_SVI_CONFIG_KEYS}
-    if not isinstance(minute_section, dict):
-        raise ValueError(f"`minute_svi` must be a mapping in config file: {config_path}")
-
-    defaults = dict(minute_section)
+    config_path, config_root, defaults = load_surface_builder_section(
+        config_path_value,
+        section_key="minute_svi",
+        supported_keys=SUPPORTED_MINUTE_SVI_CONFIG_KEYS,
+    )
     shared_glob = config_root.get("option_data_glob")
     if "input_glob" not in defaults and isinstance(shared_glob, str):
         defaults["input_glob"] = shared_glob
@@ -216,9 +176,6 @@ def _load_minute_svi_config(config_path_value: str) -> Dict[str, Any]:
         defaults.setdefault("log_file", "${output_dir}/minute_svi_params.log")
         defaults.setdefault("precalib_csv", "${output_dir}/minute_svi_precalib_points.csv")
 
-    unknown_keys = sorted(set(defaults.keys()) - SUPPORTED_MINUTE_SVI_CONFIG_KEYS)
-    if unknown_keys:
-        raise ValueError(f"Unknown minute_svi config keys in {config_path}: {unknown_keys}")
     return resolve_config_variables(defaults, extra_scope=build_config_scope(config_root))
 
 
@@ -251,10 +208,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         "--config",
         type=str,
         default=pre_args.config,
-        help=(
-            "YAML config path. Supports either top-level `minute_svi` mapping, "
-            "or `surface_builder.minute_svi` in a consolidated config."
-        ),
+        help="YAML config path with a required `surface_builder.minute_svi` mapping.",
     )
     parser.add_argument(
         "--input-glob",
@@ -625,7 +579,14 @@ def _prepare_option_candidates(
 
         effective_trade_ts = tau_anchor_ts if tau_anchor_ts is not None else row.trade_ts
         trade_ts_utc = _to_utc_timestamp(effective_trade_ts)
-        business_days = int(calendar.count_business_days(trade_ts_utc.date(), expiry_date, False, True))
+        business_days = int(
+            calendar.count_business_days(
+                trade_ts_utc.date(),
+                expiry_date,
+                include_start=False,
+                include_end=True,
+            )
+        )
         if business_days <= 0:
             stats["skip_tau_nonpositive"] += 1
             continue
@@ -877,9 +838,9 @@ def _setup_runtime(
     expiry_inference_date = _parse_data_date(args.data_date)
     calendar = usd_calendar()
     vol_daycount = DayCountBusN(
-        name=f"BUS{int(args.days_in_year)}USD",
-        calendar=calendar,
-        days_in_year=int(args.days_in_year),
+        f"BUS{int(args.days_in_year)}USD",
+        calendar,
+        int(args.days_in_year),
     )
     expiration_time_utc = _parse_expiration_time_utc(args.expiration_time_utc)
 

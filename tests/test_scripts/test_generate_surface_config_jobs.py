@@ -10,7 +10,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 import scripts.generate_surface.main as surface_main  # noqa: E402
-from scripts.generate_surface.common.minute_svi_common import _load_minute_svi_config  # noqa: E402
+from scripts.generate_surface.common.minute_svi_common import _load_minute_svi_config, _parse_args as parse_minute_args  # noqa: E402
 from scripts.generate_surface.common.minute_svi_excel_common import _parse_args as parse_excel_args  # noqa: E402
 from scripts.generate_surface.common.minute_svi_window_common import _parse_args as parse_window_args  # noqa: E402
 
@@ -73,8 +73,33 @@ class TestGenerateSurfaceConfigDrivenJob(unittest.TestCase):
             with self.assertRaises(ValueError):
                 surface_main.main(["--config", str(config_path)])
 
+    def test_main_requires_surface_builder_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "surface.yaml"
+            config_path.write_text("job: minute-svi-excel\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "top-level `surface_builder` mapping"):
+                surface_main.main(["--config", str(config_path)])
+
 
 class TestWindowAndExcelConfigParsing(unittest.TestCase):
+    def test_minute_svi_config_requires_nested_section(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "surface.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    surface_builder:
+                      option_data_glob: data/raw/shared/**/*.csv.gz
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "surface_builder.minute_svi"):
+                _load_minute_svi_config(str(config_path))
+
     def test_minute_svi_config_expands_output_dir_variables(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "surface.yaml"
@@ -106,6 +131,26 @@ class TestWindowAndExcelConfigParsing(unittest.TestCase):
             self.assertEqual(loaded["output_json"], "data/processed/window.json")
             self.assertEqual(loaded["log_file"], "data/processed/minute_svi.log")
             self.assertEqual(loaded["precalib_csv"], "data/processed/minute_svi_precalib.csv")
+
+    def test_minute_svi_args_reject_non_boolean_yaml_values(self):
+        for raw_value in ['"false"', "0"]:
+            with self.subTest(raw_value=raw_value):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    config_path = Path(tmpdir) / "surface.yaml"
+                    config_path.write_text(
+                        textwrap.dedent(
+                            f"""
+                            surface_builder:
+                              minute_svi:
+                                save_precalib_csv: {raw_value}
+                            """
+                        ).strip()
+                        + "\n",
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(ValueError, "YAML boolean"):
+                        parse_minute_args(["--config", str(config_path)])
 
     def test_window_args_read_defaults_from_default_yaml_shape(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -146,6 +191,24 @@ class TestWindowAndExcelConfigParsing(unittest.TestCase):
             )
             self.assertEqual(args.target_datetimes_file, "data/raw/targets.txt")
             self.assertEqual(args.window_minutes, 7)
+
+    def test_window_args_require_nested_window_section(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "surface.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    surface_builder:
+                      minute_svi:
+                        output_dir: data/processed
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "surface_builder.minute_svi_window"):
+                parse_window_args(["--config", str(config_path)])
 
     def test_excel_args_read_defaults_from_default_yaml_shape(self):
         with tempfile.TemporaryDirectory() as tmpdir:

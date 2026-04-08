@@ -191,7 +191,12 @@ class HolidayCalendar:
         if start == end:
             return 0
         if start > end:
-            return -self.count_business_days(end, start, include_end, include_start)
+            return -self.count_business_days(
+                end,
+                start,
+                include_start=include_end,
+                include_end=include_start,
+            )
         total = 0
         t = start + timedelta(days=1)
         while t < end:

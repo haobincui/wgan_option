@@ -331,7 +331,7 @@ class TestMergeSvi(unittest.TestCase):
     def test_main_writes_expected_workbook_and_filters_gan_input_ready(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             xlsx_path, result_dir = self._write_fixture_files(tmpdir)
-            output_path = result_dir / "merged.xlsx"
+            output_path = result_dir / "merged_svi.xlsx"
 
             with patch.object(merge_svi, "DEFAULT_NEWS_XLSX_PATH", xlsx_path):
                 written_path = merge_svi.main(["--input-dir", str(result_dir)])

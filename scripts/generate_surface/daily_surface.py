@@ -7,17 +7,18 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
-import yaml
+if __package__ in {None, ""}:
+    _ROOT_DIR = Path(__file__).resolve().parents[2]
+    if str(_ROOT_DIR) not in sys.path:
+        sys.path.insert(0, str(_ROOT_DIR))
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-SRC_DIR = ROOT_DIR / "src"
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
+import scripts._path_setup  # noqa: F401
 
 from scripts.generate_surface.common.config_utils import (  # noqa: E402
     build_config_scope,
+    load_surface_builder_section,
+    parse_bool_from_config,
+    resolve_config_path,
     resolve_config_variables,
 )
 from quantlib.vol_surface.builder import OptionSurfaceBuilder, OptionSurfaceBuilderConfig  # noqa: E402
@@ -37,63 +38,22 @@ SUPPORTED_DAILY_SURFACE_CONFIG_KEYS = {
 }
 
 
-def _resolve_config_path(path_value: str) -> Path:
-    path = Path(path_value)
-    if path.is_absolute():
-        return path
-
-    cwd_path = Path.cwd() / path
-    if cwd_path.exists():
-        return cwd_path
-
-    return ROOT_DIR / path
-
-
-def _parse_bool_from_config(value: Any, key: str) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int) and value in {0, 1}:
-        return bool(value)
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "y", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "n", "off"}:
-            return False
-    raise ValueError(f"Invalid boolean value for `{key}` in config: {value!r}")
+_resolve_config_path = resolve_config_path
+_parse_bool_from_config = parse_bool_from_config
 
 
 def _load_daily_surface_config(config_path_value: str) -> Dict[str, Any]:
-    config_path = _resolve_config_path(config_path_value)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file does not exist: {config_path}")
-
-    with config_path.open("r", encoding="utf-8") as f:
-        raw_data = yaml.safe_load(f) or {}
-    if not isinstance(raw_data, dict):
-        raise ValueError(f"Config file must contain a YAML mapping: {config_path}")
-
-    config_root = raw_data.get("surface_builder", raw_data)
-    if not isinstance(config_root, dict):
-        raise ValueError(f"`surface_builder` must be a mapping in config file: {config_path}")
-
-    daily_section = config_root.get("daily_surface")
-    if daily_section is None:
-        daily_section = {k: v for k, v in config_root.items() if k in SUPPORTED_DAILY_SURFACE_CONFIG_KEYS}
-    if not isinstance(daily_section, dict):
-        raise ValueError(f"`daily_surface` must be a mapping in config file: {config_path}")
-
-    legacy_defaults = {k: v for k, v in config_root.items() if k in SUPPORTED_DAILY_SURFACE_CONFIG_KEYS}
-    defaults = dict(legacy_defaults)
-    defaults.update(daily_section)
+    config_path, config_root, defaults = load_surface_builder_section(
+        config_path_value,
+        section_key="daily_surface",
+        supported_keys=SUPPORTED_DAILY_SURFACE_CONFIG_KEYS,
+        merge_root_supported_defaults=True,
+    )
 
     shared_glob = config_root.get("option_data_glob")
     if "input_glob" not in defaults and isinstance(shared_glob, str):
         defaults["input_glob"] = shared_glob
 
-    unknown_keys = sorted(set(daily_section.keys()) - SUPPORTED_DAILY_SURFACE_CONFIG_KEYS)
-    if unknown_keys:
-        raise ValueError(f"Unknown daily_surface config keys in {config_path}: {unknown_keys}")
     return resolve_config_variables(defaults, extra_scope=build_config_scope(config_root))
 
 
@@ -126,10 +86,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         "--config",
         type=str,
         default=pre_args.config,
-        help=(
-            "YAML config path. Supports either top-level `daily_surface` mapping, "
-            "or `surface_builder.daily_surface` in a consolidated config."
-        ),
+        help="YAML config path with a required `surface_builder.daily_surface` mapping.",
     )
     parser.add_argument(
         "--input-glob",

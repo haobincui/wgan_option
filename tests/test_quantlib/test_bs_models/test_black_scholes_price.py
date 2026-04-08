@@ -23,6 +23,31 @@ from quantlib.calculation.analytics.position.pricer.pricer import BlackScholesVa
 from quantlib.calendar.daycount import act_365
 
 
+def _bs_price(*, strike, option_type, spot, vol, tau, r, q):
+    return black_scholes_price(
+        strike=strike,
+        option_type=option_type,
+        spot=spot,
+        vol=vol,
+        tau=tau,
+        r=r,
+        q=q,
+    )
+
+
+def _bs_price_torch(*, strike, option_type, spot, vol, tau, r, q, device):
+    return black_scholes_price_torch(
+        strike=strike,
+        option_type=option_type,
+        spot=spot,
+        vol=vol,
+        tau=tau,
+        r=r,
+        q=q,
+        device=device,
+    )
+
+
 class TestBlackScholesPrice(unittest.TestCase):
 
     def test_vanilla_european_price(self):
@@ -94,9 +119,9 @@ class TestBlackScholesPrice(unittest.TestCase):
 
         tau = 4 / 250
 
-        kp = black_scholes_price(strike + config.dk, option_type, spot, vol, tau, r, q)
-        k = black_scholes_price(strike, option_type, spot, vol, tau, r, q)
-        km = black_scholes_price(strike - config.dk, option_type, spot, vol, tau, r, q)
+        kp = _bs_price(strike=strike + config.dk, option_type=option_type, spot=spot, vol=vol, tau=tau, r=r, q=q)
+        k = _bs_price(strike=strike, option_type=option_type, spot=spot, vol=vol, tau=tau, r=r, q=q)
+        km = _bs_price(strike=strike - config.dk, option_type=option_type, spot=spot, vol=vol, tau=tau, r=r, q=q)
 
         density = (kp - 2 * k + km) / (config.dk ** 2)
 
@@ -111,7 +136,15 @@ class TestBlackScholesPrice(unittest.TestCase):
         q = 0.03
         tau = 10/252
 
-        target_price = black_scholes_price(strike, OptionType.CALL, spot, vol, tau, r, q)
+        target_price = _bs_price(
+            strike=strike,
+            option_type=OptionType.CALL,
+            spot=spot,
+            vol=vol,
+            tau=tau,
+            r=r,
+            q=q,
+        )
         strike = torch.Tensor([strike])
         spot = torch.Tensor([spot])
         vol = torch.Tensor([vol])
@@ -119,7 +152,16 @@ class TestBlackScholesPrice(unittest.TestCase):
         r = torch.Tensor([r])
         q = torch.Tensor([q])
         device = 'cpu'
-        torch_price = black_scholes_price_torch(strike, [OptionType.CALL], spot, vol, tau, r, q, device)
+        torch_price = _bs_price_torch(
+            strike=strike,
+            option_type=[OptionType.CALL],
+            spot=spot,
+            vol=vol,
+            tau=tau,
+            r=r,
+            q=q,
+            device=device,
+        )
 
         self.assertAlmostEqual(target_price, torch_price, delta=1e-4)
 
@@ -132,7 +174,18 @@ class TestBlackScholesPrice(unittest.TestCase):
         q = 0.05
         tau = [5/252, 10/252, 50/252, 250/252]
 
-        prices = [black_scholes_price(strike, OptionType.CALL, spots, vol, t, r, q) for strike, vol, t in zip(strikes, vol, tau)]
+        prices = [
+            _bs_price(
+                strike=strike,
+                option_type=OptionType.CALL,
+                spot=spots,
+                vol=vol_value,
+                tau=t,
+                r=r,
+                q=q,
+            )
+            for strike, vol_value, t in zip(strikes, vol, tau)
+        ]
 
         strikes = torch.Tensor(strikes)
         spots = torch.Tensor([spots])
@@ -141,11 +194,19 @@ class TestBlackScholesPrice(unittest.TestCase):
         r = torch.Tensor([r])
         q = torch.Tensor([q])
         device = 'cpu'
-        torch_prices = black_scholes_price_torch(strikes, [OptionType.CALL], spots, vol, tau, r, q, device).cpu().numpy()
+        torch_prices = _bs_price_torch(
+            strike=strikes,
+            option_type=[OptionType.CALL],
+            spot=spots,
+            vol=vol,
+            tau=tau,
+            r=r,
+            q=q,
+            device=device,
+        ).cpu().numpy()
 
         for c_price, t_price in zip(prices, torch_prices):
             self.assertAlmostEqual(c_price, t_price, delta=1e-5)
-
 
 
 

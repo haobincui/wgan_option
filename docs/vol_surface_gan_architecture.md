@@ -4,6 +4,7 @@ This document describes the intended thesis-facing architecture and the current 
 
 It should be read together with:
 
+- `docs/current_executable_workflows.md`
 - `docs/input_vol.md`
 - `docs/input_svi.md`
 - `docs/gan_model_detailed_architecture.md`
@@ -33,6 +34,10 @@ In the current thesis direction, the preferred executable representation is:
 The repo also still supports the older daily proxy-surface workflow for comparison and backwards compatibility.
 
 ## 2. Executable Training Paths in the Repo
+
+For a command-oriented walkthrough of the current runnable pipeline, see:
+
+- `docs/current_executable_workflows.md`
 
 There are now three training modes, and only two of them are directly relevant to this architecture note.
 
@@ -76,6 +81,10 @@ The effective supervised target is:
 (\text{current reconstructed vol surface},\ \text{text embedding}) \rightarrow \text{future reconstructed vol surface}
 \]
 
+Current preferred config entrypoint:
+
+- `python scripts/train/main.py vol-xlsx --config configs/wgan/train_vol_xlsx.yaml`
+
 ### 2.3 Merged SVI supervised regressor
 
 Files:
@@ -101,6 +110,10 @@ This path is complementary to the surface WGAN path and supports representation 
 
 ## 3. Data Lineage for the Preferred Vol Workflow
 
+The corresponding config and workflow overview is summarized in:
+
+- `docs/current_executable_workflows.md`
+
 The practical data flow for the merged vol-surface path is:
 
 1. raw option trades
@@ -117,6 +130,10 @@ Main entrypoint:
 Important subcommand:
 
 - `minute-svi-excel`
+
+Preferred config file:
+
+- `configs/surface_builder/minute-svi-excel.yaml`
 
 Typical artifacts:
 
@@ -146,6 +163,10 @@ This distinction should remain explicit in any future extension to the pipeline.
 ### 3.3 Workbook training input
 
 Training uses the `gan_input_ready` sheet from `merged_vol.xlsx`.
+
+Preferred training config:
+
+- `configs/wgan/train_vol_xlsx.yaml`
 
 The loader performs:
 
@@ -338,6 +359,15 @@ This is intended for late-stage refinement when validation improvement has flatt
 For the exact scheduler behavior and formulas, see:
 
 - `docs/reduce_lr_on_plateau.md`
+
+### 6.5 Downstream inspection tooling
+
+After training, the repo's current supported inspection layer is:
+
+- `scripts/generate_result/main.py`
+- `scripts/analyze_error/main.py`
+
+These scripts sit downstream of the merged training workflows and are part of the practical experiment loop, even though they are not themselves part of the WGAN architecture.
 
 ## 7. Why the Merged Vol Path Matters
 

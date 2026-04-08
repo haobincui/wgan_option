@@ -11,60 +11,36 @@ import pandas as pd
 import torch
 
 if __package__ in {None, ""}:
-    ROOT_DIR = Path(__file__).resolve().parents[3]
-    if str(ROOT_DIR) not in sys.path:
-        sys.path.insert(0, str(ROOT_DIR))
-    from scripts.generate_surface.dispatch import ensure_cuda_available  # noqa: E402
-    from scripts.generate_surface.common.minute_svi_common import (  # noqa: E402
-        PRECALIB_CSV_HEADERS,
-        ContractMeta,
-        MinuteOptionCandidate,
-        MinuteTradeRow,
-        _build_rows_for_minute,
-        _collect_minute_spot,
-        _finalize_minute_surface,
-        _get_file_target_future_month_code,
-        _infer_file_date_range,
-        _log_cli_arguments,
-        _make_expiry_dt_utc,
-        _make_spot_cache_key,
-        _option_type_name,
-        _parse_args,
-        _parse_data_date,
-        _prepare_option_candidates,
-        _resolve_config_path,
-        _tau_years_from_trade_to_expiry,
-        _to_json_native,
-        _to_utc_minute_string,
-        _to_utc_timestamp,
-        run_minute_svi_job,
-    )
-else:
-    from ..dispatch import ensure_cuda_available  # noqa: E402
-    from ..common.minute_svi_common import (  # noqa: E402
-        PRECALIB_CSV_HEADERS,
-        ContractMeta,
-        MinuteOptionCandidate,
-        MinuteTradeRow,
-        _build_rows_for_minute,
-        _collect_minute_spot,
-        _finalize_minute_surface,
-        _get_file_target_future_month_code,
-        _infer_file_date_range,
-        _log_cli_arguments,
-        _make_expiry_dt_utc,
-        _make_spot_cache_key,
-        _option_type_name,
-        _parse_args,
-        _parse_data_date,
-        _prepare_option_candidates,
-        _resolve_config_path,
-        _tau_years_from_trade_to_expiry,
-        _to_json_native,
-        _to_utc_minute_string,
-        _to_utc_timestamp,
-        run_minute_svi_job,
-    )
+    _ROOT_DIR = Path(__file__).resolve().parents[3]
+    if str(_ROOT_DIR) not in sys.path:
+        sys.path.insert(0, str(_ROOT_DIR))
+
+import scripts._path_setup  # noqa: F401
+from scripts.generate_surface.dispatch import ensure_cuda_available  # noqa: E402
+from scripts.generate_surface.common.minute_svi_common import (  # noqa: E402
+    PRECALIB_CSV_HEADERS,
+    ContractMeta,
+    MinuteOptionCandidate,
+    MinuteTradeRow,
+    _build_rows_for_minute,
+    _collect_minute_spot,
+    _finalize_minute_surface,
+    _get_file_target_future_month_code,
+    _infer_file_date_range,
+    _log_cli_arguments,
+    _make_expiry_dt_utc,
+    _make_spot_cache_key,
+    _option_type_name,
+    _parse_args,
+    _parse_data_date,
+    _prepare_option_candidates,
+    _resolve_config_path,
+    _tau_years_from_trade_to_expiry,
+    _to_json_native,
+    _to_utc_minute_string,
+    _to_utc_timestamp,
+    run_minute_svi_job,
+)
 
 from quantlib.calculation.analytics.models.analytical.equity.formula import (  # noqa: E402
     black_scholes_implied_vol_torch,

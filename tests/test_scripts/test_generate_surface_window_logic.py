@@ -163,7 +163,7 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
 
     def _vol_daycount(self) -> DayCountBusN:
         calendar = usd_calendar()
-        return DayCountBusN(name="BUS250USD", calendar=calendar, days_in_year=250)
+        return DayCountBusN("BUS250USD", calendar, 250)
 
     def test_build_target_window_map_uses_strict_forward_backward_ranges(self):
         window_map = window_common._build_target_window_map([self.TARGET_TS], window_minutes=5)

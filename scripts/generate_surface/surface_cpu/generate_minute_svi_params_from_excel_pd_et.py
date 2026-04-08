@@ -6,30 +6,21 @@ import sys
 from pathlib import Path
 
 if __package__ in {None, ""}:
-    ROOT_DIR = Path(__file__).resolve().parents[3]
-    if str(ROOT_DIR) not in sys.path:
-        sys.path.insert(0, str(ROOT_DIR))
-    from scripts.generate_surface.common.minute_svi_excel_common import (  # noqa: E402
-        _excel_time_fraction_to_hms,
-        _load_target_datetimes_from_excel,
-        _normalize_date_value,
-        _normalize_time_value,
-        _parse_args,
-        _to_utc_string,
-        run_excel_job,
-    )
-    from scripts.generate_surface.surface_cpu.generate_minute_svi_params import _process_minute  # noqa: E402
-else:
-    from ..common.minute_svi_excel_common import (  # noqa: E402
-        _excel_time_fraction_to_hms,
-        _load_target_datetimes_from_excel,
-        _normalize_date_value,
-        _normalize_time_value,
-        _parse_args,
-        _to_utc_string,
-        run_excel_job,
-    )
-    from .generate_minute_svi_params import _process_minute  # noqa: E402
+    _ROOT_DIR = Path(__file__).resolve().parents[3]
+    if str(_ROOT_DIR) not in sys.path:
+        sys.path.insert(0, str(_ROOT_DIR))
+
+import scripts._path_setup  # noqa: F401
+from scripts.generate_surface.common.minute_svi_excel_common import (  # noqa: E402
+    _excel_time_fraction_to_hms,
+    _load_target_datetimes_from_excel,
+    _normalize_date_value,
+    _normalize_time_value,
+    _parse_args,
+    _to_utc_string,
+    run_excel_job,
+)
+from scripts.generate_surface.surface_cpu.generate_minute_svi_params import _process_minute  # noqa: E402
 
 
 def run(args):

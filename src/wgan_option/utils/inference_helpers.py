@@ -21,7 +21,7 @@ from wgan_option.utils.merged_xlsx import (
     _normalize_svi_matrix,
 )
 
-_RECONSTRUCTION_DAYCOUNT = DayCountBusN("BUS250", 250, embedded_calendar())
+_RECONSTRUCTION_DAYCOUNT = DayCountBusN("BUS250", embedded_calendar(), 250)
 _RECONSTRUCTION_VALUATION_DATE = date(2023, 1, 2)
 
 

@@ -194,7 +194,13 @@ def generate_schedule_simple(start: date,
         c = 1
         while t > start:
             dates.add(t)
-            t = plus_period(end, Period(-c * q, u), BusinessDayConvention.NONE, calendar, EomConvention.NONE)
+            t = plus_period(
+                end,
+                Period(-c * q, u),
+                adj=BusinessDayConvention.NONE,
+                calendar=calendar,
+                eom=EomConvention.NONE,
+            )
             if adj_eom:
                 t = last_day_of_month(t) if eom_rule == EomConvention.LAST_DAY else last_business_day_of_month(t,
                                                                                                                calendar)
@@ -205,7 +211,13 @@ def generate_schedule_simple(start: date,
         c = 1
         while t < end:
             dates.add(t)
-            t = plus_period(start, Period(c * q, u), BusinessDayConvention.NONE, calendar, EomConvention.NONE)
+            t = plus_period(
+                start,
+                Period(c * q, u),
+                adj=BusinessDayConvention.NONE,
+                calendar=calendar,
+                eom=EomConvention.NONE,
+            )
             if adj_eom:
                 t = last_day_of_month(t) if eom_rule == EomConvention.LAST_DAY else last_business_day_of_month(t,
                                                                                                                calendar)
@@ -224,8 +236,22 @@ def generate_schedule_by_tenor(start: date,
                                calendar: HolidayCalendar,
                                eom: EomConvention = EomConvention.NONE,
                                roll_backward: bool = True) -> List[date]:
-    end = plus_period(start, tenor, BusinessDayConvention.NONE, calendar, EomConvention.NONE)
-    return generate_schedule_simple(start, end, freq, bus_rule, calendar, eom, roll_backward)
+    end = plus_period(
+        start,
+        tenor,
+        adj=BusinessDayConvention.NONE,
+        calendar=calendar,
+        eom=EomConvention.NONE,
+    )
+    return generate_schedule_simple(
+        start,
+        end,
+        freq,
+        bus_rule=bus_rule,
+        calendar=calendar,
+        eom_rule=eom,
+        roll_backward=roll_backward,
+    )
 
 
 def get_third_wednesday_for_current_month(d: Union[date, datetime], calendars: List[HolidayCalendar]) -> date:

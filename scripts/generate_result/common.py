@@ -6,7 +6,6 @@ import argparse
 import csv
 import json
 import re
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
@@ -14,12 +13,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 import numpy as np
 import yaml
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-SRC_DIR = ROOT_DIR / "src"
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
+import scripts._path_setup  # noqa: F401
 
 from wgan_option.result_config import (  # noqa: E402
     DEFAULT_SVI_RESULT_CONFIG_PATH,
@@ -37,10 +31,18 @@ VALID_SPLITS = {"train", "val", "all"}
 RUN_DIR_PATTERN = re.compile(r"^\d{8}_\d{6}$")
 
 
-def build_result_arg_parser(*, description: str, default_config_path: str) -> argparse.ArgumentParser:
-    """Create a standard result-generation parser."""
+# ---------------------------------------------------------------------------
+# Shared CLI argument helpers (used by both generate_result and analyze_error)
+# ---------------------------------------------------------------------------
 
-    parser = argparse.ArgumentParser(description=description)
+
+def add_shared_sample_selection_args(
+    parser: argparse.ArgumentParser,
+    *,
+    default_config_path: str,
+) -> None:
+    """Add the shared CLI arguments common to result-generation and error-analysis."""
+
     parser.add_argument(
         "--config",
         type=str,
@@ -57,7 +59,7 @@ def build_result_arg_parser(*, description: str, default_config_path: str) -> ar
     parser.add_argument(
         "--print-config",
         action="store_true",
-        help="Print resolved config before generation.",
+        help="Print resolved config.",
     )
     parser.add_argument("--checkpoint", type=str, default=None, help="Explicit checkpoint path override.")
     parser.add_argument("--output-dir", type=str, default=None, help="Override output root directory.")
@@ -71,6 +73,32 @@ def build_result_arg_parser(*, description: str, default_config_path: str) -> ar
     parser.add_argument("--sample-id", type=str, default=None, help="Sample id when --selection-mode=sample_id.")
     parser.add_argument("--row-index", type=int, default=None, help="0-based row index inside the selected split.")
     parser.add_argument("--limit", type=int, default=None, help="Sample count when --selection-mode=first_n.")
+
+
+def apply_shared_overrides(args: argparse.Namespace, overrides: Dict[str, Any]) -> None:
+    """Apply the shared CLI overrides into the overrides dict (mutates in place)."""
+
+    if args.checkpoint is not None:
+        overrides["checkpoint_path"] = args.checkpoint
+    if args.output_dir is not None:
+        overrides["output_dir"] = args.output_dir
+    if args.split is not None:
+        overrides["split"] = args.split
+    if args.selection_mode is not None:
+        overrides["selection_mode"] = args.selection_mode
+    if args.sample_id is not None:
+        overrides["sample_id"] = args.sample_id
+    if args.row_index is not None:
+        overrides["row_index"] = args.row_index
+    if args.limit is not None:
+        overrides["limit"] = args.limit
+
+
+def build_result_arg_parser(*, description: str, default_config_path: str) -> argparse.ArgumentParser:
+    """Create a standard result-generation parser."""
+
+    parser = argparse.ArgumentParser(description=description)
+    add_shared_sample_selection_args(parser, default_config_path=default_config_path)
     parser.add_argument("--no-plot", action="store_true", help="Disable PNG plot generation.")
     parser.add_argument("--no-json", action="store_true", help="Disable per-sample JSON payload output.")
     return parser
@@ -88,20 +116,7 @@ def resolve_result_config(
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     overrides = parse_generate_result_overrides(args.set)
-    if args.checkpoint is not None:
-        overrides["checkpoint_path"] = args.checkpoint
-    if args.output_dir is not None:
-        overrides["output_dir"] = args.output_dir
-    if args.split is not None:
-        overrides["split"] = args.split
-    if args.selection_mode is not None:
-        overrides["selection_mode"] = args.selection_mode
-    if args.sample_id is not None:
-        overrides["sample_id"] = args.sample_id
-    if args.row_index is not None:
-        overrides["row_index"] = args.row_index
-    if args.limit is not None:
-        overrides["limit"] = args.limit
+    apply_shared_overrides(args, overrides)
     if args.no_plot:
         overrides["save_plots"] = False
     if args.no_json:
@@ -186,6 +201,10 @@ def save_payload_json(payload: Mapping[str, Any], output_path: str | Path) -> Pa
     with output.open("w", encoding="utf-8") as handle:
         json.dump(dict(payload), handle, indent=2, ensure_ascii=False)
     return output
+
+
+# Alias: analyze_error uses the name write_json for the same functionality.
+write_json = save_payload_json
 
 
 def compute_surface_metrics(generated_surface: np.ndarray, real_surface: np.ndarray) -> Dict[str, float]:

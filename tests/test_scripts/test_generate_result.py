@@ -392,6 +392,11 @@ class TestGenerateResultScripts(unittest.TestCase):
             self.assertEqual(config.row_index, 2)
             self.assertFalse(config.save_json)
 
+            for invalid_bool in ["save_json=off", "save_json=yes", "save_json=1"]:
+                with self.subTest(invalid_bool=invalid_bool):
+                    with self.assertRaises(ValueError):
+                        parse_generate_result_overrides([invalid_bool])
+
     def test_vol_split_and_selection_helpers_follow_chronological_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_vol_workbook(tmpdir)

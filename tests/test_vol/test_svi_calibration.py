@@ -30,7 +30,7 @@ class TestSviCalibration(unittest.TestCase):
     def setUp(self):
         self.calendar = embedded_calendar()
         self.valuation_date = date(2023, 1, 2)
-        self.daycount = DayCountBusN(name="BUS250", calendar=self.calendar, days_in_year=250)
+        self.daycount = DayCountBusN("BUS250", self.calendar, 250)
         self.vols = [[0.22, 0.20, 0.23], [0.24, 0.21, 0.25]]
         self.percent_strikes = [[0.9, 1.0, 1.1], [0.9, 1.0, 1.1]]
         self.business_days = [5, 21]

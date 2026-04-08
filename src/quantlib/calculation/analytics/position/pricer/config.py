@@ -28,8 +28,13 @@ class BlackScholesPricerConfig:
     valuation_method: ValuationMethod = ValuationMethod.Analytical
 
     def next_valuation_date(self, valuation_date: date):
-        return plus_period(valuation_date, self.next_day,
-                           BusinessDayConvention.FOLLOWING, self.calendar, EomConvention.NONE)
+        return plus_period(
+            valuation_date,
+            self.next_day,
+            adj=BusinessDayConvention.FOLLOWING,
+            calendar=self.calendar,
+            eom=EomConvention.NONE,
+        )
 
 
 blackscholes_default_config = BlackScholesPricerConfig()

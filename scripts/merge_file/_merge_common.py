@@ -274,12 +274,12 @@ def _compute_model_values(
     if percent_strike <= 0:
         return None, None
     total_var = _svi_function(
-        float(slice_row["a"]),
-        float(slice_row["b"]),
-        float(slice_row["rho"]),
-        float(slice_row["m"]),
-        float(slice_row["sigma"]),
-        [float(percent_strike)],
+        a=float(slice_row["a"]),
+        b=float(slice_row["b"]),
+        rho=float(slice_row["rho"]),
+        m=float(slice_row["m"]),
+        sigma=float(slice_row["sigma"]),
+        percent_strike=[float(percent_strike)],
     )[0]
     model_iv = _vars_to_vols(
         np.asarray([total_var], dtype=np.float64),

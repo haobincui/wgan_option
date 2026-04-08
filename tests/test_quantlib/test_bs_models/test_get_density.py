@@ -19,6 +19,56 @@ from quantlib.calendar.daycount import bus_250_gbp
 from quantlib.risk_engine.implied_distribution.get_density import get_density_torch, get_density
 
 
+def _bs_price(*, strike, option_type, spot, vol, tau, r, q):
+    return black_scholes_price(
+        strike=strike,
+        option_type=option_type,
+        spot=spot,
+        vol=vol,
+        tau=tau,
+        r=r,
+        q=q,
+    )
+
+
+def _bs_iv(*, price, strike, option_type, spot, tau, r, q):
+    return black_scholes_implied_vol(
+        price=price,
+        strike=strike,
+        option_type=option_type,
+        spot=spot,
+        tau=tau,
+        r=r,
+        q=q,
+    )
+
+
+def _bs_price_torch(*, strike, option_type, spot, vol, tau, r, q, device):
+    return black_scholes_price_torch(
+        strike=strike,
+        option_type=option_type,
+        spot=spot,
+        vol=vol,
+        tau=tau,
+        r=r,
+        q=q,
+        device=device,
+    )
+
+
+def _bs_iv_torch(*, price, strike, option_type, spot, tau, r, q, device):
+    return black_scholes_implied_vol_torch(
+        price=price,
+        strike=strike,
+        option_type=option_type,
+        spot=spot,
+        tau=tau,
+        r=r,
+        q=q,
+        device=device,
+    )
+
+
 def get_tau(quote_time: datetime, maturity_time: datetime, daycount) -> float:
     base_tau = daycount(quote_time.date(), maturity_time.date())
     seconds_per_day = 86400.0
@@ -45,9 +95,9 @@ class TestGetDensity(unittest.TestCase):
         r = 0.05
         q = 0.03
         vol = 0.5
-        price = black_scholes_price(strike, option_type, spot, vol, tau, r, q)
-        kp = black_scholes_price(strike + 0.0001, option_type, spot, vol, tau, r, q)
-        kd = black_scholes_price(strike - 0.0001, option_type, spot, vol, tau, r, q)
+        price = _bs_price(strike=strike, option_type=option_type, spot=spot, vol=vol, tau=tau, r=r, q=q)
+        kp = _bs_price(strike=strike + 0.0001, option_type=option_type, spot=spot, vol=vol, tau=tau, r=r, q=q)
+        kd = _bs_price(strike=strike - 0.0001, option_type=option_type, spot=spot, vol=vol, tau=tau, r=r, q=q)
         cpu_result = (kp - 2 * price + kd) / 0.0001 ** 2
 
         price = torch.tensor([price], dtype=torch.float64, device=device)
@@ -82,26 +132,30 @@ class TestGetDensity(unittest.TestCase):
         tau = get_tau(quote_time, maturity, daycount)
         tau_torch = torch.tensor([tau], dtype=torch.float64, device=device)
 
-        vol = black_scholes_implied_vol(price, strike, option_type, spot, tau, 0.05, 0.05)
-        vol_torch = black_scholes_implied_vol_torch(
-            price_torch, strike_torch, option_type_torch, spot_torch, tau_torch,
-            torch.tensor([0.05], dtype=torch.float64, device=device),
-            torch.tensor([0.05], dtype=torch.float64, device=device),
-            device
+        vol = _bs_iv(price=price, strike=strike, option_type=option_type, spot=spot, tau=tau, r=0.05, q=0.05)
+        vol_torch = _bs_iv_torch(
+            price=price_torch,
+            strike=strike_torch,
+            option_type=option_type_torch,
+            spot=spot_torch,
+            tau=tau_torch,
+            r=torch.tensor([0.05], dtype=torch.float64, device=device),
+            q=torch.tensor([0.05], dtype=torch.float64, device=device),
+            device=device,
         )
 
         self.assertAlmostEqual(vol, vol_torch, delta=1e-4)
 
-        price = black_scholes_price(strike, option_type, spot, vol, tau, 0.05, 0.05)
-        price_torch = black_scholes_price_torch(
-            strike_torch,
-            option_type_torch,
-            spot_torch,
-            torch.tensor([vol], dtype=torch.float64, device=device),
-            tau_torch,
-            torch.tensor([0.05], dtype=torch.float64, device=device),
-            torch.tensor([0.05], dtype=torch.float64, device=device),
-            device
+        price = _bs_price(strike=strike, option_type=option_type, spot=spot, vol=vol, tau=tau, r=0.05, q=0.05)
+        price_torch = _bs_price_torch(
+            strike=strike_torch,
+            option_type=option_type_torch,
+            spot=spot_torch,
+            vol=torch.tensor([vol], dtype=torch.float64, device=device),
+            tau=tau_torch,
+            r=torch.tensor([0.05], dtype=torch.float64, device=device),
+            q=torch.tensor([0.05], dtype=torch.float64, device=device),
+            device=device,
         ).cpu()
 
         self.assertAlmostEqual(price, price_torch, delta=1e-4)

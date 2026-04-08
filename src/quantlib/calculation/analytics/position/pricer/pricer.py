@@ -210,9 +210,9 @@ class BlackScholesValuationModelSingleAsset(ValuationModel):
             raise ValueError(f'apply_scenario_adjustment: scenario is not of type BlackScholesScenarioDefinition')
         new_valuation_date = plus_period(self.valuation_date,
                                          scenario_definition.valuation_date_shift,
-                                         BusinessDayConvention.FOLLOWING,
-                                         self.config.calendar,
-                                         EomConvention.NONE)
+                                         adj=BusinessDayConvention.FOLLOWING,
+                                         calendar=self.config.calendar,
+                                         eom=EomConvention.NONE)
 
         if isinstance(self.instrument, VanillaEuropean):
             new_k = self.instrument.strike + scenario_definition.strike_bump

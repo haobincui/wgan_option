@@ -39,7 +39,7 @@ class TestGenerateSurfaceGpuVolCases(unittest.TestCase):
 
     @staticmethod
     def _vol_daycount(calendar) -> DayCountBusN:
-        return DayCountBusN(name="BUS250USD", calendar=calendar, days_in_year=250)
+        return DayCountBusN("BUS250USD", calendar, 250)
 
     def _make_candidate(
         self,
@@ -75,7 +75,14 @@ class TestGenerateSurfaceGpuVolCases(unittest.TestCase):
         tau = _tau_years_from_trade_to_expiry(trade_ts, expiry_dt_utc, vol_daycount)
         strike = float(option_contract.get_strike())
         option_type = option_contract.get_option_type()
-        business_days = int(calendar.count_business_days(trade_ts.date(), expiry_date, False, True))
+        business_days = int(
+            calendar.count_business_days(
+                trade_ts.date(),
+                expiry_date,
+                include_start=False,
+                include_end=True,
+            )
+        )
 
         return MinuteOptionCandidate(
             meta=ContractMeta(

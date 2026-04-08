@@ -21,7 +21,14 @@ class TestCapletPrice(unittest.TestCase):
         vol = 0.02
         bound_price = 10
         notional_amount = 1000000
-        price = caplet_black_price(forward_rate, strike_rate, vol, bound_price, option_tau, notional_amount)
+        price = caplet_black_price(
+            forward_rate=forward_rate,
+            strike_rate=strike_rate,
+            vol=vol,
+            bond_price=bound_price,
+            reset_tau=option_tau,
+            option_tau=notional_amount,
+        )
         target_price = 0.4
         self.assertAlmostEqual(price, target_price, delta= 1e-14)
 
@@ -33,7 +40,23 @@ class TestCapletPrice(unittest.TestCase):
         notional_amount = 1000000
         bound_price = 10
         # caplet_price = 0.02
-        caplet_price = caplet_black_price(forward_rate, strike_rate, target_vol, bound_price, option_tau, option_tau, notional_amount)
+        caplet_price = caplet_black_price(
+            forward_rate=forward_rate,
+            strike_rate=strike_rate,
+            vol=target_vol,
+            bond_price=bound_price,
+            reset_tau=option_tau,
+            option_tau=option_tau,
+            notional_amount=notional_amount,
+        )
 
-        vol = caplet_black_vol(caplet_price, forward_rate, strike_rate, bound_price, option_tau, option_tau, notional_amount)
+        vol = caplet_black_vol(
+            caplet_price=caplet_price,
+            forward_rate=forward_rate,
+            strike_rate=strike_rate,
+            bond_price=bound_price,
+            reset_tau=option_tau,
+            option_tau=option_tau,
+            notional_amount=notional_amount,
+        )
         self.assertAlmostEqual(target_vol, vol, delta=1e-6)

@@ -2,21 +2,31 @@
 
 ## Current State
 
-The current training pipeline in [dataloader.py](/Users/haobincui/Documents/wgan_option/src/wgan_option/utils/dataloader.py) builds supervised samples in this shape:
+This document remains the thesis-facing design spec for SVI-derived vol-surface training data.
+For the command-oriented executable view, see [current_executable_workflows.md](current_executable_workflows.md).
+
+The repo now has two executable surface-training paths:
+
+- the legacy daily-surface WGAN path in [dataloader.py](/Users/haobincui/Documents/wgan_option/src/wgan_option/utils/dataloader.py) and `scripts/train.py`
+- the merged vol-surface WGAN path in `scripts/train/main.py vol-xlsx` and `src/wgan_option/train_vol_xlsx.py`
+
+The legacy daily path still builds supervised samples in this shape:
 
 - `current_surface`
 - `text_embedding`
 - `future_surface`
 
-Today, `src/wgan_option` does **not** read SVI-derived vol surfaces from xlsx.
-The current code path:
+The merged-vol path is now executable and already reads SVI-derived surfaces from xlsx:
 
-- loads daily news embeddings from xlsx
-- aggregates embeddings by date
-- builds daily proxy surface tensors from raw option trades
-- trains a model of `current_surface + text_embedding -> future_surface`
+- `scripts/merge_file/merge_vol.py` writes `merged_vol.xlsx`
+- `gan_input_ready` is the current dataloader target
+- `scripts/train/main.py vol-xlsx` trains on pair-level `backward/current -> forward/future` rows
 
-So the SVI-derived vol-surface workflow described here is a migration target, not something the current code already supports directly.
+So this document should now be read as design target plus implementation notes:
+
+- the workbook layout and audit semantics remain part of the thesis record
+- the preferred minute-SVI-derived vol workflow is already runnable
+- the legacy daily path still exists as a baseline and compatibility path
 
 ## Target Goal
 
@@ -242,7 +252,8 @@ Notes:
 
 - This table is derived from `news_surface_pair_audit`.
 - Only rows with acceptable pair quality should be promoted into this table.
-- This is the future dataloader target, not something the current `src/wgan_option` code already reads.
+- This is the current dataloader target for the merged vol WGAN workflow.
+- The preferred executable path is `minute SVI generation -> merge_vol.py -> scripts/train/main.py vol-xlsx`.
 
 ## Field Provenance
 
@@ -354,23 +365,23 @@ We should work in this order:
 
 1. verify reconstructed vol surfaces against raw option data
 2. form usable `backward -> forward` paired samples
-3. migrate `src/wgan_option` from raw/proxy surface forecasting to SVI-derived vol-surface forecasting
+3. train and evaluate the merged vol WGAN on those pair-level rows
+4. compare that workflow against legacy daily-surface and merged-SVI alternatives
 
 ### Migration Impact on Training Code
 
-Current training code:
+Current executable state:
 
-- reads daily news embeddings
-- builds daily proxy surfaces
-- trains on `current_surface + text_embedding -> future_surface`
+- legacy daily training still reads daily news embeddings, builds daily proxy surfaces, and trains on `current_surface + text_embedding -> future_surface`
+- merged vol training now reads pair-level workbook rows from `merged_vol.xlsx`
+- the merged loader parses `current_surface_flat` and `target_surface_flat` from `gan_input_ready`
+- the merged WGAN keeps the same broad `surface + text -> future surface` task family while changing the surface source to SVI reconstruction
 
-Future training code should:
+Research-facing design implications:
 
-- read pair-level xlsx rows
-- parse `current_surface_flat` and `target_surface_flat`
-- keep the model input family as `surface + text`
-- change the surface source from raw/proxy-built to SVI-reconstructed
-- change the target from next-day proxy surface to same-news forward SVI-derived surface
+- this document still defines the canonical pair-level workbook semantics and audit columns
+- `gan_input_ready` is no longer future-only; it is the executable training input today
+- future changes should preserve the explicit `backward/current` and `forward/future` interpretation of each pair
 
 ## Validation Checklist
 
@@ -379,5 +390,6 @@ When using this document as the input spec, confirm these points:
 - current WGAN input shape still matches [dataloader.py](/Users/haobincui/Documents/wgan_option/src/wgan_option/utils/dataloader.py)
 - grid defaults still match [config.py](/Users/haobincui/Documents/wgan_option/src/wgan_option/config.py)
 - SVI-to-vol reconstruction is supported by [svi_surface.py](/Users/haobincui/Documents/wgan_option/src/quantlib/vol_surface/algo/svi_surface.py)
-- the document does **not** claim that the current `src/wgan_option` code already supports this SVI-derived vol-surface workflow directly
+- the document distinguishes the legacy daily path from the current merged-vol executable path
+- `merged_vol.xlsx` `gan_input_ready` is the current training sheet for `scripts/train/main.py vol-xlsx`
 - the canonical sample unit remains one news item paired as `backward -> forward`

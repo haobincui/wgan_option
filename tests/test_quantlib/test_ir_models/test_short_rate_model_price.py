@@ -37,9 +37,16 @@ class TestShortRateModelZBOptionPrice(unittest.TestCase):
         tau_option = (option_maturity - valuation_date).days / 365
         tau_bond = (bond_maturity - valuation_date).days / 365
 
-        price = vasicek_bond_option_price(strike_price, option_type, mean_revert_speed,
-                                          bond_price_bond_maturity, bond_price_option_maturity,
-                                          vol, tau_option, tau_bond)
+        price = vasicek_bond_option_price(
+            strike_price=strike_price,
+            option_type=option_type,
+            mean_revert_speed=mean_revert_speed,
+            long_term_rate=bond_price_bond_maturity,
+            initial_short_rate=bond_price_option_maturity,
+            vol=vol,
+            tau_option=tau_option,
+            tau_bond=tau_bond,
+        )
         self.assertAlmostEqual(price, 56.975462170218776, delta=1e-6)
 
 
@@ -63,10 +70,18 @@ class TestShortRateModelZBOptionPrice(unittest.TestCase):
         tau_bond = (bond_maturity - valuation_date).days / 365
         r_t = 3 / 100
 
-        price = cir_bond_option_price(strike_price, option_type,
-                                      long_term_rate, mean_revert_speed, r_t,
-                                      bond_price_bond_maturity, bond_price_option_maturity,
-                                      vol, tau_option, tau_bond)
+        price = cir_bond_option_price(
+            strike_price=strike_price,
+            option_type=option_type,
+            long_term_rate=long_term_rate,
+            mean_revert_speed=mean_revert_speed,
+            initial_short_rate=r_t,
+            vol=bond_price_bond_maturity,
+            tau_option=bond_price_option_maturity,
+            tau_bond=vol,
+            bond_price_bond_maturity=tau_option,
+            bond_price_option_maturity=tau_bond,
+        )
         self.assertAlmostEqual(price, 0.0, delta=1e-6)
 
     def test_cirpp_price(self):

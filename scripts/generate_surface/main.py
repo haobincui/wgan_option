@@ -7,11 +7,16 @@ import sys
 from pathlib import Path
 from textwrap import dedent
 
-import yaml
+if __package__ in {None, ""}:
+    _ROOT_DIR = Path(__file__).resolve().parents[2]
+    if str(_ROOT_DIR) not in sys.path:
+        sys.path.insert(0, str(_ROOT_DIR))
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+import scripts._path_setup  # noqa: F401
+from scripts.generate_surface.common.config_utils import (
+    load_surface_builder_root,
+    resolve_config_path as _resolve_config_path,
+)
 
 from scripts.generate_surface.daily_surface import (  # noqa: E402
     DEFAULT_CONFIG_PATH,
@@ -64,18 +69,6 @@ MINUTE_COMMANDS = {
 ALL_COMMANDS = {"daily-surface", *MINUTE_COMMANDS.keys()}
 
 
-def _resolve_config_path(path_value: str) -> Path:
-    path = Path(path_value)
-    if path.is_absolute():
-        return path
-
-    cwd_path = Path.cwd() / path
-    if cwd_path.exists():
-        return cwd_path
-
-    return ROOT_DIR / path
-
-
 def _extract_config_path(argv_list: list[str]) -> Path:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--config", type=str, default=DEFAULT_CONFIG_PATH)
@@ -85,17 +78,7 @@ def _extract_config_path(argv_list: list[str]) -> Path:
 
 def _load_job_from_config(argv_list: list[str]) -> str:
     config_path = _extract_config_path(argv_list)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file does not exist: {config_path}")
-
-    with config_path.open("r", encoding="utf-8") as f:
-        raw_data = yaml.safe_load(f) or {}
-    if not isinstance(raw_data, dict):
-        raise ValueError(f"Config file must contain a YAML mapping: {config_path}")
-
-    config_root = raw_data.get("surface_builder", raw_data)
-    if not isinstance(config_root, dict):
-        raise ValueError(f"`surface_builder` must be a mapping in config file: {config_path}")
+    config_path, config_root = load_surface_builder_root(str(config_path))
 
     job = str(config_root.get("job", "")).strip()
     if not job:

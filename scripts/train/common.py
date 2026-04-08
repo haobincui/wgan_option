@@ -3,18 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
 from typing import Iterable, Optional, Type
 
 import yaml
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-SRC_DIR = ROOT_DIR / "src"
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
+import scripts._path_setup  # noqa: F401
 
 from wgan_option.config import config_to_dict, load_config, parse_cli_overrides  # noqa: E402
 
