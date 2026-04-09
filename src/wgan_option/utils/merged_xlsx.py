@@ -168,6 +168,8 @@ def _resolve_text_embedding(
     mode: str,
 ) -> np.ndarray:
     mode_text = str(mode).strip().lower()
+    if mode_text == "none":
+        return np.zeros(0, dtype=np.float32)
     hd_vector = _parse_serialized_vector(hd_raw)
     lp_vector = _parse_serialized_vector(lp_raw)
     if mode_text == "hd":
@@ -176,7 +178,7 @@ def _resolve_text_embedding(
         return lp_vector
     if mode_text == "concat":
         return np.concatenate([hd_vector, lp_vector], axis=0)
-    raise ValueError(f"text_embedding_mode must be one of hd/lp/concat, got: {mode}")
+    raise ValueError(f"text_embedding_mode must be one of none/hd/lp/concat, got: {mode}")
 
 
 def _parse_optional_int(raw_value: Any) -> Optional[int]:

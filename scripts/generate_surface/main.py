@@ -23,18 +23,18 @@ from scripts.generate_surface.daily_surface import (  # noqa: E402
     main as daily_surface_main,
 )
 from scripts.generate_surface.dispatch import ensure_cuda_available, extract_device_arg  # noqa: E402
-from scripts.generate_surface.surface_cpu.generate_minute_svi_params import main as cpu_minute_main  # noqa: E402
-from scripts.generate_surface.surface_cpu.generate_minute_svi_params_for_datetimes import (  # noqa: E402
+from scripts.generate_surface.backend.surface_cpu.all import main as cpu_minute_main  # noqa: E402
+from scripts.generate_surface.backend.surface_cpu.window import (  # noqa: E402
     main as cpu_window_main,
 )
-from scripts.generate_surface.surface_cpu.generate_minute_svi_params_from_excel_pd_et import (  # noqa: E402
+from scripts.generate_surface.backend.surface_cpu.excel import (  # noqa: E402
     main as cpu_excel_main,
 )
-from scripts.generate_surface.surface_gpu.generate_minute_svi_params import main as gpu_minute_main  # noqa: E402
-from scripts.generate_surface.surface_gpu.generate_minute_svi_params_for_datetimes import (  # noqa: E402
+from scripts.generate_surface.backend.surface_gpu.all import main as gpu_minute_main  # noqa: E402
+from scripts.generate_surface.backend.surface_gpu.window import (  # noqa: E402
     main as gpu_window_main,
 )
-from scripts.generate_surface.surface_gpu.generate_minute_svi_params_from_excel_pd_et import (  # noqa: E402
+from scripts.generate_surface.backend.surface_gpu.excel import (  # noqa: E402
     main as gpu_excel_main,
 )
 
@@ -42,20 +42,21 @@ HELP_TEXT = dedent(
     """
     Usage:
       python scripts/generate_surface/main.py daily-surface [args...]
-      python scripts/generate_surface/main.py minute-svi [--device {cpu,gpu}] [args...]
-      python scripts/generate_surface/main.py minute-svi-window [--device {cpu,gpu}] [args...]
-      python scripts/generate_surface/main.py minute-svi-excel [--device {cpu,gpu}] [args...]
-      python scripts/generate_surface/main.py [--config CONFIG] [--device {cpu,gpu}] [args...]
+      python scripts/generate_surface/main.py minute-svi [--device {cpu,gpu}] [--model {svi,sabr,cubic,raw}] [args...]
+      python scripts/generate_surface/main.py minute-svi-window [--device {cpu,gpu}] [--model {svi,sabr,cubic,raw}] [args...]
+      python scripts/generate_surface/main.py minute-svi-excel [--device {cpu,gpu}] [--model {svi,sabr,cubic,raw}] [args...]
+      python scripts/generate_surface/main.py [--config CONFIG] [--device {cpu,gpu}] [--model {svi,sabr,cubic,raw}] [args...]
 
     Subcommands:
       daily-surface      Build daily surface tensors.
-      minute-svi         Build minute SVI surfaces for all eligible minutes.
-      minute-svi-window  Build minute SVI surfaces around target datetime windows.
-      minute-svi-excel   Build minute SVI surfaces from Excel PD/ET target timestamps.
+      minute-svi         Build minute surfaces for all eligible minutes.
+      minute-svi-window  Build minute surfaces around target datetime windows.
+      minute-svi-excel   Build minute surfaces from Excel PD/ET target timestamps.
 
     Notes:
       When no subcommand is provided, the CLI reads `surface_builder.job` from the config file.
       minute-* commands default to --device cpu.
+      minute-* commands also support --model {svi,sabr,cubic,raw}; default is svi.
       If --device gpu is selected and CUDA is unavailable, the command exits with an error.
       Pass --help after a subcommand to see that job's detailed arguments.
     """

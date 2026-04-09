@@ -7,6 +7,7 @@ It should be read together with:
 - `docs/current_executable_workflows.md`
 - `docs/input_vol.md`
 - `docs/input_svi.md`
+- `docs/svi_regressor_architecture.md`
 - `docs/gan_model_detailed_architecture.md`
 - `docs/training_loss_curves.md`
 - `docs/reduce_lr_on_plateau.md`
@@ -108,6 +109,10 @@ from:
 
 This path is complementary to the surface WGAN path and supports representation comparison at the thesis level.
 
+For the detailed architecture of this SVI forecasting path, see:
+
+- `docs/svi_regressor_architecture.md`
+
 ## 3. Data Lineage for the Preferred Vol Workflow
 
 The corresponding config and workflow overview is summarized in:
@@ -133,7 +138,7 @@ Important subcommand:
 
 Preferred config file:
 
-- `configs/surface_builder/minute-svi-excel.yaml`
+- `configs/surface_builder/svi/minute-svi-excel.yaml`
 
 Typical artifacts:
 
@@ -414,6 +419,11 @@ Because this is a time-ordered forecasting problem, model comparison should emph
 - structural quality of predicted surfaces
 - reproducible run artifacts
 
+This comparison set now includes:
+
+- the text-conditioned merged-vol WGAN
+- the merged-SVI supervised regressor
+
 and not only final-epoch adversarial losses.
 
 ## 9. Suggested Experiment Priorities
@@ -423,8 +433,7 @@ For the current architecture, the most useful next experiment directions are:
 1. compare text modes: `hd`, `lp`, and `concat`
 2. compare merged vol forecasting against merged SVI forecasting
 3. use best-checkpoint selection instead of last-epoch selection
-4. evaluate whether validation-driven LR reduction improves late-stage `val_recon`
-5. add stronger qualitative inspection of predicted versus target surfaces
+5. evaluate whether validation-driven LR reduction improves late-stage `val_recon`
 
 ## 10. Key Code Locations
 

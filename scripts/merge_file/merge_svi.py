@@ -21,7 +21,7 @@ import scripts._path_setup  # noqa: F401
 from scripts._path_setup import ROOT_DIR
 
 from quantlib.vol_surface.algo.svi_algo import _svi_function, _vars_to_vols  # noqa: E402
-from scripts.generate_surface.common.minute_svi_excel_common import (  # noqa: E402
+from scripts.generate_surface.data_helperd.excel import (  # noqa: E402
     DEFAULT_SOURCE_TIMEZONE,
 )
 from scripts.merge_file._merge_common import (  # noqa: E402

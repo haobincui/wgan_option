@@ -86,6 +86,16 @@ def load_surface_builder_section(
 
     return config_path, config_root, defaults
 
+
+def write_yaml_mapping(payload: Mapping[str, Any], output_path: str | Path) -> Path:
+    """Persist one YAML mapping to disk."""
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(dict(payload), handle, sort_keys=False, allow_unicode=False)
+    return output
+
 _BRACED_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _BARE_VAR_PATH_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)([/\\].+)?$")
 

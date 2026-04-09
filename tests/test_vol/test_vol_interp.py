@@ -14,6 +14,7 @@ if str(SRC_DIR) not in sys.path:
 
 from quantlib.calendar.daycount import DayCountBusN
 from quantlib.calendar.holidays import embedded_calendar
+from quantlib.vol_surface.surface import ImpliedVolSurface
 from quantlib.vol_surface.algo.svi_surface import SviVolSurface, TermVolSurfaceByDays
 
 
@@ -67,7 +68,7 @@ class TestTermVolSurfaceByDays(unittest.TestCase):
             (self.variances[-1] - self.variances[-2])
             / (self.business_days[-1] - self.business_days[-2])
         )
-        var_target = self.variances[-1] + slope * (200 - self.business_days[-1])
+        var_target = max(self.variances[-1] + slope * (200 - self.business_days[-1]), 0.0)
         vol_target = np.sqrt(var_target * 250 / 200)
 
         vol = self.surface.implied_vol(expiration_date)
@@ -107,6 +108,32 @@ class TestSviVolSurfaceInterpolation(unittest.TestCase):
             },
             vol_daycount=self.daycount,
         )
+
+    def test_svi_surface_is_implied_vol_surface_and_spot_alias_matches(self):
+        expiration_date = _add_business_days(self.calendar, self.valuation_date, 21)
+
+        self.assertIsInstance(self.surface, ImpliedVolSurface)
+        self.assertAlmostEqual(
+            self.surface.implied_vol_by_spot(
+                spot=1.0,
+                strike=1.1,
+                expiration_date=expiration_date,
+            ),
+            self.surface.implied_vol(
+                forward=1.0,
+                strike=1.1,
+                expiration_date=expiration_date,
+            ),
+            delta=1e-14,
+        )
+
+    def test_svi_surface_unsupported_surface_operations_raise(self):
+        with self.assertRaises(NotImplementedError):
+            self.surface.parallel_bump(0.01)
+        with self.assertRaises(NotImplementedError):
+            self.surface.roll(self.valuation_date)
+        with self.assertRaises(NotImplementedError):
+            self.surface.shift_valuation_date(self.valuation_date)
 
     def test_svi_surface_interpolates_variance_between_terms(self):
         expiration_date = _add_business_days(self.calendar, self.valuation_date, 7)

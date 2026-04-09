@@ -12,10 +12,10 @@ if str(ROOT_DIR) not in sys.path:
 
 import scripts.generate_surface.main as surface_main  # noqa: E402
 from quantlib.calculation.analytics.position.instruments.features import OptionType  # noqa: E402
-from scripts.generate_surface.surface_cpu.generate_minute_svi_params import (  # noqa: E402
+from scripts.generate_surface.backend.surface_cpu.all import (  # noqa: E402
     _compute_implied_vols_cpu,
 )
-from scripts.generate_surface.surface_gpu.generate_minute_svi_params import (  # noqa: E402
+from scripts.generate_surface.backend.surface_gpu.all import (  # noqa: E402
     ContractMeta,
     MinuteOptionCandidate,
     _compute_implied_vols_gpu,
@@ -34,8 +34,22 @@ class TestGenerateSurfaceMain(unittest.TestCase):
                 }
             },
         ):
-            surface_main.main(["minute-svi", "--device", "cpu", "--max-files", "1"])
-        mock_cpu_main.assert_called_once_with(["--max-files", "1"])
+            surface_main.main(["minute-svi", "--device", "cpu", "--model", "sabr", "--max-files", "1"])
+        mock_cpu_main.assert_called_once_with(["--model", "sabr", "--max-files", "1"])
+
+    def test_main_dispatches_cpu_minute_job_with_raw_model(self):
+        mock_cpu_main = Mock()
+        with patch.dict(
+            surface_main.MINUTE_COMMANDS,
+            {
+                "minute-svi": {
+                    "cpu": mock_cpu_main,
+                    "gpu": surface_main.MINUTE_COMMANDS["minute-svi"]["gpu"],
+                }
+            },
+        ):
+            surface_main.main(["minute-svi", "--device", "cpu", "--model", "raw", "--max-files", "1"])
+        mock_cpu_main.assert_called_once_with(["--model", "raw", "--max-files", "1"])
 
     @patch("scripts.generate_surface.dispatch.torch.cuda.is_available", return_value=True)
     def test_main_dispatches_gpu_window_job(self, _mock_cuda):

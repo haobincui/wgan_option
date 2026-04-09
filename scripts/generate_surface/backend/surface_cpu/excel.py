@@ -1,4 +1,4 @@
-"""GPU Excel-driven minute-SVI entrypoint."""
+"""CPU Excel-driven surface generation entrypoint."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(_ROOT_DIR))
 
 import scripts._path_setup  # noqa: F401
-from scripts.generate_surface.common.minute_svi_excel_common import (  # noqa: E402
+from scripts.generate_surface.data_helperd.excel import (  # noqa: E402
     _excel_time_fraction_to_hms,
     _load_target_datetimes_from_excel,
     _normalize_date_value,
@@ -20,7 +20,7 @@ from scripts.generate_surface.common.minute_svi_excel_common import (  # noqa: E
     _to_utc_string,
     run_excel_job,
 )
-from scripts.generate_surface.surface_gpu.generate_minute_svi_params import _process_minute  # noqa: E402
+from scripts.generate_surface.backend.surface_cpu.all import _process_minute  # noqa: E402
 
 
 def run(args):

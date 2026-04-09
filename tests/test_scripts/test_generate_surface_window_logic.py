@@ -12,6 +12,7 @@ from typing import Dict, List
 from unittest.mock import Mock, patch
 
 import pandas as pd
+import yaml
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
@@ -20,7 +21,7 @@ if str(ROOT_DIR) not in sys.path:
 from quantlib.calculation.analytics.position.instruments.features import OptionType  # noqa: E402
 from quantlib.calendar.daycount import DayCountBusN  # noqa: E402
 from quantlib.calendar.holidays import usd_calendar  # noqa: E402
-from scripts.generate_surface.common.minute_svi_common import (  # noqa: E402
+from scripts.generate_surface.data_helperd.all import (  # noqa: E402
     PRECALIB_CSV_HEADERS,
     ContractMeta,
     MinuteTradeRow,
@@ -28,9 +29,9 @@ from scripts.generate_surface.common.minute_svi_common import (  # noqa: E402
     _prepare_option_candidates,
     _tau_years_from_trade_to_expiry,
 )
-from scripts.generate_surface.common import minute_svi_excel_common as excel_common  # noqa: E402
-from scripts.generate_surface.common import minute_svi_window_common as window_common  # noqa: E402
-from scripts.generate_surface.surface_cpu.generate_minute_svi_params import (  # noqa: E402
+from scripts.generate_surface.data_helperd import excel as excel_common  # noqa: E402
+from scripts.generate_surface.data_helperd import window as window_common  # noqa: E402
+from scripts.generate_surface.backend.surface_cpu.all import (  # noqa: E402
     _process_minute as cpu_process_minute,
 )
 
@@ -47,6 +48,9 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
             input_glob=str(csv_path),
             output_json=str(Path(tmpdir) / "window.json"),
             log_file=str(Path(tmpdir) / "window.log"),
+            model="svi",
+            run_ts="test-run",
+            output_dir=str(Path(tmpdir) / "run"),
             data_date="2026-03-09",
             expiration_time_utc="20:00:00",
             days_in_year=250,
@@ -129,6 +133,7 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
             precalib_writer=None,
             tau_anchor_ts=None,
             count_stat_key="total_minutes",
+            surface_model="svi",
         ):
             del (
                 days_in_year,
@@ -139,6 +144,7 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
                 calendar,
                 target_future_month_code,
                 precalib_writer,
+                surface_model,
             )
             key = window_common._to_utc_minute_string(minute_ts)
             recorded_calls[key] = {
@@ -255,7 +261,15 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
             self.assertEqual(surfaces[target_key]["backward"]["snapshot_time_utc"], backward_key)
             self.assertEqual(surfaces[target_key]["forward"]["snapshot_time_utc"], forward_key)
             self.assertEqual(
-                surfaces[target_key]["backward"]["svi_params"],
+                surfaces[target_key]["backward"]["surface_model"],
+                "svi",
+            )
+            self.assertEqual(
+                surfaces[target_key]["forward"]["surface_model"],
+                "svi",
+            )
+            self.assertEqual(
+                surfaces[target_key]["backward"]["surface_params"],
                 {
                     "row_count": 3,
                     "unique_row_minutes": [
@@ -266,7 +280,7 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
                 },
             )
             self.assertEqual(
-                surfaces[target_key]["forward"]["svi_params"],
+                surfaces[target_key]["forward"]["surface_params"],
                 {
                     "row_count": 4,
                     "unique_row_minutes": [
@@ -276,6 +290,12 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
                     ],
                 },
             )
+            resolved_config_path = Path(args.output_dir) / "resolved_config.yaml"
+            self.assertTrue(resolved_config_path.exists())
+            resolved_config = yaml.safe_load(resolved_config_path.read_text(encoding="utf-8"))
+            self.assertEqual(resolved_config["surface_builder"]["minute_svi"]["model"], "svi")
+            self.assertEqual(resolved_config["surface_builder"]["minute_svi"]["run_ts"], "test-run")
+            self.assertEqual(resolved_config["surface_builder"]["minute_svi"]["output_json"], str(Path(tmpdir) / "window.json"))
 
             written = json.loads(Path(args.output_json).read_text(encoding="utf-8"))
             self.assertEqual(written, surfaces)
@@ -359,6 +379,7 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
                 precalib_writer=None,
                 tau_anchor_ts=None,
                 count_stat_key="total_minutes",
+                surface_model="svi",
             ):
                 del (
                     rows,
@@ -372,6 +393,7 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
                     last_spot_by_key,
                     precalib_writer,
                     tau_anchor_ts,
+                    surface_model,
                 )
                 stats[count_stat_key] += 1
                 key = window_common._to_utc_minute_string(minute_ts)
@@ -392,8 +414,9 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
                 logging.shutdown()
 
             target_key = "2026-03-09T14:35:00Z"
-            self.assertEqual(surfaces[target_key]["backward"]["svi_params"], {"ok": True})
-            self.assertIsNone(surfaces[target_key]["forward"]["svi_params"])
+            self.assertEqual(surfaces[target_key]["backward"]["surface_params"], {"ok": True})
+            self.assertEqual(surfaces[target_key]["backward"]["surface_model"], "svi")
+            self.assertIsNone(surfaces[target_key]["forward"]["surface_params"])
 
     def test_prepare_option_candidates_uses_window_anchor_for_tau(self):
         anchor_ts = pd.Timestamp("2026-03-09T14:40:00Z")
@@ -489,11 +512,13 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
             "2026-03-09T14:35:00Z": {
                 "backward": {
                     "snapshot_time_utc": "2026-03-09T14:35:00Z",
-                    "svi_params": {"ok": True},
+                    "surface_model": "svi",
+                    "surface_params": {"ok": True},
                 },
                 "forward": {
                     "snapshot_time_utc": "2026-03-09T14:40:00Z",
-                    "svi_params": None,
+                    "surface_model": "svi",
+                    "surface_params": None,
                 },
             }
         }

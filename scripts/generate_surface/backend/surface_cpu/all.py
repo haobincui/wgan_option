@@ -1,4 +1,4 @@
-"""GPU minute-SVI generation entrypoint."""
+"""CPU all-minute surface generation entrypoint."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
-import torch
 
 if __package__ in {None, ""}:
     _ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -16,8 +15,7 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(_ROOT_DIR))
 
 import scripts._path_setup  # noqa: F401
-from scripts.generate_surface.dispatch import ensure_cuda_available  # noqa: E402
-from scripts.generate_surface.common.minute_svi_common import (  # noqa: E402
+from scripts.generate_surface.data_helperd.all import (  # noqa: E402
     PRECALIB_CSV_HEADERS,
     ContractMeta,
     MinuteOptionCandidate,
@@ -43,40 +41,30 @@ from scripts.generate_surface.common.minute_svi_common import (  # noqa: E402
 )
 
 from quantlib.calculation.analytics.models.analytical.equity.formula import (  # noqa: E402
-    black_scholes_implied_vol_torch,
+    black_scholes_implied_vol,
 )
 
 
-def _compute_implied_vols_gpu(
-    candidates: List[MinuteOptionCandidate],
-    device: Optional[torch.device] = None,
-) -> List[Optional[float]]:
-    if not candidates:
-        return []
-
-    if device is None:
-        device = torch.device("cuda")
-
-    try:
-        price = torch.tensor([item.price for item in candidates], dtype=torch.float64, device=device)
-        strike = torch.tensor([item.strike for item in candidates], dtype=torch.float64, device=device)
-        spot = torch.tensor([item.spot for item in candidates], dtype=torch.float64, device=device)
-        tau = torch.tensor([item.tau for item in candidates], dtype=torch.float64, device=device)
-        option_types = [item.meta.option_type for item in candidates]
-        zeros = torch.zeros_like(price)
-        vols = black_scholes_implied_vol_torch(
-            price=price,
-            strike=strike,
-            option_type=option_types,
-            spot=spot,
-            tau=tau,
-            r=zeros,
-            q=zeros,
-            device=device,
-        )
-        return [float(v) if torch.isfinite(v) else None for v in vols.detach().cpu()]
-    except Exception:
-        return [None] * len(candidates)
+def _compute_implied_vols_cpu(candidates: List[MinuteOptionCandidate]) -> List[Optional[float]]:
+    implied_vols: List[Optional[float]] = []
+    for candidate in candidates:
+        try:
+            implied_vols.append(
+                float(
+                    black_scholes_implied_vol(
+                        price=candidate.price,
+                        strike=candidate.strike,
+                        option_type=candidate.meta.option_type,
+                        spot=candidate.spot,
+                        tau=candidate.tau,
+                        r=0.0,
+                        q=0.0,
+                    )
+                )
+            )
+        except Exception:
+            implied_vols.append(None)
+    return implied_vols
 
 
 def _process_minute(
@@ -95,6 +83,7 @@ def _process_minute(
     precalib_writer: Optional[csv.DictWriter] = None,
     tau_anchor_ts: Optional[pd.Timestamp] = None,
     count_stat_key: str = "total_minutes",
+    surface_model: str = "svi",
 ) -> None:
     del days_in_year
     stats[count_stat_key] += 1
@@ -119,7 +108,7 @@ def _process_minute(
         stats=stats,
         tau_anchor_ts=tau_anchor_ts,
     )
-    implied_vols = _compute_implied_vols_gpu(candidates)
+    implied_vols = _compute_implied_vols_cpu(candidates)
     _finalize_minute_surface(
         minute_ts=minute_ts,
         valuation_date=valuation_date,
@@ -132,11 +121,11 @@ def _process_minute(
         results=results,
         stats=stats,
         precalib_writer=precalib_writer,
+        surface_model=surface_model,
     )
 
 
 def run(args):
-    ensure_cuda_available("gpu")
     return run_minute_svi_job(args, _process_minute)
 
 

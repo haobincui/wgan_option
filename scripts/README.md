@@ -5,7 +5,7 @@ This directory contains the runnable research workflows for the repository.
 At a high level, the scripts layer is organized into four main stages:
 
 1. `generate_surface`
-   - Build daily surfaces or minute-level SVI calibration outputs from raw option trades.
+   - Build daily surfaces and minute-level surface calibration outputs from raw option trades.
 2. `merge_file`
    - Join generated SVI outputs with the news embedding workbook and write training-ready Excel files.
 3. `train`
@@ -25,7 +25,7 @@ Existing script-level READMEs:
 
 - `scripts/generate_surface`
   - Unified surface-generation CLI.
-  - Supports daily-surface generation and several minute-SVI jobs.
+  - Supports daily-surface generation and several minute surface jobs.
 - `scripts/merge_file`
   - Builds `merged_svi.xlsx` and `merged_vol.xlsx`.
 - `scripts/train`
@@ -44,7 +44,7 @@ For the current merged-xlsx pipeline, the typical order is:
 ```text
 raw option files
 -> scripts/generate_surface
--> minute_svi_params.json + minute_svi_precalib_points.csv
+-> data/processed/<model>/<run_ts>/minute_svi_params.json + minute_svi_precalib_points.csv
 -> scripts/merge_file
 -> merged_svi.xlsx / merged_vol.xlsx
 -> scripts/train

@@ -1,5 +1,5 @@
 # Data
-data_path: data/processed_excel_20260330-01/merged_vol.xlsx
+data_path: data/processed/svi/20260330-01/merged_vol.xlsx
 sheet_name: gan_input_ready
 text_embedding_mode: hd
 train_ratio: 0.8

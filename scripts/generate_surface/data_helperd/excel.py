@@ -1,4 +1,4 @@
-"""Shared Excel-driven minute-SVI helpers."""
+"""Shared Excel-driven helpers for minute surface generation."""
 
 from __future__ import annotations
 
@@ -15,35 +15,39 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import pandas as pd
 
 if __package__ in {None, ""}:
+    _ROOT_DIR = Path(__file__).resolve().parents[3]
+    if str(_ROOT_DIR) not in sys.path:
+        sys.path.insert(0, str(_ROOT_DIR))
     import scripts._path_setup  # noqa: F401
     from scripts.generate_surface.common.config_utils import (  # noqa: E402
         build_config_scope,
         load_surface_builder_section,
         resolve_config_variables,
     )
-    from scripts.generate_surface.common.minute_svi_common import (  # noqa: E402
+    from scripts.generate_surface.data_helperd.all import (  # noqa: E402
         DEFAULT_CONFIG_PATH,
         _parse_args as _parse_base_args,
         _resolve_config_path,
     )
-    from scripts.generate_surface.common.minute_svi_window_common import (  # noqa: E402
+    from scripts.generate_surface.data_helperd.window import (  # noqa: E402
         ProcessMinuteFn,
         generate_surfaces_for_datetime_windows,
     )
 else:
-    from .config_utils import build_config_scope, load_surface_builder_section, resolve_config_variables  # noqa: E402
-    from .minute_svi_common import (  # noqa: E402
+    from ..common.config_utils import build_config_scope, load_surface_builder_section, resolve_config_variables  # noqa: E402
+    from .all import (  # noqa: E402
         DEFAULT_CONFIG_PATH,
         _parse_args as _parse_base_args,
         _resolve_config_path,
     )
-    from .minute_svi_window_common import (  # noqa: E402
+    from .window import (  # noqa: E402
         ProcessMinuteFn,
         generate_surfaces_for_datetime_windows,
     )
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_EXCEL_CONFIG_PATH = "configs/surface_builder/svi/minute-svi-excel.yaml"
 DEFAULT_TARGET_XLSX = "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx"
 DEFAULT_SHEET_NAME = "Sheet1"
 DEFAULT_DATE_COLUMN = "PD"
@@ -73,7 +77,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     argv_list = list(argv) if argv is not None else sys.argv[1:]
 
     pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--config", type=str, default=DEFAULT_CONFIG_PATH)
+    pre_parser.add_argument("--config", type=str, default=DEFAULT_EXCEL_CONFIG_PATH)
     pre_args, _ = pre_parser.parse_known_args(argv_list)
 
     if "-h" in argv_list or "--help" in argv_list:

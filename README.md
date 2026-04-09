@@ -25,8 +25,8 @@ python scripts/generate_surface/main.py --help
 Common commands:
 
 ```bash
-python scripts/generate_surface/main.py minute-svi-excel --device gpu --config configs/surface_builder/minute-svi-excel.yaml
-python scripts/generate_surface/main.py minute-svi --device cpu --input-glob "data/raw/option_data/**/*.csv.gz"
+python scripts/generate_surface/main.py minute-svi-excel --device gpu --config configs/surface_builder/svi/minute-svi-excel.yaml
+python scripts/generate_surface/main.py minute-svi --device cpu --config configs/surface_builder/svi/minute-svi-all.yaml
 python scripts/generate_surface/main.py daily-surface --config configs/surface_builder/default.yaml
 ```
 
@@ -35,8 +35,8 @@ python scripts/generate_surface/main.py daily-surface --config configs/surface_b
 Build training-ready Excel workbooks from minute-SVI outputs.
 
 ```bash
-python scripts/merge_file/merge_svi.py --input-dir data/processed_excel_20260330-01
-python scripts/merge_file/merge_vol.py --input-dir data/processed_excel_20260330-01
+python scripts/merge_file/merge_svi.py --input-dir data/processed/svi/20260330-01
+python scripts/merge_file/merge_vol.py --input-dir data/processed/svi/20260330-01
 ```
 
 Outputs:

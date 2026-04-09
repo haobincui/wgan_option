@@ -4,6 +4,7 @@ This document is the code-facing companion to the thesis design notes in:
 
 - [input_svi.md](input_svi.md)
 - [input_vol.md](input_vol.md)
+- [svi_regressor_architecture.md](svi_regressor_architecture.md)
 - [vol_surface_gan_architecture.md](vol_surface_gan_architecture.md)
 
 It describes the current runnable pipeline in `scripts/` and `src/`, without replacing the research framing in those design documents.
@@ -15,9 +16,9 @@ The current preferred executable flow is:
 ```text
 raw option trades
     -> scripts/generate_surface/main.py
-    -> minute_svi_params.json + minute_svi_precalib_points.csv
-    -> scripts/merge_file/merge_svi.py / scripts/merge_file/merge_vol.py
-    -> merged_svi.xlsx / merged_vol.xlsx
+    -> data/processed/<model>/<run_ts>/minute_svi_params.json + minute_svi_precalib_points.csv
+    -> scripts/merge_file/merge_svi.py / scripts/merge_file/merge_vol.py / scripts/merge_file/merge_params.py
+    -> merged_svi.xlsx / merged_vol.xlsx / merged_params.xlsx
     -> scripts/train/main.py
     -> outputs/training/*
     -> scripts/generate_result/main.py / scripts/analyze_error/main.py
@@ -32,17 +33,18 @@ At a high level:
 
 ## 2. Preferred Commands
 
-Generate minute SVI from the nested surface-builder config:
+Generate minute surfaces from the nested surface-builder config:
 
 ```bash
-python scripts/generate_surface/main.py minute-svi-excel --device gpu --config configs/surface_builder/minute-svi-excel.yaml
+python scripts/generate_surface/main.py minute-svi-excel --device gpu --model svi --config configs/surface_builder/svi/minute-svi-excel.yaml
 ```
 
 Build the merged workbooks:
 
 ```bash
-python scripts/merge_file/merge_svi.py --input-dir data/processed_excel_20260330-01
-python scripts/merge_file/merge_vol.py --input-dir data/processed_excel_20260330-01
+python scripts/merge_file/merge_svi.py --input-dir data/processed/svi/20260330-01
+python scripts/merge_file/merge_vol.py --input-dir data/processed/svi/20260330-01
+python scripts/merge_file/merge_params.py --input-dir data/processed/svi/20260330-01
 ```
 
 Train from merged xlsx:
@@ -83,6 +85,8 @@ Important distinction:
 - `train_svi_xlsx.py` pairs `backward` and `forward` rows at runtime using `news_row_id`
 - `gan_input_ready` remains a filtered direction-level export, not the trainer's current sheet input
 
+For the detailed model and training internals of this path, see [svi_regressor_architecture.md](svi_regressor_architecture.md).
+
 This distinction matters for thesis lineage: the workbook stays audit-friendly even though training is now paired.
 
 ### Direction semantics
@@ -104,8 +108,12 @@ Typical shape:
 
 ```yaml
 surface_builder:
-  job: minute_svi_excel
-  output_dir: data/processed_excel_20260330-01
+  job: minute-svi-excel
+  output_dir: data/processed
+  minute_svi:
+    model: svi
+    run_ts: 20260330-01
+    output_dir: data/processed/${model}/${run_ts}
   minute_svi_excel:
     option_data_glob: data/raw/option_data/**/*.csv
     ...
@@ -130,7 +138,7 @@ Current conventions:
 
 - `output_root` controls the training artifact tree for merged-xlsx runs
 - `sheet_name` selects the workbook sheet to read
-- `text_mode` supports `hd`, `lp`, and `concat`
+- `text_embedding_mode` supports `hd`, `lp`, and `concat`
 
 The current default text mode remains `hd`.
 

@@ -79,7 +79,7 @@ This means the repo currently contains both:
   - Structured as:
     - `main.py`: top-level CLI
     - `common/`: shared config/time-window logic
-    - `surface_cpu/` and `surface_gpu/`: execution backends
+    - `backend/surface_cpu/` and `backend/surface_gpu/`: execution backends
 - [scripts/merge_file](/Users/haobincui/Documents/wgan_option/scripts/merge_file)
   - Merge generated SVI outputs with the news embedding workbook.
   - Current scripts:
@@ -119,7 +119,7 @@ The practical workflow is:
    - option trades under `data/raw/option_data`
    - news embeddings workbook under `data/raw/text_embedding/news_with_openai_embeddings_large.xlsx`
 2. **Minute SVI generation**
-   - produces a result directory like `data/processed_excel_20260330-01`
+  - produces a result directory like `data/processed/svi/20260330-01`
    - key files:
      - `minute_svi_params.json`
      - `minute_svi_precalib_points.csv`
@@ -257,8 +257,8 @@ Common output areas:
 
 Current example merged data:
 
-- [merged_svi.xlsx](/Users/haobincui/Documents/wgan_option/data/processed_excel_20260330-01/merged_svi.xlsx)
-- [merged_vol.xlsx](/Users/haobincui/Documents/wgan_option/data/processed_excel_20260330-01/merged_vol.xlsx)
+- [merged_svi.xlsx](/Users/haobincui/Documents/wgan_option/data/processed/svi/20260330-01/merged_svi.xlsx)
+- [merged_vol.xlsx](/Users/haobincui/Documents/wgan_option/data/processed/svi/20260330-01/merged_vol.xlsx)
 
 These example outputs are not just fixtures; they are currently the main concrete artifacts tying the chapter design to runnable code.
 
@@ -273,14 +273,14 @@ python -m pip install -e .
 ### Generate minute SVI from config
 
 ```bash
-python scripts/generate_surface/main.py minute-svi-excel --device gpu --config configs/surface_builder/minute-svi-excel.yaml
+python scripts/generate_surface/main.py minute-svi-excel --device gpu --config configs/surface_builder/svi/minute-svi-excel.yaml
 ```
 
 ### Build merged training workbooks
 
 ```bash
-python scripts/merge_file/merge_svi.py --input-dir data/processed_excel_20260330-01
-python scripts/merge_file/merge_vol.py --input-dir data/processed_excel_20260330-01
+python scripts/merge_file/merge_svi.py --input-dir data/processed/svi/20260330-01
+python scripts/merge_file/merge_vol.py --input-dir data/processed/svi/20260330-01
 ```
 
 ### Train from merged xlsx

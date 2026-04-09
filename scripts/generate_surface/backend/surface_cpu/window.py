@@ -1,4 +1,4 @@
-"""CPU datetime-window minute-SVI entrypoint."""
+"""CPU datetime-window surface generation entrypoint."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(_ROOT_DIR))
 
 import scripts._path_setup  # noqa: F401
-from scripts.generate_surface.common.minute_svi_window_common import (  # noqa: E402
+from scripts.generate_surface.data_helperd.window import (  # noqa: E402
     _build_target_window_map,
     _collect_target_datetime_tokens,
     _extract_target_surfaces,
@@ -21,7 +21,7 @@ from scripts.generate_surface.common.minute_svi_window_common import (  # noqa: 
     generate_surfaces_for_datetime_windows,
     run_window_job,
 )
-from scripts.generate_surface.surface_cpu.generate_minute_svi_params import _process_minute  # noqa: E402
+from scripts.generate_surface.backend.surface_cpu.all import _process_minute  # noqa: E402
 
 
 def run(args):

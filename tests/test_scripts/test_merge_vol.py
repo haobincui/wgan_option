@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Dict
 from unittest.mock import patch
 
 import pandas as pd
@@ -266,6 +267,91 @@ class TestMergeVol(unittest.TestCase):
         json_path.write_text(json.dumps(json_payload), encoding="utf-8")
         return xlsx_path, result_dir
 
+    def _write_model_payload_fixture_files(
+        self,
+        tmpdir: str,
+        *,
+        surface_model: str,
+        surface_params: Dict[str, object],
+        implied_vol: float,
+    ):
+        xlsx_path = Path(tmpdir) / "news_input.xlsx"
+        result_dir = Path(tmpdir) / "result"
+        result_dir.mkdir()
+        csv_path = result_dir / "minute_svi_precalib_points.csv"
+        json_path = result_dir / "minute_svi_params.json"
+
+        pd.DataFrame(
+            [
+                {
+                    "SourceFile": "model.txt",
+                    "ArticleID": 1,
+                    "HD": "headline",
+                    "LP": "lead",
+                    "PD": "2022-12-30",
+                    "ET": "08:28:00",
+                    "HD_embedding": "[0.1, 0.2]",
+                    "LP_embedding": "[0.3, 0.4]",
+                    "HD_dim": 2,
+                    "LP_dim": 2,
+                }
+            ]
+        ).to_excel(xlsx_path, index=False, engine="openpyxl")
+
+        pd.DataFrame(
+            [
+                {
+                    "trade_datetime_utc": "2022-12-30T13:28:00Z",
+                    "calibration_datetime_utc": "2022-12-30T13:28:00Z",
+                    "business_days": 30,
+                    "maturity_date": "2023-02-01",
+                    "contract_id": "OPT1",
+                    "option_type": "P",
+                    "strike": 110.0,
+                    "price": 0.25,
+                    "spot": 110.0,
+                    "percent_strike": 1.0,
+                    "implied_vol": implied_vol,
+                    "passes_precalib_filter": True,
+                    "filter_reason": "",
+                    "weight": 2.0,
+                },
+                {
+                    "trade_datetime_utc": "2022-12-30T13:33:00Z",
+                    "calibration_datetime_utc": "2022-12-30T13:33:00Z",
+                    "business_days": 30,
+                    "maturity_date": "2023-02-01",
+                    "contract_id": "OPT2",
+                    "option_type": "C",
+                    "strike": 110.0,
+                    "price": 0.30,
+                    "spot": 110.0,
+                    "percent_strike": 1.0,
+                    "implied_vol": implied_vol,
+                    "passes_precalib_filter": True,
+                    "filter_reason": "",
+                    "weight": 1.0,
+                },
+            ]
+        ).to_csv(csv_path, index=False)
+
+        json_payload = {
+            "2022-12-30T13:28:00Z": {
+                "backward": {
+                    "snapshot_time_utc": "2022-12-30T13:28:00Z",
+                    "surface_model": surface_model,
+                    "surface_params": surface_params,
+                },
+                "forward": {
+                    "snapshot_time_utc": "2022-12-30T13:33:00Z",
+                    "surface_model": surface_model,
+                    "surface_params": surface_params,
+                },
+            }
+        }
+        json_path.write_text(json.dumps(json_payload), encoding="utf-8")
+        return xlsx_path, result_dir
+
     def test_build_workbook_frames_creates_pair_rows_with_expected_labels(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             xlsx_path, result_dir = self._write_fixture_files(tmpdir)
@@ -357,6 +443,96 @@ class TestMergeVol(unittest.TestCase):
             self.assertEqual(gan_ready.loc[0, "current_snapshot_time_utc"], "2022-12-30T13:28:00Z")
             self.assertEqual(gan_ready.loc[0, "target_snapshot_time_utc"], "2022-12-30T13:33:00Z")
             self.assertEqual(int(gan_ready.loc[0, "training_candidate_flag"]), 1)
+
+    def test_build_workbook_frames_supports_model_aware_sabr_payload(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            xlsx_path, result_dir = self._write_model_payload_fixture_files(
+                tmpdir,
+                surface_model="sabr",
+                surface_params={
+                    "alpha": [0.2],
+                    "beta": [1.0],
+                    "rho": [0.0],
+                    "nu": [0.1],
+                    "business_days": [30],
+                },
+                implied_vol=0.2,
+            )
+
+            workbook = merge_vol.build_workbook_frames(
+                result_dir,
+                news_xlsx_path=xlsx_path,
+                source_timezone="America/New_York",
+                offset_minutes=5,
+            )
+            audit = workbook["news_surface_pair_audit"]
+            side = workbook["surface_side_detail"]
+
+            self.assertEqual(audit.loc[0, "surface_model"], "sabr")
+            self.assertEqual(audit.loc[0, "pair_quality_label"], "usable")
+            self.assertEqual(int(audit.loc[0, "training_candidate_flag"]), 1)
+            self.assertEqual(side.loc[0, "surface_model"], "sabr")
+            self.assertTrue(bool(side.loc[0, "has_svi"]))
+            self.assertTrue(bool(side.loc[0, "surface_param_json"]))
+
+    def test_build_workbook_frames_supports_model_aware_cubic_payload(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            xlsx_path, result_dir = self._write_model_payload_fixture_files(
+                tmpdir,
+                surface_model="cubic",
+                surface_params={
+                    "business_days": [30],
+                    "percent_strikes": [[0.9, 1.0, 1.1, 1.2]],
+                    "implied_vols": [[0.25, 0.25, 0.25, 0.25]],
+                },
+                implied_vol=0.25,
+            )
+
+            workbook = merge_vol.build_workbook_frames(
+                result_dir,
+                news_xlsx_path=xlsx_path,
+                source_timezone="America/New_York",
+                offset_minutes=5,
+            )
+            audit = workbook["news_surface_pair_audit"]
+            side = workbook["surface_side_detail"]
+
+            self.assertEqual(audit.loc[0, "surface_model"], "cubic")
+            self.assertEqual(audit.loc[0, "pair_quality_label"], "usable")
+            self.assertEqual(side.loc[0, "surface_model"], "cubic")
+            self.assertTrue(bool(side.loc[0, "surface_flat"]))
+
+    def test_build_workbook_frames_supports_model_aware_raw_payload_with_interpolated_surface(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            interpolated_atm_iv = math.sqrt((0.24 ** 2 + 0.26 ** 2) / 2.0)
+            xlsx_path, result_dir = self._write_model_payload_fixture_files(
+                tmpdir,
+                surface_model="raw",
+                surface_params={
+                    "business_days": [30],
+                    "percent_strikes": [[0.9, 1.1]],
+                    "implied_vols": [[0.24, 0.26]],
+                },
+                implied_vol=interpolated_atm_iv,
+            )
+
+            workbook = merge_vol.build_workbook_frames(
+                result_dir,
+                news_xlsx_path=xlsx_path,
+                source_timezone="America/New_York",
+                offset_minutes=5,
+            )
+            audit = workbook["news_surface_pair_audit"]
+            side = workbook["surface_side_detail"]
+
+            self.assertEqual(audit.loc[0, "surface_model"], "raw")
+            self.assertEqual(audit.loc[0, "pair_quality_label"], "usable")
+            self.assertEqual(side.loc[0, "surface_model"], "raw")
+
+            surface_flat = json.loads(side.loc[0, "surface_flat"])
+            self.assertEqual(len(surface_flat), 256)
+            self.assertTrue(all(math.isfinite(value) for value in surface_flat))
+            self.assertGreater(min(surface_flat), 0.0)
 
 
 if __name__ == "__main__":

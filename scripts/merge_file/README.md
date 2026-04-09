@@ -6,6 +6,7 @@ It builds the two merged workbooks used by the later training and inference pipe
 
 - `merged_svi.xlsx`
 - `merged_vol.xlsx`
+- `merged_params.xlsx`
 
 Both scripts consume the same upstream generation outputs:
 
@@ -21,13 +22,19 @@ and combine them with:
 Build the SVI workbook:
 
 ```bash
-python scripts/merge_file/merge_svi.py --input-dir data/processed_excel_20260330-01
+python scripts/merge_file/merge_svi.py --input-dir data/processed/svi/20260330-01
 ```
 
 Build the vol workbook:
 
 ```bash
-python scripts/merge_file/merge_vol.py --input-dir data/processed_excel_20260330-01
+python scripts/merge_file/merge_vol.py --input-dir data/processed/svi/20260330-01
+```
+
+Build the model-neutral parameter audit workbook:
+
+```bash
+python scripts/merge_file/merge_params.py --input-dir data/processed/svi/20260330-01
 ```
 
 ## Shared Input Semantics
@@ -118,6 +125,7 @@ Only rows with `fit_quality_label == "usable"` become training candidates.
 Purpose:
 
 - create a paired vol-surface workbook for current -> future forecasting
+- reconstruct surfaces from model-aware `surface_model/surface_params` payloads
 
 Output file:
 
@@ -186,6 +194,30 @@ This is the key distinction from `merge_svi.py`:
 
 So `merged_vol.xlsx` can be used directly for current-surface -> future-surface model training.
 
+## merge_params.py
+
+Purpose:
+
+- create a model-neutral parameter audit workbook for `svi`, `sabr`, and `cubic`
+
+Output file:
+
+- `merged_params.xlsx`
+
+Main sheets:
+
+- `news_direction_audit`
+- `surface_slice_detail`
+- `gan_input_ready`
+
+This workbook keeps parameter-level audit fields generic:
+
+- `surface_model`
+- `surface_slice_count`
+- `surface_business_days_list`
+- `surface_param_json`
+- `slice_param_json`
+
 ## Surface Reconstruction Logic
 
 `merge_vol.py` reconstructs a vol surface from the SVI slices on a fixed grid.
@@ -215,13 +247,14 @@ minute_svi_params.json + minute_svi_precalib_points.csv
 Build both merged workbooks from the same processed directory:
 
 ```bash
-python scripts/merge_file/merge_svi.py --input-dir data/processed_excel_20260330-01
-python scripts/merge_file/merge_vol.py --input-dir data/processed_excel_20260330-01
+python scripts/merge_file/merge_svi.py --input-dir data/processed/svi/20260330-01
+python scripts/merge_file/merge_vol.py --input-dir data/processed/svi/20260330-01
+python scripts/merge_file/merge_params.py --input-dir data/processed/svi/20260330-01
 ```
 
 Use a different forward offset:
 
 ```bash
-python scripts/merge_file/merge_svi.py --input-dir data/processed_excel_20260330-01 --offset-minutes 10
-python scripts/merge_file/merge_vol.py --input-dir data/processed_excel_20260330-01 --offset-minutes 10
+python scripts/merge_file/merge_svi.py --input-dir data/processed/svi/20260330-01 --offset-minutes 10
+python scripts/merge_file/merge_vol.py --input-dir data/processed/svi/20260330-01 --offset-minutes 10
 ```

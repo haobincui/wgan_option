@@ -1,5 +1,5 @@
 # Data
-data_path: data/processed_excel_20260330-01/merged_svi.xlsx
+data_path: data/processed/svi/20260330-01/merged_svi.xlsx
 sheet_name: news_direction_audit
 text_embedding_mode: hd
 train_ratio: 0.8

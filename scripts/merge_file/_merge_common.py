@@ -4,18 +4,26 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from quantlib.calendar.daycount import DayCountBusN
+from quantlib.calendar.holidays import usd_calendar
+from quantlib.vol_surface.algo.cubic_spline_surface import CubicSplineVolSurface
+from quantlib.vol_surface.algo.raw_surface import RawVolSurface
+from quantlib.vol_surface.algo.sabr_surface import SabrVolSurface
 from quantlib.vol_surface.algo.svi_algo import _svi_function, _vars_to_vols
-from scripts.generate_surface.common.minute_svi_excel_common import (
+from quantlib.vol_surface.algo.svi_surface import SviVolSurface
+from scripts.generate_surface.data_helperd.excel import (
     _normalize_date_value,
     _normalize_time_value,
 )
 
 DEFAULT_DAYS_IN_YEAR = 250
+SUPPORTED_SURFACE_MODELS = {"svi", "sabr", "cubic", "raw"}
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +65,10 @@ def to_utc_string(ts: Any) -> Optional[str]:
 
 def serialize_list(values: Sequence[Any]) -> str:
     return json.dumps(list(values), ensure_ascii=False)
+
+
+def serialize_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
 
 
 def safe_float(value: Any) -> Optional[float]:
@@ -188,6 +200,13 @@ def load_precalib_csv(csv_path: Path) -> pd.DataFrame:
     return csv_df
 
 
+def normalize_surface_model(value: Any) -> str:
+    model = str(value or "svi").strip().lower()
+    if model not in SUPPORTED_SURFACE_MODELS:
+        raise ValueError(f"Unsupported surface model `{value}`. Expected one of {sorted(SUPPORTED_SURFACE_MODELS)}")
+    return model
+
+
 def _extract_svi_slices(params: Optional[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     if params is None:
         return []
@@ -228,6 +247,108 @@ def _extract_svi_slices(params: Optional[Mapping[str, Any]]) -> List[Dict[str, A
     return slices
 
 
+def _extract_sabr_slices(params: Optional[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    if params is None:
+        return []
+    required = ("business_days", "alpha", "beta", "rho", "nu")
+    missing = [key for key in required if key not in params]
+    if missing:
+        raise ValueError(f"SABR params missing required keys {missing}")
+    lengths = []
+    for key in required:
+        values = params[key]
+        if not isinstance(values, list):
+            raise ValueError(f"SABR param `{key}` must be a list.")
+        lengths.append(len(values))
+    if len(set(lengths)) != 1:
+        raise ValueError(f"SABR param list lengths must match: {dict(zip(required, lengths))}")
+
+    slices: List[Dict[str, Any]] = []
+    for slice_index in range(lengths[0]):
+        business_days = safe_int(params["business_days"][slice_index])
+        alpha = safe_float(params["alpha"][slice_index])
+        beta = safe_float(params["beta"][slice_index])
+        rho = safe_float(params["rho"][slice_index])
+        nu = safe_float(params["nu"][slice_index])
+        if None in {business_days, alpha, beta, rho, nu}:
+            raise ValueError(f"Invalid numeric SABR slice at index {slice_index}: {params}")
+        slices.append(
+            {
+                "slice_index": slice_index,
+                "business_days": int(business_days),
+                "alpha": float(alpha),
+                "beta": float(beta),
+                "rho": float(rho),
+                "nu": float(nu),
+            }
+        )
+    return slices
+
+
+def _extract_grid_slices(params: Optional[Mapping[str, Any]], *, model_name: str) -> List[Dict[str, Any]]:
+    if params is None:
+        return []
+    required = ("business_days", "percent_strikes", "implied_vols")
+    missing = [key for key in required if key not in params]
+    if missing:
+        raise ValueError(f"{model_name} params missing required keys {missing}")
+
+    business_days = params["business_days"]
+    percent_strikes = params["percent_strikes"]
+    implied_vols = params["implied_vols"]
+    if not isinstance(business_days, list) or not isinstance(percent_strikes, list) or not isinstance(implied_vols, list):
+        raise ValueError(
+            f"{model_name} params must use list values for business_days/percent_strikes/implied_vols"
+        )
+    lengths = [len(business_days), len(percent_strikes), len(implied_vols)]
+    if len(set(lengths)) != 1:
+        raise ValueError(
+            f"{model_name} param outer-list lengths must match: "
+            f"{{'business_days': {lengths[0]}, 'percent_strikes': {lengths[1]}, 'implied_vols': {lengths[2]}}}"
+        )
+
+    slices: List[Dict[str, Any]] = []
+    for slice_index in range(lengths[0]):
+        business_day = safe_int(business_days[slice_index])
+        strike_slice = percent_strikes[slice_index]
+        vol_slice = implied_vols[slice_index]
+        if business_day is None or not isinstance(strike_slice, list) or not isinstance(vol_slice, list):
+            raise ValueError(f"Invalid {model_name} slice at index {slice_index}: {params}")
+        if len(strike_slice) != len(vol_slice):
+            raise ValueError(f"{model_name} slice {slice_index} strike/vol lengths must match.")
+        cleaned_strikes = []
+        cleaned_vols = []
+        for strike_value, vol_value in zip(strike_slice, vol_slice):
+            strike_numeric = safe_float(strike_value)
+            vol_numeric = safe_float(vol_value)
+            if strike_numeric is None or vol_numeric is None:
+                raise ValueError(f"Invalid numeric {model_name} slice entry at index {slice_index}: {params}")
+            cleaned_strikes.append(float(strike_numeric))
+            cleaned_vols.append(float(vol_numeric))
+        slices.append(
+            {
+                "slice_index": slice_index,
+                "business_days": int(business_day),
+                "percent_strikes": cleaned_strikes,
+                "implied_vols": cleaned_vols,
+            }
+        )
+    return slices
+
+
+def extract_surface_slices(surface_model: str, params: Optional[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    model = normalize_surface_model(surface_model)
+    if model == "svi":
+        return _extract_svi_slices(params)
+    if model == "sabr":
+        return _extract_sabr_slices(params)
+    if model == "cubic":
+        return _extract_grid_slices(params, model_name="Cubic")
+    if model == "raw":
+        return _extract_grid_slices(params, model_name="Raw")
+    raise ValueError(f"Unsupported surface model: {surface_model}")
+
+
 def load_json_direction_map(json_path: Path) -> Dict[Tuple[str, str], Dict[str, Any]]:
     with json_path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -247,7 +368,13 @@ def load_json_direction_map(json_path: Path) -> Dict[Tuple[str, str], Dict[str, 
                 raise ValueError(
                     f"JSON target `{target_timestamp}` direction `{direction}` missing `snapshot_time_utc`."
                 )
-            slices = _extract_svi_slices(side_payload.get("svi_params"))
+            if "surface_model" in side_payload or "surface_params" in side_payload:
+                surface_model = normalize_surface_model(side_payload.get("surface_model", "svi"))
+                surface_params = side_payload.get("surface_params")
+            else:
+                surface_model = "svi"
+                surface_params = side_payload.get("svi_params")
+            slices = extract_surface_slices(surface_model, surface_params)
             key = (snapshot, direction)
             if key in direction_map:
                 raise ValueError(f"Duplicate JSON direction entry for snapshot={snapshot}, direction={direction}.")
@@ -255,8 +382,11 @@ def load_json_direction_map(json_path: Path) -> Dict[Tuple[str, str], Dict[str, 
                 "json_target_timestamp_utc": str(target_timestamp),
                 "snapshot_time_utc": snapshot,
                 "direction": direction,
+                "surface_model": surface_model,
+                "surface_params": surface_params,
                 "slices": slices,
-                "has_svi_params": bool(slices),
+                "has_surface_params": surface_params is not None,
+                "has_svi_params": surface_model == "svi" and bool(slices),
             }
     return direction_map
 
@@ -328,6 +458,120 @@ def assign_raw_row_to_slice(
     }
 
 
+def build_surface_from_params(
+    *,
+    surface_model: str,
+    surface_params: Mapping[str, Any],
+    valuation_date: date,
+    days_in_year: int = DEFAULT_DAYS_IN_YEAR,
+):
+    model = normalize_surface_model(surface_model)
+    vol_daycount = DayCountBusN(
+        f"BUS{int(days_in_year)}USD",
+        usd_calendar(),
+        int(days_in_year),
+    )
+    if model == "svi":
+        return SviVolSurface(
+            valuation_date=valuation_date,
+            svi_params=dict(surface_params),
+            vol_daycount=vol_daycount,
+        )
+    if model == "sabr":
+        return SabrVolSurface(
+            valuation_date=valuation_date,
+            sabr_params=dict(surface_params),
+            vol_daycount=vol_daycount,
+        )
+    if model == "cubic":
+        return CubicSplineVolSurface(
+            valuation_date=valuation_date,
+            vols=list(surface_params["implied_vols"]),
+            percent_strikes=list(surface_params["percent_strikes"]),
+            business_days=list(surface_params["business_days"]),
+            vol_daycount=vol_daycount,
+        )
+    if model == "raw":
+        return RawVolSurface(
+            valuation_date=valuation_date,
+            vols=list(surface_params["implied_vols"]),
+            percent_strikes=list(surface_params["percent_strikes"]),
+            business_days=list(surface_params["business_days"]),
+            vol_daycount=vol_daycount,
+        )
+    raise ValueError(f"Unsupported surface model: {surface_model}")
+
+
+def evaluate_raw_row_against_surface(
+    raw_row: Mapping[str, Any],
+    *,
+    slices: Sequence[Mapping[str, Any]],
+    surface,
+    days_in_year: int = DEFAULT_DAYS_IN_YEAR,
+) -> Optional[Dict[str, Any]]:
+    raw_business_days = safe_int(raw_row.get("business_days"))
+    percent_strike = safe_float(raw_row.get("percent_strike"))
+    implied_vol = safe_float(raw_row.get("implied_vol"))
+    weight = safe_float(raw_row.get("weight"))
+    if raw_business_days is None or percent_strike is None or implied_vol is None or weight is None:
+        return None
+
+    nearest_slice = None
+    if slices:
+        nearest_slice = min(
+            slices,
+            key=lambda slice_row: (
+                abs(int(raw_business_days) - int(slice_row["business_days"])),
+                int(slice_row["slice_index"]),
+            ),
+        )
+
+    model_iv = None
+    try:
+        surface_grid = surface.implied_vol_surface(
+            percent_strikes=[float(percent_strike)],
+            business_days=[int(raw_business_days)],
+            forward=1.0,
+        )
+        if surface_grid and surface_grid[0]:
+            candidate_iv = safe_float(surface_grid[0][0])
+            if candidate_iv is not None:
+                model_iv = float(candidate_iv)
+    except Exception:
+        model_iv = None
+
+    raw_total_var = _compute_raw_total_variance(
+        implied_vol,
+        int(raw_business_days),
+        days_in_year=days_in_year,
+    )
+    model_total_var = None
+    if model_iv is not None:
+        model_total_var = _compute_raw_total_variance(
+            model_iv,
+            int(raw_business_days),
+            days_in_year=days_in_year,
+        )
+    iv_error = None if model_iv is None else float(implied_vol - model_iv)
+    total_var_error = None if model_total_var is None else float(raw_total_var - model_total_var)
+    return {
+        "raw_row": raw_row,
+        "slice": nearest_slice,
+        "is_exact": bool(nearest_slice is not None and int(raw_business_days) == int(nearest_slice["business_days"])),
+        "slice_day_gap": (
+            abs(int(raw_business_days) - int(nearest_slice["business_days"]))
+            if nearest_slice is not None
+            else None
+        ),
+        "weight": float(weight),
+        "model_total_variance": model_total_var,
+        "model_implied_vol": model_iv,
+        "raw_total_variance": raw_total_var,
+        "iv_error": iv_error,
+        "total_var_error": total_var_error,
+    }
+
+
 # ---------------------------------------------------------------------------
 # SVI slice helpers
 # ---------------------------------------------------------------------------
@@ -350,6 +594,28 @@ def is_boundary_slice(slice_row: Mapping[str, Any]) -> bool:
         or float(slice_row["a"]) <= 1e-12
         or float(slice_row["b"]) <= 1e-12
     )
+
+
+def is_placeholder_surface_slice(surface_model: str, slice_row: Mapping[str, Any]) -> bool:
+    model = normalize_surface_model(surface_model)
+    if model == "svi":
+        return is_placeholder_slice(slice_row)
+    if model == "sabr":
+        return float(slice_row["rho"]) == 0.0 and float(slice_row["nu"]) == 0.0
+    return False
+
+
+def is_boundary_surface_slice(surface_model: str, slice_row: Mapping[str, Any]) -> bool:
+    model = normalize_surface_model(surface_model)
+    if model == "svi":
+        return is_boundary_slice(slice_row)
+    if model == "sabr":
+        return (
+            abs(float(slice_row["rho"])) >= 0.999
+            or float(slice_row["alpha"]) <= 1e-12
+            or float(slice_row["nu"]) >= 5.0
+        )
+    return False
 
 
 # ---------------------------------------------------------------------------

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import json
-import math
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -19,13 +18,14 @@ if __package__ in {None, ""}:
 
 import scripts._path_setup  # noqa: F401
 
-from scripts.generate_surface.common.minute_svi_excel_common import DEFAULT_SOURCE_TIMEZONE  # noqa: E402
+from scripts.generate_surface.data_helperd.excel import DEFAULT_SOURCE_TIMEZONE  # noqa: E402
 from scripts.merge_file import merge_svi  # noqa: E402
 from scripts.merge_file._merge_common import (  # noqa: E402
-    assign_raw_row_to_slice,
+    build_surface_from_params,
     coerce_optional_numeric,
-    is_boundary_slice,
-    is_placeholder_slice,
+    evaluate_raw_row_against_surface,
+    is_boundary_surface_slice,
+    is_placeholder_surface_slice,
     load_json_direction_map,
     load_news_base_frame,
     load_precalib_csv,
@@ -34,6 +34,7 @@ from scripts.merge_file._merge_common import (  # noqa: E402
     normalize_optional_text,
     offset_column_name,
     resolve_existing_path,
+    serialize_json,
     serialize_list,
     weighted_mae,
     weighted_rmse,
@@ -68,6 +69,7 @@ PAIR_AUDIT_HEADERS = [
     "lp_embedding",
     "hd_dim",
     "lp_dim",
+    "surface_model",
     "strike_grid",
     "maturity_days_grid",
     "surface_shape",
@@ -107,6 +109,7 @@ SIDE_DETAIL_HEADERS = [
     "source_direction",
     "matched_snapshot_time_utc",
     "json_target_timestamp_utc",
+    "surface_model",
     "has_svi",
     "svi_slice_count",
     "svi_business_days_list",
@@ -115,6 +118,7 @@ SIDE_DETAIL_HEADERS = [
     "svi_rho_list",
     "svi_m_list",
     "svi_sigma_list",
+    "surface_param_json",
     "strike_grid",
     "maturity_days_grid",
     "surface_flat",
@@ -139,6 +143,7 @@ GAN_HEADERS = [
     "news_timestamp_utc",
     "current_snapshot_time_utc",
     "target_snapshot_time_utc",
+    "surface_model",
     "hd_embedding",
     "lp_embedding",
     "hd_dim",
@@ -156,8 +161,12 @@ GAN_HEADERS = [
 
 
 def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Merge minute SVI results into a paired vol-surface workbook.")
-    parser.add_argument("--input-dir", required=True, help="Directory containing minute_svi_precalib_points.csv and minute_svi_params.json.")
+    parser = argparse.ArgumentParser(description="Merge minute surface results into a paired vol-surface workbook.")
+    parser.add_argument(
+        "--input-dir",
+        required=True,
+        help="Directory containing minute_svi_precalib_points.csv and minute_svi_params.json.",
+    )
     parser.add_argument(
         "--source-timezone",
         default=DEFAULT_SOURCE_TIMEZONE,
@@ -192,54 +201,21 @@ def _grid_definition() -> Tuple[List[float], List[float], str]:
     )
 
 
-def _interp_param(days: np.ndarray, values: np.ndarray, day: float) -> float:
-    if day <= float(days[0]):
-        return float(values[0])
-    if day >= float(days[-1]):
-        return float(values[-1])
-    idx = int(np.searchsorted(days, day))
-    left_day = float(days[idx - 1])
-    right_day = float(days[idx])
-    left_value = float(values[idx - 1])
-    right_value = float(values[idx])
-    weight = 0.0 if abs(right_day - left_day) < 1e-12 else (float(day) - left_day) / (right_day - left_day)
-    return float(left_value + weight * (right_value - left_value))
-
-
-def _slice_total_variance(log_moneyness: float, a: float, b: float, rho: float, m: float, sigma: float) -> float:
-    sigma = max(float(sigma), 1e-8)
-    core = float(rho) * (float(log_moneyness) - float(m)) + math.sqrt((float(log_moneyness) - float(m)) ** 2 + sigma * sigma)
-    return float(max(float(a) + float(b) * core, 0.0))
-
-
 def _reconstruct_surface_flat(
-    slices: Sequence[Mapping[str, Any]],
+    surface,
     strike_grid: Sequence[float],
     maturity_days_grid: Sequence[float],
 ) -> List[float]:
-    if not slices:
-        return []
-    days = np.asarray([float(slice_row["business_days"]) for slice_row in slices], dtype=np.float64)
-    a_arr = np.asarray([float(slice_row["a"]) for slice_row in slices], dtype=np.float64)
-    b_arr = np.asarray([float(slice_row["b"]) for slice_row in slices], dtype=np.float64)
-    rho_arr = np.asarray([float(slice_row["rho"]) for slice_row in slices], dtype=np.float64)
-    m_arr = np.asarray([float(slice_row["m"]) for slice_row in slices], dtype=np.float64)
-    sigma_arr = np.asarray([float(slice_row["sigma"]) for slice_row in slices], dtype=np.float64)
-
-    surface_flat: List[float] = []
-    for day in maturity_days_grid:
-        maturity_day = max(float(day), 1.0)
-        a = _interp_param(days, a_arr, maturity_day)
-        b = _interp_param(days, b_arr, maturity_day)
-        rho = _interp_param(days, rho_arr, maturity_day)
-        m = _interp_param(days, m_arr, maturity_day)
-        sigma = _interp_param(days, sigma_arr, maturity_day)
-        for percent_strike in strike_grid:
-            log_moneyness = math.log(max(float(percent_strike), 1e-12))
-            total_var = _slice_total_variance(log_moneyness, a, b, rho, m, sigma)
-            model_iv = math.sqrt(max(total_var, 0.0) * float(DAYS_IN_YEAR) / maturity_day)
-            surface_flat.append(float(model_iv))
-    return surface_flat
+    surface_grid = surface.implied_vol_surface(
+        percent_strikes=[float(value) for value in strike_grid],
+        business_days=[int(round(value)) for value in maturity_days_grid],
+        forward=1.0,
+    )
+    return [
+        float(value)
+        for row in surface_grid
+        for value in row
+    ]
 
 
 def _surface_stats(surface_flat: Sequence[float]) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
@@ -332,21 +308,53 @@ def _evaluate_side(
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     json_target_timestamp = ""
     slices: List[Dict[str, Any]] = []
-    has_svi = False
+    surface_model = "svi"
+    surface_params: Optional[Mapping[str, Any]] = None
+    has_surface = False
     if json_entry is not None:
         json_target_timestamp = normalize_optional_text(json_entry.get("json_target_timestamp_utc", ""))
+        surface_model = normalize_optional_text(json_entry.get("surface_model", "svi")) or "svi"
+        surface_params = json_entry.get("surface_params")
         slices = list(json_entry.get("slices", []))
-        has_svi = bool(json_entry.get("has_svi_params", False))
+        has_surface = bool(json_entry.get("has_surface_params", False))
 
     raw_point_count = len(raw_rows)
     raw_pass_rows = [row for row in raw_rows if normalize_bool(row.get("passes_precalib_filter"))]
     raw_point_pass_count = len(raw_pass_rows)
 
-    pass_assignments = [
-        assignment
-        for assignment in (assign_raw_row_to_slice(raw_row, slices) for raw_row in raw_pass_rows)
-        if assignment is not None
-    ]
+    surface = None
+    if has_surface and surface_params is not None:
+        valuation_date = (
+            pd.Timestamp(matched_snapshot).tz_convert("UTC").date()
+            if matched_snapshot
+            else date(2000, 1, 3)
+        )
+        try:
+            surface = build_surface_from_params(
+                surface_model=surface_model,
+                surface_params=surface_params,
+                valuation_date=valuation_date,
+                days_in_year=DAYS_IN_YEAR,
+            )
+        except Exception:
+            surface = None
+            has_surface = False
+
+    pass_assignments = []
+    if surface is not None:
+        pass_assignments = [
+            assignment
+            for assignment in (
+                evaluate_raw_row_against_surface(
+                    raw_row,
+                    slices=slices,
+                    surface=surface,
+                    days_in_year=DAYS_IN_YEAR,
+                )
+                for raw_row in raw_pass_rows
+            )
+            if assignment is not None
+        ]
     exact_slice_point_count = sum(1 for assignment in pass_assignments if assignment["is_exact"])
     exact_slice_point_ratio = float(exact_slice_point_count / raw_point_pass_count) if raw_point_pass_count else 0.0
 
@@ -376,18 +384,34 @@ def _evaluate_side(
     max_abs_iv_error = max_abs_error(iv_errors)
     weighted_total_var_rmse = weighted_rmse(total_var_errors, total_var_weights)
 
-    placeholder_flag = int(bool(slices) and all(is_placeholder_slice(slice_row) for slice_row in slices))
-    boundary_flag = int(bool(slices) and any(is_boundary_slice(slice_row) for slice_row in slices))
+    placeholder_flag = int(bool(slices) and all(is_placeholder_surface_slice(surface_model, slice_row) for slice_row in slices))
+    boundary_flag = int(bool(slices) and any(is_boundary_surface_slice(surface_model, slice_row) for slice_row in slices))
     side_quality_label = _side_quality_label(
-        has_svi=has_svi,
+        has_svi=has_surface,
         placeholder_flag=placeholder_flag,
         raw_point_pass_count=raw_point_pass_count,
         exact_slice_point_ratio=exact_slice_point_ratio,
         weighted_iv_rmse=weighted_iv_rmse,
     )
 
-    surface_flat = _reconstruct_surface_flat(slices, strike_grid, maturity_days_grid) if has_svi else []
+    surface_flat = _reconstruct_surface_flat(surface, strike_grid, maturity_days_grid) if surface is not None else []
     surface_min, surface_max, surface_mean, surface_std = _surface_stats(surface_flat)
+    surface_business_days = [slice_row["business_days"] for slice_row in slices]
+    svi_fields = {
+        "svi_a_list": "",
+        "svi_b_list": "",
+        "svi_rho_list": "",
+        "svi_m_list": "",
+        "svi_sigma_list": "",
+    }
+    if surface_model == "svi" and slices:
+        svi_fields = {
+            "svi_a_list": serialize_list([slice_row["a"] for slice_row in slices]),
+            "svi_b_list": serialize_list([slice_row["b"] for slice_row in slices]),
+            "svi_rho_list": serialize_list([slice_row["rho"] for slice_row in slices]),
+            "svi_m_list": serialize_list([slice_row["m"] for slice_row in slices]),
+            "svi_sigma_list": serialize_list([slice_row["sigma"] for slice_row in slices]),
+        }
 
     side_row = {
         "sample_id": sample_id,
@@ -396,14 +420,12 @@ def _evaluate_side(
         "source_direction": source_direction,
         "matched_snapshot_time_utc": normalize_optional_text(matched_snapshot),
         "json_target_timestamp_utc": json_target_timestamp,
-        "has_svi": has_svi,
+        "surface_model": surface_model,
+        "has_svi": has_surface,
         "svi_slice_count": len(slices),
-        "svi_business_days_list": serialize_list([slice_row["business_days"] for slice_row in slices]) if slices else "",
-        "svi_a_list": serialize_list([slice_row["a"] for slice_row in slices]) if slices else "",
-        "svi_b_list": serialize_list([slice_row["b"] for slice_row in slices]) if slices else "",
-        "svi_rho_list": serialize_list([slice_row["rho"] for slice_row in slices]) if slices else "",
-        "svi_m_list": serialize_list([slice_row["m"] for slice_row in slices]) if slices else "",
-        "svi_sigma_list": serialize_list([slice_row["sigma"] for slice_row in slices]) if slices else "",
+        "svi_business_days_list": serialize_list(surface_business_days) if slices else "",
+        **svi_fields,
+        "surface_param_json": serialize_json(surface_params) if surface_params is not None else "",
         "strike_grid": strike_grid_text,
         "maturity_days_grid": maturity_grid_text,
         "surface_flat": serialize_list(surface_flat) if surface_flat else "",
@@ -426,7 +448,8 @@ def _evaluate_side(
     metrics = {
         "matched_snapshot_time_utc": side_row["matched_snapshot_time_utc"],
         "json_target_timestamp_utc": json_target_timestamp,
-        "has_svi": has_svi,
+        "surface_model": surface_model,
+        "has_svi": has_surface,
         "svi_slice_count": len(slices),
         "surface_flat": side_row["surface_flat"],
         "raw_point_count": raw_point_count,
@@ -516,6 +539,7 @@ def build_workbook_frames(
                 "target_snapshot_time_utc": target_metrics["matched_snapshot_time_utc"],
                 "current_json_target_timestamp_utc": current_metrics["json_target_timestamp_utc"],
                 "target_json_target_timestamp_utc": target_metrics["json_target_timestamp_utc"],
+                "surface_model": current_metrics["surface_model"] or target_metrics["surface_model"],
                 "strike_grid": strike_grid_text,
                 "maturity_days_grid": maturity_grid_text,
                 "surface_shape": surface_shape_text,

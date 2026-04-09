@@ -1,0 +1,28 @@
+surface_builder:
+  job: minute-svi-window
+  option_data_glob: data/raw/option_data/**/*.csv.gz
+  output_dir: data/processed
+
+  minute_svi:
+    model: sabr
+    run_ts: ""
+    output_dir: data/processed/${model}/${run_ts}
+    input_glob: ${option_data_glob}
+    expiration_time_utc: "20:00:00"
+    output_json: ${output_dir}/minute_svi_params.json
+    log_file: ${output_dir}/minute_svi_params.log
+    data_date: "2026-03-09"
+    days_in_year: 250
+    min_strikes_per_expiry: 3
+    min_expiries_per_minute: 1
+    max_precalib_iv: 3.0
+    max_files: 0
+    max_minutes: 0
+    chunk_size: 100000
+    save_precalib_csv: true
+    precalib_csv: ${output_dir}/minute_svi_precalib_points.csv
+
+  minute_svi_window:
+    target_datetimes: []
+    target_datetimes_file: ""
+    window_minutes: 3

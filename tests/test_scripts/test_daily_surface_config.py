@@ -3,11 +3,13 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from scripts.generate_surface import daily_surface  # noqa: E402
 from scripts.generate_surface.daily_surface import _load_daily_surface_config, _parse_args  # noqa: E402
 
 
@@ -105,6 +107,16 @@ class TestDailySurfaceConfig(unittest.TestCase):
             self.assertEqual(args.npz_name, "custom_surface_stack.npz")
             self.assertEqual(args.strike_bins, 30)
             self.assertTrue(args.save_daily_csv)
+
+    def test_run_is_thin_wrapper_around_common_runtime(self):
+        args = object()
+        expected = Path("outputs/vol_surface/demo.npz")
+
+        with patch("scripts.generate_surface.daily_surface.run_daily_surface_job", return_value=expected) as run_job:
+            actual = daily_surface.run(args)
+
+        self.assertEqual(actual, expected)
+        run_job.assert_called_once_with(args)
 
 
 if __name__ == "__main__":

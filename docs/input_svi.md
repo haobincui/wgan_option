@@ -4,6 +4,7 @@
 
 This document remains the thesis-facing design and audit spec for SVI-based training data.
 For the command-oriented view of what is runnable today, see [current_executable_workflows.md](current_executable_workflows.md).
+For the detailed architecture of the current executable SVI trainer, see [svi_regressor_architecture.md](svi_regressor_architecture.md).
 
 The repo now has two executable training paths that matter for this design:
 
@@ -225,7 +226,7 @@ From [news_with_openai_embeddings_large_merged.xlsx](/Users/haobincui/Documents/
 
 ### Directly available from the raw precalibration CSV
 
-From [minute_svi_precalib_points.csv](/Users/haobincui/Documents/wgan_option/data/processed_excel_20260330-01/minute_svi_precalib_points.csv):
+From [minute_svi_precalib_points.csv](/Users/haobincui/Documents/wgan_option/data/processed/svi/20260330-01/minute_svi_precalib_points.csv):
 
 - `trade_datetime_utc`
 - `calibration_datetime_utc`
@@ -242,18 +243,19 @@ From [minute_svi_precalib_points.csv](/Users/haobincui/Documents/wgan_option/dat
 - `filter_reason`
 - `weight`
 
-### Directly available from the SVI JSON
+### Directly available from the surface JSON
 
-From [minute_svi_params.json](/Users/haobincui/Documents/wgan_option/data/processed_excel_20260330-01/minute_svi_params.json):
+From [minute_svi_params.json](/Users/haobincui/Documents/wgan_option/data/processed/svi/20260330-01/minute_svi_params.json):
 
 - `json_target_timestamp_utc`
 - `snapshot_time_utc`
-- `svi_params.business_days`
-- `svi_params.a`
-- `svi_params.b`
-- `svi_params.rho`
-- `svi_params.m`
-- `svi_params.sigma`
+- `surface_model`
+- `surface_params.business_days`
+- `surface_params.a`
+- `surface_params.b`
+- `surface_params.rho`
+- `surface_params.m`
+- `surface_params.sigma`
 
 ### Derived after matching
 

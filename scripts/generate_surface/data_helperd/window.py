@@ -1,4 +1,4 @@
-"""Shared datetime-window minute-SVI helpers."""
+"""Shared datetime-window helpers for minute surface generation."""
 
 from __future__ import annotations
 
@@ -19,15 +19,19 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 import pandas as pd
 
 if __package__ in {None, ""}:
+    _ROOT_DIR = Path(__file__).resolve().parents[3]
+    if str(_ROOT_DIR) not in sys.path:
+        sys.path.insert(0, str(_ROOT_DIR))
     import scripts._path_setup  # noqa: F401
     from scripts.generate_surface.common.config_utils import (  # noqa: E402
         build_config_scope,
         load_surface_builder_section,
         resolve_config_variables,
     )
-    from scripts.generate_surface.common.minute_svi_common import (  # noqa: E402
+    from scripts.generate_surface.data_helperd.all import (  # noqa: E402
         DEFAULT_CONFIG_PATH,
         PRECALIB_CSV_HEADERS,
+        ProcessMinuteFn,
         _build_rows_for_minute,
         _collect_spot_and_option_rows,
         _get_file_target_future_month_code,
@@ -38,11 +42,10 @@ if __package__ in {None, ""}:
         _resolve_config_path,
         _setup_runtime,
         _to_utc_minute_string,
-        ProcessMinuteFn,
     )
 else:
-    from .config_utils import build_config_scope, load_surface_builder_section, resolve_config_variables  # noqa: E402
-    from .minute_svi_common import (  # noqa: E402
+    from ..common.config_utils import build_config_scope, load_surface_builder_section, resolve_config_variables  # noqa: E402
+    from .all import (  # noqa: E402
         DEFAULT_CONFIG_PATH,
         PRECALIB_CSV_HEADERS,
         ProcessMinuteFn,
@@ -61,6 +64,7 @@ else:
 logger = logging.getLogger(__name__)
 
 DatetimeLike = Union[str, datetime, pd.Timestamp]
+DEFAULT_WINDOW_CONFIG_PATH = "configs/surface_builder/svi/minute-svi-window.yaml"
 SUPPORTED_MINUTE_SVI_WINDOW_CONFIG_KEYS = {
     "target_datetimes",
     "target_datetimes_file",
@@ -107,7 +111,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     argv_list = list(argv) if argv is not None else sys.argv[1:]
 
     pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--config", type=str, default=DEFAULT_CONFIG_PATH)
+    pre_parser.add_argument("--config", type=str, default=DEFAULT_WINDOW_CONFIG_PATH)
     pre_args, _ = pre_parser.parse_known_args(argv_list)
 
     if "-h" in argv_list or "--help" in argv_list:
@@ -275,15 +279,33 @@ def _filter_files_for_target_windows(
 def _extract_target_surfaces(
     side_results: Dict[Tuple[str, str], Optional[Dict[str, Any]]],
     target_window_map: Dict[str, Dict[str, Dict[str, Any]]],
+    *,
+    default_surface_model: str,
 ) -> Dict[str, Dict[str, Dict[str, Any]]]:
     by_target: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for target_key, target_spec in target_window_map.items():
         target_results: Dict[str, Dict[str, Any]] = {}
         for direction in ("backward", "forward"):
             anchor_ts = target_spec[direction]["anchor_ts"]
+            raw_payload = side_results.get((target_key, direction))
+            if raw_payload is None:
+                normalized_payload = {
+                    "surface_model": default_surface_model,
+                    "surface_params": None,
+                }
+            elif "surface_model" in raw_payload and "surface_params" in raw_payload:
+                normalized_payload = {
+                    "surface_model": raw_payload.get("surface_model", default_surface_model),
+                    "surface_params": raw_payload.get("surface_params"),
+                }
+            else:
+                normalized_payload = {
+                    "surface_model": default_surface_model,
+                    "surface_params": raw_payload,
+                }
             target_results[direction] = {
                 "snapshot_time_utc": _to_utc_minute_string(anchor_ts),
-                "svi_params": side_results.get((target_key, direction)),
+                **normalized_payload,
             }
         by_target[target_key] = target_results
     return by_target
@@ -295,9 +317,16 @@ def generate_surfaces_for_datetime_windows(
     process_minute_fn: ProcessMinuteFn,
     window_minutes: int = 3,
 ) -> Dict[str, Dict[str, Dict[str, Any]]]:
-    output_json_path, log_path, expiry_inference_date, calendar, vol_daycount, expiration_time_utc, all_files = (
-        _setup_runtime(args)
-    )
+    (
+        output_json_path,
+        log_path,
+        resolved_config_path,
+        expiry_inference_date,
+        calendar,
+        vol_daycount,
+        expiration_time_utc,
+        all_files,
+    ) = _setup_runtime(args)
 
     target_window_map = _build_target_window_map(
         target_datetimes=target_datetimes,
@@ -324,13 +353,17 @@ def generate_surfaces_for_datetime_windows(
 
     pending_buckets.sort(key=lambda item: (item[0], item[1], item[2]))
 
-    logger.info("Start minute SVI generation for target datetime windows")
+    logger.info("Start minute surface generation for target datetime windows")
     _log_cli_arguments(args)
     logger.info("Config file=%s", Path(args.config))
+    logger.info("Surface model=%s", str(args.model))
+    logger.info("Run timestamp=%s", str(args.run_ts))
+    logger.info("Output directory=%s", Path(args.output_dir))
     logger.info("Expiry inference data_date=%s", expiry_inference_date.isoformat())
     logger.info("Input files=%d", len(files))
     logger.info("Output JSON=%s", output_json_path)
     logger.info("Log file=%s", log_path)
+    logger.info("Resolved config=%s", resolved_config_path)
     logger.info("Expiration time UTC=%s", expiration_time_utc.isoformat())
     logger.info("Max pre-calib IV=%s", float(args.max_precalib_iv))
     logger.info("Save pre-calib CSV=%s", bool(args.save_precalib_csv))
@@ -397,6 +430,7 @@ def generate_surfaces_for_datetime_windows(
                 precalib_writer=precalib_writer,
                 tau_anchor_ts=anchor_ts,
                 count_stat_key="window_surface_attempts",
+                surface_model=str(args.model),
             )
             side_results[(target_key, direction)] = local_results.get(_to_utc_minute_string(anchor_ts))
             next_bucket_idx += 1
@@ -538,12 +572,16 @@ def generate_surfaces_for_datetime_windows(
         if precalib_fp is not None:
             precalib_fp.close()
 
-    surfaces_by_target = _extract_target_surfaces(side_results, target_window_map)
+    surfaces_by_target = _extract_target_surfaces(
+        side_results,
+        target_window_map,
+        default_surface_model=str(args.model),
+    )
     with output_json_path.open("w", encoding="utf-8") as f:
         json.dump(surfaces_by_target, f, ensure_ascii=False, indent=2)
 
     elapsed = time.time() - start_ts
-    logger.info("Finished minute SVI generation for target datetime windows")
+    logger.info("Finished minute surface generation for target datetime windows")
     logger.info("Elapsed seconds: %.2f", elapsed)
     logger.info("Summary stats:")
     logger.info("  total_files=%d", stats["total_files"])
@@ -578,8 +616,8 @@ def generate_surfaces_for_datetime_windows(
     covered_targets = sum(
         1
         for direction_map in surfaces_by_target.values()
-        if direction_map["backward"]["svi_params"] is not None
-        or direction_map["forward"]["svi_params"] is not None
+        if direction_map["backward"]["surface_params"] is not None
+        or direction_map["forward"]["surface_params"] is not None
     )
     logger.info("Targets with at least one calibrated direction=%d/%d", covered_targets, len(surfaces_by_target))
     return surfaces_by_target

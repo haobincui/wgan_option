@@ -16,11 +16,11 @@ if str(ROOT_DIR) not in sys.path:
 from quantlib.calculation.analytics.position.instruments.features import OptionType  # noqa: E402
 from quantlib.calendar.daycount import DayCountBusN  # noqa: E402
 from quantlib.calendar.holidays import usd_calendar  # noqa: E402
-from scripts.generate_surface.common.minute_svi_common import (  # noqa: E402
+from scripts.generate_surface.data_helperd.all import (  # noqa: E402
     DEFAULT_EXPIRATION_TIME_UTC,
     DEFAULT_MAX_PRECALIB_IV,
 )
-from scripts.generate_surface.surface_cpu.generate_minute_svi_params import (  # noqa: E402
+from scripts.generate_surface.backend.surface_cpu.all import (  # noqa: E402
     ContractMeta,
     MinuteOptionCandidate,
     MinuteTradeRow,
@@ -233,7 +233,7 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         stats = defaultdict(int)
         results = {}
 
-        with patch("scripts.generate_surface.common.minute_svi_common.SviCalibrationQuasiExplicit") as calibration_cls:
+        with patch("scripts.generate_surface.model.svi.SviCalibrationQuasiExplicit") as calibration_cls:
             calibration_cls.return_value.params = {
                 "a": [0.01],
                 "b": [0.02],
@@ -282,6 +282,11 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         self.assertEqual([row["filter_reason"] for row in rows], ["", ""])
         self.assertEqual([float(row["weight"]) for row in rows], [1.0, 3.0])
         self.assertIn("2025-11-14T18:03:00Z", results)
+        self.assertEqual(results["2025-11-14T18:03:00Z"]["surface_model"], "svi")
+        self.assertEqual(
+            results["2025-11-14T18:03:00Z"]["surface_params"],
+            calibration_cls.return_value.params,
+        )
         self.assertEqual(len(calibration_cls.call_args.kwargs["vols"]), 1)
         self.assertEqual(len(calibration_cls.call_args.kwargs["vols"][0]), 1)
         self.assertAlmostEqual(calibration_cls.call_args.kwargs["vols"][0][0], 0.275, places=12)
@@ -337,7 +342,7 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
             return _CalibrationResult()
 
         with patch(
-            "scripts.generate_surface.common.minute_svi_common.SviCalibrationQuasiExplicit",
+            "scripts.generate_surface.model.svi.SviCalibrationQuasiExplicit",
             side_effect=_fake_calibration,
         ) as calibration_cls:
             _finalize_minute_surface(
@@ -360,6 +365,7 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         self.assertEqual(stats["qls_fallback_attempt_slices"], 1)
         self.assertEqual(stats["qls_fallback_success_slices"], 1)
         self.assertIs(calibration_cls.call_args.kwargs["stats"], stats)
+        self.assertEqual(results["2025-11-14T18:03:00Z"]["surface_model"], "svi")
 
     def test_finalize_minute_surface_flags_filtered_points_and_skips_calibration_if_strikes_drop_below_minimum(self):
         minute_ts = pd.Timestamp("2025-11-14T18:03:00Z")
@@ -447,7 +453,7 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         stats = defaultdict(int)
         results = {}
 
-        with patch("scripts.generate_surface.common.minute_svi_common.SviCalibrationQuasiExplicit") as calibration_cls:
+        with patch("scripts.generate_surface.model.svi.SviCalibrationQuasiExplicit") as calibration_cls:
             calibration_cls.return_value.params = {
                 "a": [0.01],
                 "b": [0.02],
@@ -493,6 +499,167 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         )
         self.assertEqual([row["passes_precalib_filter"] for row in rows], ["true", "true"])
         self.assertEqual([row["filter_reason"] for row in rows], ["", ""])
+
+    def test_finalize_minute_surface_dispatches_to_sabr(self):
+        minute_ts = pd.Timestamp("2025-11-14T18:03:00Z")
+        candidates = [
+            self._make_candidate(
+                contract_id="TY110O26",
+                strike=110.0,
+                option_type=OptionType.PUT,
+                price=0.25,
+                weight=1.0,
+                trade_ts="2025-11-14T18:03:11Z",
+            ),
+            self._make_candidate(
+                contract_id="TY110O26",
+                strike=110.0,
+                option_type=OptionType.PUT,
+                price=0.50,
+                weight=3.0,
+                trade_ts="2025-11-14T18:03:47Z",
+            ),
+        ]
+        stats = defaultdict(int)
+        results = {}
+
+        with patch("scripts.generate_surface.model.sabr.SabrCalibrationHagan") as calibration_cls:
+            calibration_cls.return_value.params = {
+                "alpha": [0.2],
+                "beta": [1.0],
+                "rho": [0.0],
+                "nu": [0.1],
+                "business_days": [94],
+            }
+            _finalize_minute_surface(
+                minute_ts=minute_ts,
+                valuation_date=minute_ts.date(),
+                candidates=candidates,
+                implied_vols=[0.20, 0.30],
+                min_strikes_per_expiry=1,
+                min_expiries_per_minute=1,
+                max_precalib_iv=DEFAULT_MAX_PRECALIB_IV,
+                vol_daycount=self._vol_daycount(),
+                results=results,
+                stats=stats,
+                surface_model="sabr",
+            )
+
+        self.assertEqual(results["2025-11-14T18:03:00Z"]["surface_model"], "sabr")
+        self.assertEqual(
+            results["2025-11-14T18:03:00Z"]["surface_params"],
+            calibration_cls.return_value.params,
+        )
+        self.assertAlmostEqual(calibration_cls.call_args.kwargs["vols"][0][0], 0.275, places=12)
+
+    def test_finalize_minute_surface_dispatches_to_cubic_and_serializes_implied_vols(self):
+        minute_ts = pd.Timestamp("2025-11-14T18:03:00Z")
+        candidates = [
+            self._make_candidate(
+                contract_id="TY110O26",
+                strike=110.0,
+                option_type=OptionType.PUT,
+                price=0.25,
+                weight=1.0,
+                trade_ts="2025-11-14T18:03:11Z",
+            ),
+            self._make_candidate(
+                contract_id="TY110O26",
+                strike=110.0,
+                option_type=OptionType.PUT,
+                price=0.50,
+                weight=3.0,
+                trade_ts="2025-11-14T18:03:47Z",
+            ),
+        ]
+        stats = defaultdict(int)
+        results = {}
+
+        with patch("scripts.generate_surface.model.cubic.CubicSplineVolSurfaceBuilder") as builder_cls:
+            builder_cls.return_value.get_vol_surface.return_value = object()
+            _finalize_minute_surface(
+                minute_ts=minute_ts,
+                valuation_date=minute_ts.date(),
+                candidates=candidates,
+                implied_vols=[0.20, 0.30],
+                min_strikes_per_expiry=1,
+                min_expiries_per_minute=1,
+                max_precalib_iv=DEFAULT_MAX_PRECALIB_IV,
+                vol_daycount=self._vol_daycount(),
+                results=results,
+                stats=stats,
+                surface_model="cubic",
+            )
+
+        self.assertEqual(results["2025-11-14T18:03:00Z"]["surface_model"], "cubic")
+        self.assertEqual(
+            results["2025-11-14T18:03:00Z"]["surface_params"]["business_days"],
+            [94],
+        )
+        self.assertAlmostEqual(
+            results["2025-11-14T18:03:00Z"]["surface_params"]["percent_strikes"][0][0],
+            110.0 / 112.5934,
+            places=12,
+        )
+        self.assertAlmostEqual(
+            results["2025-11-14T18:03:00Z"]["surface_params"]["implied_vols"][0][0],
+            0.275,
+            places=12,
+        )
+        self.assertAlmostEqual(builder_cls.call_args.kwargs["vols"][0][0], 0.275, places=12)
+
+    def test_finalize_minute_surface_dispatches_to_raw_and_serializes_implied_vols(self):
+        minute_ts = pd.Timestamp("2025-11-14T18:03:00Z")
+        candidates = [
+            self._make_candidate(
+                contract_id="TY110O26",
+                strike=110.0,
+                option_type=OptionType.PUT,
+                price=0.25,
+                weight=1.0,
+                trade_ts="2025-11-14T18:03:11Z",
+            ),
+            self._make_candidate(
+                contract_id="TY110O26",
+                strike=110.0,
+                option_type=OptionType.PUT,
+                price=0.50,
+                weight=3.0,
+                trade_ts="2025-11-14T18:03:47Z",
+            ),
+        ]
+        stats = defaultdict(int)
+        results = {}
+
+        _finalize_minute_surface(
+            minute_ts=minute_ts,
+            valuation_date=minute_ts.date(),
+            candidates=candidates,
+            implied_vols=[0.20, 0.30],
+            min_strikes_per_expiry=1,
+            min_expiries_per_minute=1,
+            max_precalib_iv=DEFAULT_MAX_PRECALIB_IV,
+            vol_daycount=self._vol_daycount(),
+            results=results,
+            stats=stats,
+            surface_model="raw",
+        )
+
+        self.assertEqual(results["2025-11-14T18:03:00Z"]["surface_model"], "raw")
+        self.assertEqual(
+            results["2025-11-14T18:03:00Z"]["surface_params"]["business_days"],
+            [94],
+        )
+        self.assertAlmostEqual(
+            results["2025-11-14T18:03:00Z"]["surface_params"]["percent_strikes"][0][0],
+            110.0 / 112.5934,
+            places=12,
+        )
+        self.assertAlmostEqual(
+            results["2025-11-14T18:03:00Z"]["surface_params"]["implied_vols"][0][0],
+            0.275,
+            places=12,
+        )
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Shared minute-SVI generation helpers for CPU and GPU entrypoints."""
+"""Shared all-minute surface generation helpers for CPU and GPU entrypoints."""
 
 from __future__ import annotations
 
@@ -29,7 +29,9 @@ from scripts.generate_surface.common.config_utils import (  # noqa: E402
     parse_bool_from_config,
     resolve_config_path,
     resolve_config_variables,
+    write_yaml_mapping,
 )
+from scripts.generate_surface.model import build_surface_params  # noqa: E402
 from logger import LoggingConfig, setup_logging  # noqa: E402
 from market_data.contract_handler.future_contract import FutureContract  # noqa: E402
 from market_data.contract_handler.option_contract import OptionContract  # noqa: E402
@@ -37,7 +39,6 @@ from market_data.contract_handler.utils import ContractTerminationRule  # noqa: 
 from market_data.dto.tradedata_do import TradeDataDO  # noqa: E402
 from quantlib.calendar.daycount import DayCountBusN  # noqa: E402
 from quantlib.calendar.holidays import usd_calendar  # noqa: E402
-from quantlib.vol_surface.algo.svi_algo import SviCalibrationQuasiExplicit  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -58,14 +59,19 @@ PRECALIB_CSV_HEADERS = [
     "weight",
 ]
 
-DEFAULT_CONFIG_PATH = "configs/surface_builder/default.yaml"
+DEFAULT_CONFIG_PATH = "configs/surface_builder/svi/minute-svi-all.yaml"
 DEFAULT_EXPIRATION_TIME_UTC = "20:00:00"
 DEFAULT_MAX_PRECALIB_IV = 3.0
+DEFAULT_SURFACE_MODEL = "svi"
+SUPPORTED_SURFACE_MODELS = {"svi", "sabr", "cubic", "raw"}
+RESOLVED_CONFIG_FILENAME = "resolved_config.yaml"
 SUPPORTED_MINUTE_SVI_CONFIG_KEYS = {
     "input_glob",
     "output_dir",
     "output_json",
     "log_file",
+    "model",
+    "run_ts",
     "data_date",
     "expiration_time_utc",
     "max_precalib_iv",
@@ -139,6 +145,19 @@ _resolve_config_path = resolve_config_path
 _parse_bool_from_config = parse_bool_from_config
 
 
+def _default_run_ts() -> str:
+    return datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+
+
+def _normalize_surface_model(value: Any) -> str:
+    model = str(value or DEFAULT_SURFACE_MODEL).strip().lower()
+    if model not in SUPPORTED_SURFACE_MODELS:
+        raise ValueError(
+            f"Unsupported surface model `{value}`. Expected one of: {sorted(SUPPORTED_SURFACE_MODELS)}"
+        )
+    return model
+
+
 def _parse_expiration_time_utc(value: Any, key: str = "expiration_time_utc") -> dt_time:
     if isinstance(value, dt_time):
         parsed = value
@@ -162,19 +181,36 @@ def _parse_expiration_time_utc(value: Any, key: str = "expiration_time_utc") -> 
     return parsed.replace(tzinfo=timezone.utc)
 
 
-def _load_minute_svi_config(config_path_value: str) -> Dict[str, Any]:
+def _load_minute_svi_config(
+    config_path_value: str,
+    *,
+    runtime_overrides: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     config_path, config_root, defaults = load_surface_builder_section(
         config_path_value,
         section_key="minute_svi",
         supported_keys=SUPPORTED_MINUTE_SVI_CONFIG_KEYS,
     )
+    defaults = dict(defaults)
     shared_glob = config_root.get("option_data_glob")
     if "input_glob" not in defaults and isinstance(shared_glob, str):
         defaults["input_glob"] = shared_glob
-    if "output_dir" in defaults and isinstance(defaults["output_dir"], str):
-        defaults.setdefault("output_json", "${output_dir}/minute_svi_params.json")
-        defaults.setdefault("log_file", "${output_dir}/minute_svi_params.log")
-        defaults.setdefault("precalib_csv", "${output_dir}/minute_svi_precalib_points.csv")
+
+    if runtime_overrides:
+        for key, value in runtime_overrides.items():
+            if value is None:
+                continue
+            text = str(value).strip() if isinstance(value, str) else value
+            if text == "":
+                continue
+            defaults[key] = value
+
+    defaults["model"] = _normalize_surface_model(defaults.get("model", DEFAULT_SURFACE_MODEL))
+    defaults["run_ts"] = str(defaults.get("run_ts", "")).strip() or _default_run_ts()
+    defaults.setdefault("output_dir", "data/processed/${model}/${run_ts}")
+    defaults.setdefault("output_json", "${output_dir}/minute_svi_params.json")
+    defaults.setdefault("log_file", "${output_dir}/minute_svi_params.log")
+    defaults.setdefault("precalib_csv", "${output_dir}/minute_svi_precalib_points.csv")
 
     return resolve_config_variables(defaults, extra_scope=build_config_scope(config_root))
 
@@ -189,12 +225,28 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         default=DEFAULT_CONFIG_PATH,
         help="YAML config path for surface_builder settings.",
     )
+    pre_parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+    )
+    pre_parser.add_argument(
+        "--run-ts",
+        type=str,
+        default=None,
+    )
     pre_args, _ = pre_parser.parse_known_args(argv_list)
 
     if "-h" in argv_list or "--help" in argv_list:
         config_defaults: Dict[str, Any] = {}
     else:
-        config_defaults = _load_minute_svi_config(pre_args.config)
+        config_defaults = _load_minute_svi_config(
+            pre_args.config,
+            runtime_overrides={
+                "model": pre_args.model,
+                "run_ts": pre_args.run_ts,
+            },
+        )
 
     default_save_precalib_csv = _parse_bool_from_config(
         config_defaults.get("save_precalib_csv", False),
@@ -202,7 +254,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     )
 
     parser = argparse.ArgumentParser(
-        description="Generate minute-level SVI parameters from option trade files."
+        description="Generate minute-level surface parameters from option trade files."
     )
     parser.add_argument(
         "--config",
@@ -215,6 +267,18 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         type=str,
         default=str(config_defaults.get("input_glob", "data/raw/option_data/**/*.csv.gz")),
         help="Glob pattern for raw option trade files.",
+    )
+    parser.add_argument(
+        "--model",
+        choices=sorted(SUPPORTED_SURFACE_MODELS),
+        default=str(config_defaults.get("model", DEFAULT_SURFACE_MODEL)),
+        help="Surface model used for minute generation.",
+    )
+    parser.add_argument(
+        "--run-ts",
+        type=str,
+        default=str(config_defaults.get("run_ts", _default_run_ts())),
+        help="Run timestamp used inside the default output directory.",
     )
     parser.add_argument(
         "--output-json",
@@ -262,7 +326,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         "--max-precalib-iv",
         type=float,
         default=float(config_defaults.get("max_precalib_iv", DEFAULT_MAX_PRECALIB_IV)),
-        help="Maximum implied vol allowed into SVI calibration; <= 0 disables the filter.",
+        help="Maximum implied vol allowed into minute surface inputs; <= 0 disables the filter.",
     )
     parser.add_argument(
         "--max-files",
@@ -303,6 +367,17 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     )
     args = parser.parse_args(argv_list)
     args.config = str(_resolve_config_path(args.config))
+    args.model = _normalize_surface_model(args.model)
+    args.run_ts = str(args.run_ts).strip() or _default_run_ts()
+
+    resolved_defaults = _load_minute_svi_config(
+        args.config,
+        runtime_overrides={
+            "model": args.model,
+            "run_ts": args.run_ts,
+        },
+    )
+    args.output_dir = str(resolved_defaults.get("output_dir", Path(args.output_json).parent))
     return args
 
 
@@ -367,6 +442,63 @@ def _log_cli_arguments(args: argparse.Namespace) -> None:
     logger.info("Parsed CLI arguments:")
     for key in sorted(vars(args)):
         logger.info("  %s=%r", key, getattr(args, key))
+
+
+def _build_resolved_config_payload(args: argparse.Namespace) -> Dict[str, Any]:
+    model = _normalize_surface_model(getattr(args, "model", DEFAULT_SURFACE_MODEL))
+    run_ts = str(getattr(args, "run_ts", "")).strip() or _default_run_ts()
+    output_dir = str(getattr(args, "output_dir", Path(getattr(args, "output_json")).parent))
+    payload: Dict[str, Any] = {
+        "surface_builder": {
+            "minute_svi": {
+                "model": model,
+                "run_ts": run_ts,
+                "input_glob": str(args.input_glob),
+                "output_dir": output_dir,
+                "output_json": str(args.output_json),
+                "log_file": str(args.log_file),
+                "data_date": str(args.data_date),
+                "expiration_time_utc": str(args.expiration_time_utc),
+                "days_in_year": int(args.days_in_year),
+                "min_strikes_per_expiry": int(args.min_strikes_per_expiry),
+                "min_expiries_per_minute": int(args.min_expiries_per_minute),
+                "max_precalib_iv": float(args.max_precalib_iv),
+                "max_files": int(args.max_files),
+                "max_minutes": int(args.max_minutes),
+                "chunk_size": int(args.chunk_size),
+                "save_precalib_csv": bool(args.save_precalib_csv),
+                "precalib_csv": str(args.precalib_csv),
+            }
+        },
+        "runtime": {
+            "config_path": str(args.config),
+            "cli_argv": list(sys.argv),
+        },
+    }
+    if hasattr(args, "target_datetimes"):
+        payload["surface_builder"]["minute_svi_window"] = {
+            "target_datetimes": list(args.target_datetimes),
+            "target_datetimes_file": str(getattr(args, "target_datetimes_file", "")),
+            "window_minutes": int(getattr(args, "window_minutes", 3)),
+        }
+    if hasattr(args, "target_xlsx"):
+        payload["surface_builder"]["minute_svi_excel"] = {
+            "target_xlsx": str(args.target_xlsx),
+            "sheet_name": str(args.sheet_name),
+            "date_column": str(args.date_column),
+            "time_column": str(args.time_column),
+            "source_timezone": str(args.source_timezone),
+            "max_target_datetimes": int(args.max_target_datetimes),
+            "window_minutes": int(getattr(args, "window_minutes", 3)),
+        }
+    return payload
+
+
+def _write_resolved_config(args: argparse.Namespace) -> Path:
+    return write_yaml_mapping(
+        _build_resolved_config_payload(args),
+        Path(getattr(args, "output_dir", Path(args.output_json).parent)) / RESOLVED_CONFIG_FILENAME,
+    )
 
 
 def _get_target_future_month_code(current_month: int) -> str:
@@ -629,6 +761,7 @@ def _finalize_minute_surface(
     results: Dict[str, Dict[str, Any]],
     stats: Dict[str, int],
     precalib_writer: Optional[csv.DictWriter] = None,
+    surface_model: str = DEFAULT_SURFACE_MODEL,
 ) -> None:
     grouped: Dict[int, Dict[float, Dict[str, Any]]] = defaultdict(
         lambda: defaultdict(
@@ -744,22 +877,29 @@ def _finalize_minute_surface(
         stats["skip_sample_insufficient"] += 1
         return
 
+    surface_model = _normalize_surface_model(surface_model)
+
     try:
-        calibration = SviCalibrationQuasiExplicit(
-            vols=vols,
-            percent_strikes=percent_strikes,
-            business_days=business_days_list,
-            vol_daycount=vol_daycount,
-            valuation_date=valuation_date,
-            stats=stats,
+        params = _to_json_native(
+            build_surface_params(
+                surface_model=surface_model,
+                valuation_date=valuation_date,
+                vols=vols,
+                percent_strikes=percent_strikes,
+                business_days_list=business_days_list,
+                vol_daycount=vol_daycount,
+                stats=stats,
+            )
         )
-        params = _to_json_native(calibration.params)
     except Exception:
         stats["skip_calibration_exception"] += 1
-        logger.debug("Calibration failed at minute %s", minute_ts, exc_info=True)
+        logger.debug("Surface fit failed at minute %s for model=%s", minute_ts, surface_model, exc_info=True)
         return
 
-    results[minute_key] = params
+    results[minute_key] = {
+        "surface_model": surface_model,
+        "surface_params": params,
+    }
     stats["calibrated_minutes"] += 1
 
 
@@ -820,11 +960,17 @@ def _build_rows_for_minute(
 
 def _setup_runtime(
     args: argparse.Namespace,
-) -> Tuple[Path, Path, date, Any, DayCountBusN, dt_time, List[str]]:
+) -> Tuple[Path, Path, Path, date, Any, DayCountBusN, dt_time, List[str]]:
+    output_dir = Path(getattr(args, "output_dir", Path(args.output_json).parent))
+    args.output_dir = str(output_dir)
+    args.model = _normalize_surface_model(getattr(args, "model", DEFAULT_SURFACE_MODEL))
+    args.run_ts = str(getattr(args, "run_ts", "")).strip() or _default_run_ts()
     output_json_path = Path(args.output_json)
     log_path = Path(args.log_file)
+    output_dir.mkdir(parents=True, exist_ok=True)
     output_json_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_config_path = _write_resolved_config(args)
 
     setup_logging(
         LoggingConfig(
@@ -851,21 +997,41 @@ def _setup_runtime(
     if not files:
         raise FileNotFoundError(f"No input files found for pattern: {args.input_glob}")
 
-    return output_json_path, log_path, expiry_inference_date, calendar, vol_daycount, expiration_time_utc, files
+    return (
+        output_json_path,
+        log_path,
+        resolved_config_path,
+        expiry_inference_date,
+        calendar,
+        vol_daycount,
+        expiration_time_utc,
+        files,
+    )
 
 
 def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinuteFn) -> Dict[str, Dict[str, Any]]:
-    output_json_path, log_path, expiry_inference_date, calendar, vol_daycount, expiration_time_utc, files = (
-        _setup_runtime(args)
-    )
+    (
+        output_json_path,
+        log_path,
+        resolved_config_path,
+        expiry_inference_date,
+        calendar,
+        vol_daycount,
+        expiration_time_utc,
+        files,
+    ) = _setup_runtime(args)
 
-    logger.info("Start minute SVI generation")
+    logger.info("Start minute surface generation")
     _log_cli_arguments(args)
     logger.info("Config file=%s", Path(args.config))
+    logger.info("Surface model=%s", str(args.model))
+    logger.info("Run timestamp=%s", str(args.run_ts))
+    logger.info("Output directory=%s", Path(args.output_dir))
     logger.info("Expiry inference data_date=%s", expiry_inference_date.isoformat())
     logger.info("Input files=%d", len(files))
     logger.info("Output JSON=%s", output_json_path)
     logger.info("Log file=%s", log_path)
+    logger.info("Resolved config=%s", resolved_config_path)
     logger.info("Expiration time UTC=%s", expiration_time_utc.isoformat())
     logger.info("Max pre-calib IV=%s", float(args.max_precalib_iv))
     logger.info("Save pre-calib CSV=%s", bool(args.save_precalib_csv))
@@ -995,6 +1161,7 @@ def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinut
                             results=results,
                             stats=stats,
                             precalib_writer=precalib_writer,
+                            surface_model=str(args.model),
                         )
 
                     if stop_due_to_max_minutes:
@@ -1037,6 +1204,7 @@ def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinut
                         results=results,
                         stats=stats,
                         precalib_writer=precalib_writer,
+                        surface_model=str(args.model),
                     )
 
             if stop_due_to_max_minutes:
@@ -1050,7 +1218,7 @@ def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinut
         json.dump(results, f, ensure_ascii=False, indent=2)
 
     elapsed = time.time() - start_ts
-    logger.info("Finished minute SVI generation")
+    logger.info("Finished minute surface generation")
     logger.info("Elapsed seconds: %.2f", elapsed)
     logger.info("Summary stats:")
     logger.info("  total_files=%d", stats["total_files"])

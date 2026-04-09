@@ -5,6 +5,13 @@ from typing import Dict, List
 import numpy as np
 
 from quantlib.calendar.daycount import DayCountBusN
+from quantlib.vol_surface.surface import ImpliedVolSurface
+
+
+_UNSUPPORTED_SURFACE_OPERATION_MESSAGE = (
+    "This model surface currently supports implied-vol queries only; "
+    "parallel_bump/roll/shift_valuation_date are not implemented."
+)
 
 
 @dataclass
@@ -53,8 +60,7 @@ class TermVolSurfaceByDays:
 
 
 @dataclass
-class SviVolSurface:
-    valuation_date: date
+class SviVolSurface(ImpliedVolSurface):
     svi_params: Dict[str, List[float]]
     vol_daycount: DayCountBusN
 
@@ -106,6 +112,25 @@ class SviVolSurface:
         sigma = max(self._interp_param(self._sigma, day), 1e-8)
         total_var = self._slice_total_variance(lm, a, b, rho, m, sigma)
         return float(np.sqrt(total_var * self._days_in_year / day))
+
+    def implied_vol_by_spot(self, spot: float, strike: float, expiration_date: date) -> float:
+        return self.implied_vol(
+            forward=spot,
+            strike=strike,
+            expiration_date=expiration_date,
+        )
+
+    def parallel_bump(self, amount: float) -> ImpliedVolSurface:
+        del amount
+        raise NotImplementedError(_UNSUPPORTED_SURFACE_OPERATION_MESSAGE)
+
+    def roll(self, new_valuation_date: date) -> ImpliedVolSurface:
+        del new_valuation_date
+        raise NotImplementedError(_UNSUPPORTED_SURFACE_OPERATION_MESSAGE)
+
+    def shift_valuation_date(self, new_valuation_date: date) -> ImpliedVolSurface:
+        del new_valuation_date
+        raise NotImplementedError(_UNSUPPORTED_SURFACE_OPERATION_MESSAGE)
 
     def implied_vol_surface(
         self, percent_strikes: List[float], business_days: List[int], forward: float = 1.0
