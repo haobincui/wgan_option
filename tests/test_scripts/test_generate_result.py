@@ -162,7 +162,13 @@ class TestGenerateResultScripts(unittest.TestCase):
             df.to_excel(writer, sheet_name="news_direction_audit", index=False)
         return path
 
-    def _write_generator_checkpoint(self, tmpdir: str, *, embedding_dim: int = 2) -> tuple[Path, Path, Path]:
+    def _write_generator_checkpoint(
+        self,
+        tmpdir: str,
+        *,
+        embedding_dim: int = 2,
+        text_embedding_mode: str = "hd",
+    ) -> tuple[Path, Path, Path]:
         models_dir = Path(tmpdir) / "vol_models"
         metrics_dir = Path(tmpdir) / "vol_metrics"
         models_dir.mkdir(parents=True, exist_ok=True)
@@ -173,6 +179,7 @@ class TestGenerateResultScripts(unittest.TestCase):
             cuda=False,
             channels=1,
             embedding_dim=embedding_dim,
+            text_embedding_mode=text_embedding_mode,
             noise_dim=4,
             gen_hidden_dim=16,
             disc_hidden_dim=8,
@@ -213,6 +220,7 @@ class TestGenerateResultScripts(unittest.TestCase):
         *,
         run_ts: str,
         embedding_dim: int = 2,
+        text_embedding_mode: str = "hd",
     ) -> tuple[Path, Path]:
         run_root = Path(tmpdir) / "vol_xlsx"
         run_dir = run_root / run_ts
@@ -226,6 +234,7 @@ class TestGenerateResultScripts(unittest.TestCase):
             cuda=False,
             channels=1,
             embedding_dim=embedding_dim,
+            text_embedding_mode=text_embedding_mode,
             noise_dim=4,
             gen_hidden_dim=16,
             disc_hidden_dim=8,
@@ -527,6 +536,49 @@ class TestGenerateResultScripts(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["sample_id"], "news_3")
 
+    def test_generate_vol_script_supports_none_text_mode_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = self._write_vol_workbook(tmpdir)
+            run_root, _ = self._write_generator_checkpoint_run_root(
+                tmpdir,
+                run_ts="20260407_141414",
+                embedding_dim=1,
+                text_embedding_mode="none",
+            )
+            output_dir = Path(tmpdir) / "generate_vol_none"
+            config_path = Path(tmpdir) / "generate_vol_none.yaml"
+            _write_yaml(
+                config_path,
+                {
+                    "data_path": str(workbook_path),
+                    "sheet_name": "gan_input_ready",
+                    "text_embedding_mode": "none",
+                    "train_ratio": 2 / 3,
+                    "cuda": False,
+                    "seed": 123,
+                    "checkpoint_path": "",
+                    "models_path": str(run_root),
+                    "metrics_path": str(run_root),
+                    "split": "val",
+                    "selection_mode": "row_index",
+                    "row_index": 0,
+                    "limit": 5,
+                    "output_dir": str(output_dir),
+                    "save_plots": False,
+                    "save_json": True,
+                    "plot_style": "heatmap_diff",
+                },
+            )
+
+            module = _load_script_module(ROOT_DIR / "scripts/generate_result/generate_vol.py", "generate_vol_none_script")
+            run_dir = module.main(["--config", str(config_path)])
+
+            self.assertTrue((run_dir / "summary.csv").exists())
+            json_files = sorted((run_dir / "samples").glob("*.json"))
+            self.assertEqual(len(json_files), 1)
+            payload = json.loads(json_files[0].read_text(encoding="utf-8"))
+            self.assertEqual(payload["sample_id"], "news_3")
+
     def test_generate_svi_script_outputs_predicted_and_real_surfaces(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_svi_workbook(tmpdir)
@@ -612,14 +664,14 @@ class TestGenerateResultScripts(unittest.TestCase):
             self.assertGreater(sidecar_lines.stat().st_size, 0)
             self.assertGreater(sidecar_atm.stat().st_size, 0)
 
-    def test_plot_surface_helper_uses_nearest_atm_and_middle_maturity(self):
+    def test_plot_surface_helper_uses_nearest_atm_and_short_maturity(self):
         module = _load_script_module(ROOT_DIR / "scripts/generate_result/plot_surface.py", "plot_surface_helper_script")
 
         atm_idx = module._nearest_atm_index([0.7, 0.91, 1.03, 1.25])
-        middle_idx = module._middle_maturity_index([7.0, 30.0, 60.0, 120.0, 240.0])
+        short_idx = module._short_maturity_index([7.0, 30.0, 60.0, 120.0, 240.0])
 
         self.assertEqual(atm_idx, 2)
-        self.assertEqual(middle_idx, 2)
+        self.assertEqual(short_idx, 0)
 
     def test_generate_result_main_dispatches_subcommands(self):
         module = _load_script_module(ROOT_DIR / "scripts/generate_result/main.py", "generate_result_main_script")

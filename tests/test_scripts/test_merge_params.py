@@ -32,8 +32,8 @@ class TestMergeParams(unittest.TestCase):
         xlsx_path = Path(tmpdir) / "news_input.xlsx"
         result_dir = Path(tmpdir) / "result"
         result_dir.mkdir()
-        csv_path = result_dir / "minute_svi_precalib_points.csv"
-        json_path = result_dir / "minute_svi_params.json"
+        csv_path = result_dir / f"surface-{surface_model}-all-precalib-points.csv"
+        json_path = result_dir / f"surface-{surface_model}-all.json"
 
         pd.DataFrame(
             [

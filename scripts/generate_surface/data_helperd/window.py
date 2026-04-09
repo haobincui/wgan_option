@@ -23,15 +23,12 @@ if __package__ in {None, ""}:
     if str(_ROOT_DIR) not in sys.path:
         sys.path.insert(0, str(_ROOT_DIR))
     import scripts._path_setup  # noqa: F401
-    from scripts.generate_surface.common.config_utils import (  # noqa: E402
-        build_config_scope,
-        load_surface_builder_section,
-        resolve_config_variables,
-    )
+    from scripts.generate_surface.common.config_utils import resolve_config_variables  # noqa: E402
     from scripts.generate_surface.data_helperd.all import (  # noqa: E402
         DEFAULT_CONFIG_PATH,
         PRECALIB_CSV_HEADERS,
         ProcessMinuteFn,
+        _load_generate_surface_config,
         _build_rows_for_minute,
         _collect_spot_and_option_rows,
         _get_file_target_future_month_code,
@@ -44,11 +41,12 @@ if __package__ in {None, ""}:
         _to_utc_minute_string,
     )
 else:
-    from ..common.config_utils import build_config_scope, load_surface_builder_section, resolve_config_variables  # noqa: E402
+    from ..common.config_utils import resolve_config_variables  # noqa: E402
     from .all import (  # noqa: E402
         DEFAULT_CONFIG_PATH,
         PRECALIB_CSV_HEADERS,
         ProcessMinuteFn,
+        _load_generate_surface_config,
         _build_rows_for_minute,
         _collect_spot_and_option_rows,
         _get_file_target_future_month_code,
@@ -64,12 +62,7 @@ else:
 logger = logging.getLogger(__name__)
 
 DatetimeLike = Union[str, datetime, pd.Timestamp]
-DEFAULT_WINDOW_CONFIG_PATH = "configs/surface_builder/svi/minute-svi-window.yaml"
-SUPPORTED_MINUTE_SVI_WINDOW_CONFIG_KEYS = {
-    "target_datetimes",
-    "target_datetimes_file",
-    "window_minutes",
-}
+DEFAULT_WINDOW_CONFIG_PATH = "configs/surface_builder/svi/generate_surface-svi-window.yaml"
 
 
 def _coerce_target_datetime_defaults(value: Any) -> List[str]:
@@ -99,12 +92,8 @@ def _coerce_target_datetime_defaults(value: Any) -> List[str]:
 
 
 def _load_window_config(config_path_value: str) -> Dict[str, Any]:
-    _, config_root, window_section = load_surface_builder_section(
-        config_path_value,
-        section_key="minute_svi_window",
-        supported_keys=SUPPORTED_MINUTE_SVI_WINDOW_CONFIG_KEYS,
-    )
-    return resolve_config_variables(window_section, extra_scope=build_config_scope(config_root))
+    defaults = _load_generate_surface_config(config_path_value)
+    return resolve_config_variables(defaults)
 
 
 def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:

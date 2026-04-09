@@ -39,6 +39,8 @@ from scripts.merge_file._merge_common import (  # noqa: E402
     offset_column_name as _offset_column_name,
     range_summary as _range_summary,
     resolve_existing_path as _resolve_existing_path,
+    resolve_surface_csv_path as _resolve_surface_csv_path,
+    resolve_surface_json_path as _resolve_surface_json_path,
     safe_float as _safe_float,
     safe_int as _safe_int,
     serialize_list as _serialize_list,
@@ -49,8 +51,6 @@ from scripts.merge_file._merge_common import (  # noqa: E402
 )
 
 DEFAULT_NEWS_XLSX_PATH = ROOT_DIR / "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx"
-DEFAULT_CSV_NAME = "minute_svi_precalib_points.csv"
-DEFAULT_JSON_NAME = "minute_svi_params.json"
 DEFAULT_OUTPUT_NAME = "merged_svi.xlsx"
 DEFAULT_OFFSET_MINUTES = 5
 DAYS_IN_YEAR = 250
@@ -160,7 +160,11 @@ GAN_HEADERS = [
 
 def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Merge minute SVI results into an audit workbook.")
-    parser.add_argument("--input-dir", required=True, help="Directory containing minute_svi_precalib_points.csv and minute_svi_params.json.")
+    parser.add_argument(
+        "--input-dir",
+        required=True,
+        help="Directory containing surface-<model>-<data_range>.json and surface-<model>-<data_range>-precalib-points.csv.",
+    )
     parser.add_argument(
         "--source-timezone",
         default=DEFAULT_SOURCE_TIMEZONE,
@@ -400,8 +404,8 @@ def build_workbook_frames(
         raise NotADirectoryError(f"Input path must be a directory: {input_dir}")
 
     news_xlsx_path = _resolve_existing_path(Path(news_xlsx_path), "News xlsx")
-    csv_path = _resolve_existing_path(input_dir / DEFAULT_CSV_NAME, "CSV")
-    json_path = _resolve_existing_path(input_dir / DEFAULT_JSON_NAME, "JSON")
+    csv_path = _resolve_surface_csv_path(input_dir)
+    json_path = _resolve_surface_json_path(input_dir)
 
     news_df = load_news_base_frame(news_xlsx_path, source_timezone=source_timezone, offset_minutes=offset_minutes)
     csv_df = _load_precalib_csv(csv_path)

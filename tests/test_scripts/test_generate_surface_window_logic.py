@@ -49,8 +49,10 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
             output_json=str(Path(tmpdir) / "window.json"),
             log_file=str(Path(tmpdir) / "window.log"),
             model="svi",
+            data_range="window",
             run_ts="test-run",
             output_dir=str(Path(tmpdir) / "run"),
+            resolved_config_path=str(Path(tmpdir) / "run" / "surface-resolved_config.yaml"),
             data_date="2026-03-09",
             expiration_time_utc="20:00:00",
             days_in_year=250,
@@ -290,12 +292,16 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
                     ],
                 },
             )
-            resolved_config_path = Path(args.output_dir) / "resolved_config.yaml"
+            resolved_config_path = Path(args.output_dir) / "surface-resolved_config.yaml"
             self.assertTrue(resolved_config_path.exists())
             resolved_config = yaml.safe_load(resolved_config_path.read_text(encoding="utf-8"))
-            self.assertEqual(resolved_config["surface_builder"]["minute_svi"]["model"], "svi")
-            self.assertEqual(resolved_config["surface_builder"]["minute_svi"]["run_ts"], "test-run")
-            self.assertEqual(resolved_config["surface_builder"]["minute_svi"]["output_json"], str(Path(tmpdir) / "window.json"))
+            self.assertEqual(resolved_config["surface_builder"]["generate_surface"]["model"], "svi")
+            self.assertEqual(resolved_config["surface_builder"]["generate_surface"]["data_range"], "window")
+            self.assertEqual(resolved_config["surface_builder"]["generate_surface"]["run_ts"], "test-run")
+            self.assertEqual(
+                resolved_config["surface_builder"]["generate_surface"]["output_json"],
+                str(Path(tmpdir) / "window.json"),
+            )
 
             written = json.loads(Path(args.output_json).read_text(encoding="utf-8"))
             self.assertEqual(written, surfaces)

@@ -23,33 +23,61 @@ from scripts.generate_surface.backend.surface_gpu.all import (  # noqa: E402
 
 
 class TestGenerateSurfaceMain(unittest.TestCase):
-    def test_main_dispatches_cpu_minute_job(self):
+    def test_main_dispatches_cpu_all_job(self):
         mock_cpu_main = Mock()
         with patch.dict(
             surface_main.MINUTE_COMMANDS,
             {
-                "minute-svi": {
+                "all": {
                     "cpu": mock_cpu_main,
-                    "gpu": surface_main.MINUTE_COMMANDS["minute-svi"]["gpu"],
+                    "gpu": surface_main.MINUTE_COMMANDS["all"]["gpu"],
                 }
             },
         ):
-            surface_main.main(["minute-svi", "--device", "cpu", "--model", "sabr", "--max-files", "1"])
-        mock_cpu_main.assert_called_once_with(["--model", "sabr", "--max-files", "1"])
+            surface_main.main(
+                [
+                    "generate_surface",
+                    "--device",
+                    "cpu",
+                    "--model",
+                    "sabr",
+                    "--data_range",
+                    "all",
+                    "--max-files",
+                    "1",
+                ]
+            )
+        mock_cpu_main.assert_called_once_with(
+            ["--model", "sabr", "--data_range", "all", "--max-files", "1"]
+        )
 
-    def test_main_dispatches_cpu_minute_job_with_raw_model(self):
+    def test_main_dispatches_cpu_all_job_with_raw_model(self):
         mock_cpu_main = Mock()
         with patch.dict(
             surface_main.MINUTE_COMMANDS,
             {
-                "minute-svi": {
+                "all": {
                     "cpu": mock_cpu_main,
-                    "gpu": surface_main.MINUTE_COMMANDS["minute-svi"]["gpu"],
+                    "gpu": surface_main.MINUTE_COMMANDS["all"]["gpu"],
                 }
             },
         ):
-            surface_main.main(["minute-svi", "--device", "cpu", "--model", "raw", "--max-files", "1"])
-        mock_cpu_main.assert_called_once_with(["--model", "raw", "--max-files", "1"])
+            surface_main.main(
+                [
+                    "generate_surface",
+                    "--device",
+                    "cpu",
+                    "--model",
+                    "raw",
+                    "--data_range",
+                    "all",
+                    "--max-files",
+                    "1",
+                ]
+            )
+        mock_cpu_main.assert_called_once_with(
+            ["--model", "raw", "--data_range", "all", "--max-files", "1"]
+        )
 
     @patch("scripts.generate_surface.dispatch.torch.cuda.is_available", return_value=True)
     def test_main_dispatches_gpu_window_job(self, _mock_cuda):
@@ -57,33 +85,50 @@ class TestGenerateSurfaceMain(unittest.TestCase):
         with patch.dict(
             surface_main.MINUTE_COMMANDS,
             {
-                "minute-svi-window": {
-                    "cpu": surface_main.MINUTE_COMMANDS["minute-svi-window"]["cpu"],
+                "window": {
+                    "cpu": surface_main.MINUTE_COMMANDS["window"]["cpu"],
                     "gpu": mock_gpu_main,
                 }
             },
         ):
-            surface_main.main(["minute-svi-window", "--device", "gpu", "--max-files", "1"])
-        mock_gpu_main.assert_called_once_with(["--max-files", "1"])
+            surface_main.main(
+                [
+                    "generate_surface",
+                    "--device",
+                    "gpu",
+                    "--data_range",
+                    "window",
+                    "--max-files",
+                    "1",
+                ]
+            )
+        mock_gpu_main.assert_called_once_with(["--data_range", "window", "--max-files", "1"])
 
     def test_main_dispatches_cpu_excel_job(self):
         mock_cpu_main = Mock()
         with patch.dict(
             surface_main.MINUTE_COMMANDS,
             {
-                "minute-svi-excel": {
+                "excel": {
                     "cpu": mock_cpu_main,
-                    "gpu": surface_main.MINUTE_COMMANDS["minute-svi-excel"]["gpu"],
+                    "gpu": surface_main.MINUTE_COMMANDS["excel"]["gpu"],
                 }
             },
         ):
-            surface_main.main(["minute-svi-excel", "--device", "cpu", "--window-minutes", "5"])
-        mock_cpu_main.assert_called_once_with(["--window-minutes", "5"])
-
-    @patch("scripts.generate_surface.main.daily_surface_main")
-    def test_main_dispatches_daily_surface_job(self, mock_daily_main):
-        surface_main.main(["daily-surface", "--output-dir", "outputs/demo"])
-        mock_daily_main.assert_called_once_with(["--output-dir", "outputs/demo"])
+            surface_main.main(
+                [
+                    "generate_surface",
+                    "--device",
+                    "cpu",
+                    "--data_range",
+                    "excel",
+                    "--window-minutes",
+                    "5",
+                ]
+            )
+        mock_cpu_main.assert_called_once_with(
+            ["--data_range", "excel", "--window-minutes", "5"]
+        )
 
     @patch("scripts.generate_surface.dispatch.torch.cuda.is_available", return_value=False)
     def test_main_raises_when_gpu_requested_without_cuda(self, _mock_cuda):
@@ -91,14 +136,16 @@ class TestGenerateSurfaceMain(unittest.TestCase):
         with patch.dict(
             surface_main.MINUTE_COMMANDS,
             {
-                "minute-svi": {
-                    "cpu": surface_main.MINUTE_COMMANDS["minute-svi"]["cpu"],
+                "all": {
+                    "cpu": surface_main.MINUTE_COMMANDS["all"]["cpu"],
                     "gpu": mock_gpu_main,
                 }
             },
         ):
             with self.assertRaises(RuntimeError):
-                surface_main.main(["minute-svi", "--device", "gpu", "--max-files", "1"])
+                surface_main.main(
+                    ["generate_surface", "--device", "gpu", "--data_range", "all", "--max-files", "1"]
+                )
         mock_gpu_main.assert_not_called()
 
 

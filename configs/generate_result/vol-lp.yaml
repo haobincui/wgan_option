@@ -1,7 +1,7 @@
 # Data
-data_path: data/processed/svi/20260330-01/merged_vol.xlsx
+data_path: data/processed/svi-all/20260330-01/merged_vol.xlsx
 sheet_name: gan_input_ready
-text_embedding_mode: hd
+text_embedding_mode: lp
 train_ratio: 0.8
 
 # Runtime
@@ -10,16 +10,16 @@ seed: 42
 num_workers: 0
 
 # Checkpoints
-checkpoint_path: ""
-models_path: outputs/training/vol_xlsx
-metrics_path: outputs/training/vol_xlsx
+checkpoint_path: outputs/training/svi-all/20260409_162036/checkpoints/generator_best.pt
+models_path: outputs/training/svi-all
+metrics_path: outputs/training/svi-all
 
 # Sample selection
 split: val
 selection_mode: first_n
 sample_id: ""
-row_index: -1
-limit: 5
+row_index: 1
+limit: 20
 
 # Outputs
 output_dir: outputs/generate_result/vol

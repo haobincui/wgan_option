@@ -1,16 +1,18 @@
 surface_builder:
-  job: minute-svi
+  job: generate_surface
   option_data_glob: data/raw/option_data/**/*.csv.gz
   output_dir: data/processed
 
-  minute_svi:
+  generate_surface:
     model: raw
+    data_range: all
     run_ts: ""
-    output_dir: data/processed/${model}/${run_ts}
+    output_dir: data/processed/${model}-${data_range}/${run_ts}
     input_glob: ${option_data_glob}
     expiration_time_utc: "20:00:00"
-    output_json: ${output_dir}/minute_svi_params.json
-    log_file: ${output_dir}/minute_svi_params.log
+    output_json: ${output_dir}/surface-${model}-${data_range}.json
+    log_file: ${output_dir}/surface-${model}-${data_range}.log
+    resolved_config_path: ${output_dir}/surface-resolved_config.yaml
     data_date: "2026-03-09"
     days_in_year: 250
     min_strikes_per_expiry: 3
@@ -20,4 +22,4 @@ surface_builder:
     max_minutes: 0
     chunk_size: 100000
     save_precalib_csv: true
-    precalib_csv: ${output_dir}/minute_svi_precalib_points.csv
+    precalib_csv: ${output_dir}/surface-${model}-${data_range}-precalib-points.csv

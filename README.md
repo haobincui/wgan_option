@@ -14,7 +14,7 @@ The project is being developed as part of a PhD thesis chapter, so reproducibili
 
 ### 1. Surface generation
 
-Build daily surfaces or minute-level SVI outputs from raw option data.
+Build minute-level surface outputs from raw option data with one unified CLI.
 
 Main entrypoint:
 
@@ -25,24 +25,44 @@ python scripts/generate_surface/main.py --help
 Common commands:
 
 ```bash
-python scripts/generate_surface/main.py minute-svi-excel --device gpu --config configs/surface_builder/svi/minute-svi-excel.yaml
-python scripts/generate_surface/main.py minute-svi --device cpu --config configs/surface_builder/svi/minute-svi-all.yaml
-python scripts/generate_surface/main.py daily-surface --config configs/surface_builder/default.yaml
+python scripts/generate_surface/main.py generate_surface --device gpu --model svi --data_range excel --config configs/surface_builder/svi/generate_surface-svi-excel.yaml
+python scripts/generate_surface/main.py generate_surface --device cpu --model svi --data_range all --config configs/surface_builder/svi/generate_surface-svi-all.yaml
+python scripts/generate_surface/main.py generate_surface --device cpu --model raw --data_range all --config configs/surface_builder/raw/generate_surface-raw-all.yaml
 ```
+
+Minute generation now supports four models:
+
+- `svi`
+- `sabr`
+- `cubic`
+- `raw`
+
+Outputs are written under:
+
+- `data/processed/<model>-<data_range>/<run_ts>/`
+
+Default generation artifacts inside one run directory:
+
+- `surface-<model>-<data_range>.json`
+- `surface-<model>-<data_range>.log`
+- `surface-<model>-<data_range>-precalib-points.csv`
+- `surface-resolved_config.yaml`
 
 ### 2. Merge generated outputs with news embeddings
 
-Build training-ready Excel workbooks from minute-SVI outputs.
+Build training-ready Excel workbooks from minute surface outputs.
 
 ```bash
-python scripts/merge_file/merge_svi.py --input-dir data/processed/svi/20260330-01
-python scripts/merge_file/merge_vol.py --input-dir data/processed/svi/20260330-01
+python scripts/merge_file/merge_svi.py --input-dir data/processed/svi-all/20260330-01
+python scripts/merge_file/merge_vol.py --input-dir data/processed/svi-all/20260330-01
+python scripts/merge_file/merge_params.py --input-dir data/processed/svi-all/20260330-01
 ```
 
 Outputs:
 
 - `merged_svi.xlsx`
 - `merged_vol.xlsx`
+- `merged_params.xlsx`
 
 Important semantics:
 
@@ -80,20 +100,28 @@ python scripts/train/train_vol.py --config configs/wgan/train_vol_xlsx.yaml --dr
 python scripts/train/train_svi.py --config configs/wgan/train_svi_xlsx.yaml --dry-run
 ```
 
-Legacy daily-surface WGAN training is still available:
+## Shell Wrappers
+
+The repo root currently contains a few convenience shell scripts for background runs:
+
+- `run_train.sh`
+  - wraps `python scripts/train/main.py ...`
+  - default subcommand is `vol-xlsx`
+- `run_analyze_error.sh`
+  - wraps `python scripts/analyze_error/main.py ...`
+  - supports `vol`, `svi`, or `both`
+- `run_minute_svi_excel_gpu.sh`
+  - wraps `python scripts/generate_surface/main.py generate_surface --device gpu --data_range excel ...`
+  - use it with an explicit modern config path, for example:
 
 ```bash
-python scripts/train.py --config configs/wgan/train_default.yaml
+bash run_minute_svi_excel_gpu.sh --config configs/surface_builder/svi/generate_surface-svi-excel.yaml
+bash run_minute_svi_excel_gpu.sh --config configs/surface_builder/sabr/generate_surface-sabr-excel.yaml
 ```
 
+Those wrappers create `logs/` entries and PID files in the repository root.
+
 ## Training Modes
-
-### Legacy daily-surface WGAN
-
-- entrypoint: `scripts/train.py`
-- config: `configs/wgan/train_default.yaml`
-- dataset source: raw option data plus daily aggregated news embeddings
-- target: proxy future surface forecasting
 
 ### Merged vol-surface WGAN
 
@@ -139,7 +167,7 @@ reduce_lr_patience: 8
 reduce_lr_min_lr: 1.0e-5
 ```
 
-The global config default is `false`, while individual experiment YAMLs can override it.
+The global dataclass default is `false`, while individual experiment YAMLs can override it.
 
 Current monitor metrics:
 
@@ -148,11 +176,9 @@ Current monitor metrics:
 
 ## Output Artifacts
 
-Typical output trees:
+Typical output tree:
 
-- `outputs/training/vol_xlsx`
-- `outputs/training/svi_xlsx`
-- `outputs/checkpoints` for the legacy path
+- `outputs/training/<model>-<data_range>/<run_ts>/`
 
 Typical metrics artifacts:
 
@@ -218,13 +244,15 @@ python -m pip install -r requirements.txt
 wgan_option/
 ├── configs/
 │   ├── surface_builder/            # Surface-generation jobs
-│   └── wgan/                       # Legacy + merged training configs
+│   └── wgan/                       # Merged training configs
 ├── docs/                           # Research and training documentation
 ├── scripts/
 │   ├── generate_surface/           # Unified generation CLI
 │   ├── merge_file/                 # Workbook construction
-│   ├── train/                      # Unified merged-xlsx training CLI
-│   └── train.py                    # Legacy daily-surface training entrypoint
+│   └── train/                      # Unified merged-xlsx training CLI
+├── run_train.sh                    # Background wrapper for training jobs
+├── run_analyze_error.sh            # Background wrapper for error analysis jobs
+├── run_minute_svi_excel_gpu.sh     # Background wrapper for GPU excel minute generation
 ├── src/
 │   ├── quantlib/                   # Vol surface, SVI, and numerical utilities
 │   ├── market_data/                # Market-data contracts / DTO helpers
@@ -251,4 +279,5 @@ Training diagnostics:
 
 - The merged vol workflow is currently the closest executable path to the thesis-facing vol-surface forecasting setup.
 - The merged SVI workflow is a paired forecasting implementation, even though `merged_svi.xlsx` itself is direction-oriented.
-- The repo still contains legacy workflows for comparison and transition, so not every script uses the same data representation.
+- The minute generation CLI is now fully model-aware through `--model` and `--data_range`.
+- The most up-to-date surface-generation details live in `scripts/generate_surface/README.md`.

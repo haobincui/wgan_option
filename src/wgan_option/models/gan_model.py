@@ -46,6 +46,10 @@ class WGAN_GP:
             noise_dim=config.noise_dim,
             surface_height=surface_height,
             surface_width=surface_width,
+            base_channels=config.gen_base_channels,
+            res_blocks=config.gen_res_blocks,
+            text_hidden_dim=config.gen_text_hidden_dim,
+            text_out_dim=config.gen_text_out_dim,
             hidden_dim=config.gen_hidden_dim,
         ).to(self.device)
         self.D = Discriminator(
@@ -53,6 +57,9 @@ class WGAN_GP:
             embedding_dim=embedding_dim,
             surface_height=surface_height,
             surface_width=surface_width,
+            base_channels=config.disc_base_channels,
+            res_blocks=config.disc_res_blocks,
+            text_hidden_dim=config.disc_text_hidden_dim,
             hidden_dim=config.disc_hidden_dim,
         ).to(self.device)
 

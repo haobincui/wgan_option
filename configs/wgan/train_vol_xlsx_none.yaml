@@ -1,12 +1,12 @@
 # Data
 data_path: data/processed/svi-all/20260330-01/merged_vol.xlsx
 sheet_name: gan_input_ready
-text_embedding_mode: hd
+text_embedding_mode: none
 train_ratio: 0.8
 
 # Model dimensions
 channels: 1
-embedding_dim: 1024
+embedding_dim: 1
 noise_dim: 32
 gen_hidden_dim: 512
 disc_hidden_dim: 256

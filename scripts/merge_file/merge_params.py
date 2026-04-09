@@ -34,6 +34,8 @@ from scripts.merge_file._merge_common import (  # noqa: E402
     normalize_optional_text,
     offset_column_name,
     resolve_existing_path,
+    resolve_surface_csv_path,
+    resolve_surface_json_path,
     serialize_json,
     serialize_list,
     weighted_mae,
@@ -42,8 +44,6 @@ from scripts.merge_file._merge_common import (  # noqa: E402
 )
 
 DEFAULT_NEWS_XLSX_PATH = merge_svi.DEFAULT_NEWS_XLSX_PATH
-DEFAULT_CSV_NAME = merge_svi.DEFAULT_CSV_NAME
-DEFAULT_JSON_NAME = merge_svi.DEFAULT_JSON_NAME
 DEFAULT_OUTPUT_NAME = "merged_params.xlsx"
 DEFAULT_OFFSET_MINUTES = merge_svi.DEFAULT_OFFSET_MINUTES
 DAYS_IN_YEAR = merge_svi.DAYS_IN_YEAR
@@ -136,7 +136,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--input-dir",
         required=True,
-        help="Directory containing minute_svi_precalib_points.csv and minute_svi_params.json.",
+        help="Directory containing surface-<model>-<data_range>.json and surface-<model>-<data_range>-precalib-points.csv.",
     )
     parser.add_argument(
         "--source-timezone",
@@ -422,8 +422,8 @@ def build_workbook_frames(
         raise NotADirectoryError(f"Input path must be a directory: {input_dir}")
 
     news_xlsx_path = resolve_existing_path(Path(news_xlsx_path), "News xlsx")
-    csv_path = resolve_existing_path(input_dir / DEFAULT_CSV_NAME, "CSV")
-    json_path = resolve_existing_path(input_dir / DEFAULT_JSON_NAME, "JSON")
+    csv_path = resolve_surface_csv_path(input_dir)
+    json_path = resolve_surface_json_path(input_dir)
 
     news_df = load_news_base_frame(news_xlsx_path, source_timezone=source_timezone, offset_minutes=offset_minutes)
     csv_df = load_precalib_csv(csv_path)

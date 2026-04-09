@@ -145,7 +145,7 @@ The main figure includes:
 The sidecar line plots focus on:
 
 - an ATM term structure view
-- a middle-maturity smile view
+- a short-maturity smile view
 
 ## Output Layout
 

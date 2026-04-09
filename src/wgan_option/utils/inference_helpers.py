@@ -34,11 +34,32 @@ def build_inference_device(use_cuda: bool) -> torch.device:
 def ensure_matching_embedding_dim(*, sample_id: str, embedding: np.ndarray, embedding_dim: int) -> None:
     """Fail fast if a sample's embedding width mismatches the checkpoint."""
 
-    if int(embedding.size) != int(embedding_dim):
-        raise ValueError(
-            f"Embedding dimension mismatch for sample {sample_id}: "
-            f"expected {embedding_dim}, got {embedding.size}"
-        )
+    _coerce_inference_embedding(
+        sample_id=sample_id,
+        embedding=embedding,
+        embedding_dim=embedding_dim,
+    )
+
+
+def _coerce_inference_embedding(*, sample_id: str, embedding: np.ndarray, embedding_dim: int) -> np.ndarray:
+    """Align inference-time embeddings to the checkpoint width.
+
+    The `none` text mode is stored at training time as an all-zero vector with a
+    positive width (for example width=1), but `load_vol_surface_samples()` and
+    `load_svi_paired_samples()` represent `none` rows as zero-length arrays.
+    For inference we pad those zero-length arrays back to the checkpoint width
+    while preserving the fail-fast behavior for real mismatches.
+    """
+
+    embedding_array = np.asarray(embedding, dtype=np.float32)
+    if int(embedding_array.size) == int(embedding_dim):
+        return embedding_array
+    if int(embedding_array.size) == 0 and int(embedding_dim) > 0:
+        return np.zeros(int(embedding_dim), dtype=np.float32)
+    raise ValueError(
+        f"Embedding dimension mismatch for sample {sample_id}: "
+        f"expected {embedding_dim}, got {embedding_array.size}"
+    )
 
 
 def deterministic_noise(noise_dim: int, seed: int, global_index: int, device: torch.device) -> torch.Tensor:
@@ -63,6 +84,10 @@ def load_vol_generator(checkpoint_path: str | Path, sample: Any, device: torch.d
         noise_dim=int(train_config.noise_dim),
         surface_height=int(sample.current_surface.shape[1]),
         surface_width=int(sample.current_surface.shape[2]),
+        base_channels=int(getattr(train_config, "gen_base_channels", 32)),
+        res_blocks=int(getattr(train_config, "gen_res_blocks", 0)),
+        text_hidden_dim=int(getattr(train_config, "gen_text_hidden_dim", 256)),
+        text_out_dim=int(getattr(train_config, "gen_text_out_dim", 128)),
         hidden_dim=int(train_config.gen_hidden_dim),
     ).to(device)
     model.load_state_dict(checkpoint["state_dict"])
@@ -81,7 +106,16 @@ def infer_vol_surface(
     """Run one forward pass of the vol generator and return a 2D surface."""
 
     current_tensor = torch.tensor(sample.current_surface, dtype=torch.float32, device=device).unsqueeze(0)
-    text_tensor = torch.tensor(sample.text_embedding, dtype=torch.float32, device=device).unsqueeze(0)
+    if hasattr(model, "text_encoder") and len(model.text_encoder) > 0 and hasattr(model.text_encoder[0], "in_features"):
+        embedding_dim = int(model.text_encoder[0].in_features)
+    else:
+        embedding_dim = int(sample.text_embedding.size)
+    aligned_embedding = _coerce_inference_embedding(
+        sample_id=str(sample.sample_id),
+        embedding=sample.text_embedding,
+        embedding_dim=embedding_dim,
+    )
+    text_tensor = torch.tensor(aligned_embedding, dtype=torch.float32, device=device).unsqueeze(0)
     noise = deterministic_noise(noise_dim, seed, sample.global_index, device)
 
     with torch.no_grad():
@@ -212,7 +246,7 @@ def infer_future_svi(
 ) -> tuple[Dict[str, List[float]], int, int]:
     """Run one forward pass of the SVI regressor."""
 
-    ensure_matching_embedding_dim(
+    aligned_embedding = _coerce_inference_embedding(
         sample_id=str(sample.sample_id),
         embedding=sample.text_embedding,
         embedding_dim=embedding_dim,
@@ -224,7 +258,7 @@ def infer_future_svi(
         sample_label=f"{sample.sample_id}:current",
     )
     current_tensor = torch.tensor(current_features, dtype=torch.float32, device=device).unsqueeze(0)
-    text_tensor = torch.tensor(sample.text_embedding, dtype=torch.float32, device=device).unsqueeze(0)
+    text_tensor = torch.tensor(aligned_embedding, dtype=torch.float32, device=device).unsqueeze(0)
 
     with torch.no_grad():
         predicted_regression, predicted_count_logits = model(current_tensor, text_tensor)

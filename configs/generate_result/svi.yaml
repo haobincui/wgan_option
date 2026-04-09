@@ -1,5 +1,5 @@
 # Data
-data_path: data/processed/svi/20260330-01/merged_svi.xlsx
+data_path: data/processed/svi-all/20260330-01/merged_svi.xlsx
 sheet_name: news_direction_audit
 text_embedding_mode: hd
 train_ratio: 0.8
@@ -11,14 +11,14 @@ num_workers: 0
 
 # Checkpoints
 checkpoint_path: ""
-models_path: outputs/training/svi_xlsx
-metrics_path: outputs/training/svi_xlsx
+models_path: outputs/training/svi-all
+metrics_path: outputs/training/svi-all
 
 # Sample selection
 split: val
 selection_mode: first_n
 sample_id: ""
-row_index: -1
+row_index: 1
 limit: 5
 
 # Outputs

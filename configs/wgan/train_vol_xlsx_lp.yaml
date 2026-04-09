@@ -1,7 +1,7 @@
 # Data
 data_path: data/processed/svi-all/20260330-01/merged_vol.xlsx
 sheet_name: gan_input_ready
-text_embedding_mode: hd
+text_embedding_mode: lp
 train_ratio: 0.8
 
 # Model dimensions

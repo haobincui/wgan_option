@@ -11,6 +11,7 @@ from wgan_option.config import Config, derive_training_output_paths
 
 _DEFAULT_CONFIG = Config()
 _DIRECTORY_FIELDS = ("models_path", "outputs_path", "samples_path", "metrics_path")
+_AUTO_TRAINING_ROOT = Path("outputs/training")
 
 
 def _normalize_for_compare(path: Path) -> Path:
@@ -93,6 +94,28 @@ def _create_training_output_directories(
         Path(config.normalization_stats_path).parent.mkdir(parents=True, exist_ok=True)
 
 
+def _infer_training_group_from_data_path(data_path_value: str) -> str | None:
+    data_path = Path(str(data_path_value).strip())
+    if not str(data_path):
+        return None
+
+    parts = data_path.parts
+    processed_indexes = [idx for idx, part in enumerate(parts) if part == "processed"]
+    if not processed_indexes:
+        return None
+
+    processed_idx = processed_indexes[-1]
+    if processed_idx + 1 >= len(parts):
+        return None
+
+    family = str(parts[processed_idx + 1]).strip()
+    if not family:
+        return None
+    if "-" in family:
+        return family
+    return f"{family}-all"
+
+
 def training_run_timestamp(run_dir: Path | None) -> str:
     """Return the canonical timestamp for one training run."""
 
@@ -127,10 +150,31 @@ def prepare_timestamped_training_config(
         )
         return resolved_config, run_dir
 
+    inferred_group = _infer_training_group_from_data_path(config.data_path)
+    if inferred_group:
+        base_root = _AUTO_TRAINING_ROOT / inferred_group
+        run_dir = base_root / timestamp
+        updates = derive_training_output_paths(str(run_dir))
+        resolved_config = replace(
+            config,
+            output_root=str(base_root),
+            **updates,
+        )
+        _create_training_output_directories(
+            resolved_config,
+            include_normalization_stats=include_normalization_stats,
+        )
+        return resolved_config, run_dir
+
     all_candidates, explicit_candidates = _root_candidates(
         config,
         include_normalization_stats=include_normalization_stats,
     )
+    if not explicit_candidates and not all_candidates:
+        raise ValueError(
+            "Unable to determine a training output root. "
+            "Provide `output_root` or use a `data_path` under data/processed/<model>-<data_range>/<run_ts>/."
+        )
     inferred_root = _validate_shared_root(explicit_candidates or all_candidates)
     run_dir = inferred_root / timestamp
 

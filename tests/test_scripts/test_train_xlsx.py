@@ -23,6 +23,7 @@ from wgan_option.utils.merged_xlsx import (  # noqa: E402
     create_svi_xlsx_dataloaders,
     create_vol_surface_xlsx_dataloaders,
 )
+from wgan_option.utils.training_run_paths import prepare_timestamped_training_config  # noqa: E402
 from wgan_option.utils.visualization import plot_training_curves  # noqa: E402
 
 
@@ -328,14 +329,14 @@ class TestTrainMergedXlsx(unittest.TestCase):
             self.assertEqual(future_count.dtype, torch.int64)
 
     def test_shared_wgan_config_loads_constraint_switches_and_cli_overrides(self):
-        config = load_config(config_path="configs/wgan/train_default.yaml")
+        config = load_config(config_path="configs/wgan/train_vol_xlsx.yaml")
         self.assertTrue(config.use_calendar_constraint)
         self.assertTrue(config.use_butterfly_constraint)
         self.assertTrue(config.use_smooth_constraint)
         self.assertFalse(config.use_early_stopping)
         self.assertEqual(config.early_stopping_patience, 10)
         self.assertEqual(config.early_stopping_min_delta, 0.0)
-        self.assertFalse(config.use_reduce_lr_on_plateau)
+        self.assertTrue(config.use_reduce_lr_on_plateau)
         self.assertEqual(config.reduce_lr_factor, 0.5)
         self.assertEqual(config.reduce_lr_patience, 8)
         self.assertEqual(config.reduce_lr_min_lr, 1e-5)
@@ -354,7 +355,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
                 "reduce_lr_min_lr=1e-6",
             ]
         )
-        overridden = load_config(config_path="configs/wgan/train_default.yaml", overrides=overrides)
+        overridden = load_config(config_path="configs/wgan/train_vol_xlsx.yaml", overrides=overrides)
         self.assertFalse(overridden.use_calendar_constraint)
         self.assertTrue(overridden.use_butterfly_constraint)
         self.assertFalse(overridden.use_smooth_constraint)
@@ -378,6 +379,41 @@ class TestTrainMergedXlsx(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     parse_cli_overrides([invalid_bool])
 
+    def test_prepare_timestamped_training_config_infers_output_root_from_data_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auto_root = Path(tmpdir) / "outputs" / "training"
+            config = Config(
+                data_path="data/processed/cubic-excel/20260330-01/merged_vol.xlsx",
+                sheet_name="gan_input_ready",
+                output_root="",
+            )
+
+            with patch("wgan_option.utils.training_run_paths._AUTO_TRAINING_ROOT", auto_root):
+                resolved_config, run_dir = prepare_timestamped_training_config(config)
+
+            self.assertEqual(run_dir.parent, auto_root / "cubic-excel")
+            self.assertEqual(resolved_config.output_root, str(auto_root / "cubic-excel"))
+            self.assertEqual(resolved_config.models_path, str(run_dir / "checkpoints"))
+            self.assertEqual(resolved_config.samples_path, str(run_dir / "samples"))
+            self.assertEqual(resolved_config.metrics_path, str(run_dir / "metrics"))
+
+    def test_prepare_timestamped_training_config_treats_legacy_processed_layout_as_all(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auto_root = Path(tmpdir) / "outputs" / "training"
+            config = Config(
+                data_path="data/processed/svi/20260330-01/merged_svi.xlsx",
+                sheet_name="news_direction_audit",
+                output_root="",
+            )
+
+            with patch("wgan_option.utils.training_run_paths._AUTO_TRAINING_ROOT", auto_root):
+                resolved_config, run_dir = prepare_timestamped_training_config(config)
+
+            self.assertEqual(run_dir.parent, auto_root / "svi-all")
+            self.assertEqual(resolved_config.output_root, str(auto_root / "svi-all"))
+            self.assertEqual(resolved_config.models_path, str(run_dir / "checkpoints"))
+            self.assertEqual(resolved_config.metrics_path, str(run_dir / "metrics"))
+
     def test_load_config_derives_training_paths_from_output_root(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "train_vol_output_root.yaml"
@@ -386,7 +422,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
                     [
                         "data_path: data/example.xlsx",
                         "sheet_name: gan_input_ready",
-                        "output_root: outputs/training/vol_xlsx",
+                        "output_root: outputs/training/svi-all",
                     ]
                 ),
                 encoding="utf-8",
@@ -394,14 +430,14 @@ class TestTrainMergedXlsx(unittest.TestCase):
 
             config = load_config(config_path=str(config_path))
 
-            self.assertEqual(config.output_root, "outputs/training/vol_xlsx")
-            self.assertEqual(config.models_path, "outputs/training/vol_xlsx/checkpoints")
-            self.assertEqual(config.outputs_path, "outputs/training/vol_xlsx/checkpoints")
-            self.assertEqual(config.samples_path, "outputs/training/vol_xlsx/samples")
-            self.assertEqual(config.metrics_path, "outputs/training/vol_xlsx/metrics")
+            self.assertEqual(config.output_root, "outputs/training/svi-all")
+            self.assertEqual(config.models_path, "outputs/training/svi-all/checkpoints")
+            self.assertEqual(config.outputs_path, "outputs/training/svi-all/checkpoints")
+            self.assertEqual(config.samples_path, "outputs/training/svi-all/samples")
+            self.assertEqual(config.metrics_path, "outputs/training/svi-all/metrics")
             self.assertEqual(
                 config.normalization_stats_path,
-                "outputs/training/vol_xlsx/metrics/normalization_stats.json",
+                "outputs/training/svi-all/metrics/normalization_stats.json",
             )
 
     def test_load_config_rejects_output_root_with_explicit_legacy_paths(self):
@@ -421,7 +457,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_config(
                     config_path=str(config_path),
-                    overrides={"output_root": "outputs/training/vol_xlsx"},
+                    overrides={"output_root": "outputs/training/svi-all"},
                 )
 
     def test_wgan_generator_loss_switches_disable_selected_constraints_only(self):

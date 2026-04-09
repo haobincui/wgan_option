@@ -24,6 +24,12 @@ from scripts.generate_surface.data_helperd.excel import (
 
 DEFAULT_DAYS_IN_YEAR = 250
 SUPPORTED_SURFACE_MODELS = {"svi", "sabr", "cubic", "raw"}
+LEGACY_SURFACE_JSON_NAME = "minute_svi_params.json"
+LEGACY_SURFACE_CSV_NAME = "minute_svi_precalib_points.csv"
+NEW_SURFACE_JSON_GLOB = "surface-*.json"
+NEW_SURFACE_CSV_GLOB = "surface-*-precalib-points.csv"
+NEW_RESOLVED_CONFIG_NAME = "surface-resolved_config.yaml"
+LEGACY_RESOLVED_CONFIG_NAME = "resolved_config.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +42,54 @@ def resolve_existing_path(path_value: Path, label: str) -> Path:
     if not path.exists():
         raise FileNotFoundError(f"{label} does not exist: {path}")
     return path
+
+
+def _discover_named_input_file(
+    input_dir: Path,
+    *,
+    pattern: str,
+    legacy_name: str,
+    label: str,
+) -> Path:
+    input_dir = resolve_existing_path(Path(input_dir), "Input directory")
+    if not input_dir.is_dir():
+        raise NotADirectoryError(f"Input path must be a directory: {input_dir}")
+
+    matches = sorted(path for path in input_dir.glob(pattern) if path.is_file())
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        described = ", ".join(str(path.name) for path in matches)
+        raise ValueError(f"Expected one {label} matching `{pattern}` in {input_dir}, found: {described}")
+
+    return resolve_existing_path(input_dir / legacy_name, label)
+
+
+def resolve_surface_json_path(input_dir: Path) -> Path:
+    return _discover_named_input_file(
+        input_dir,
+        pattern=NEW_SURFACE_JSON_GLOB,
+        legacy_name=LEGACY_SURFACE_JSON_NAME,
+        label="JSON",
+    )
+
+
+def resolve_surface_csv_path(input_dir: Path) -> Path:
+    return _discover_named_input_file(
+        input_dir,
+        pattern=NEW_SURFACE_CSV_GLOB,
+        legacy_name=LEGACY_SURFACE_CSV_NAME,
+        label="CSV",
+    )
+
+
+def resolve_surface_resolved_config_path(input_dir: Path) -> Optional[Path]:
+    input_dir = resolve_existing_path(Path(input_dir), "Input directory")
+    for candidate in (NEW_RESOLVED_CONFIG_NAME, LEGACY_RESOLVED_CONFIG_NAME):
+        path = input_dir / candidate
+        if path.exists():
+            return path
+    return None
 
 
 def offset_column_name(offset_minutes: int) -> str:

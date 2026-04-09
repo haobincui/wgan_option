@@ -63,13 +63,13 @@ def _nearest_atm_index(strike_grid: Sequence[float]) -> int:
     return int(np.argmin(np.abs(strikes - 1.0)))
 
 
-def _middle_maturity_index(maturity_days_grid: Sequence[float]) -> int:
-    """Return the middle maturity slice index used for smile plots."""
+def _short_maturity_index(maturity_days_grid: Sequence[float]) -> int:
+    """Return the shortest maturity slice index used for smile plots."""
 
     maturities = np.asarray(maturity_days_grid, dtype=np.float32)
     if maturities.size == 0:
         raise ValueError("maturity_days_grid must not be empty.")
-    return int(maturities.size // 2)
+    return 0
 
 
 def _sidecar_output_path(output_path: str | Path, suffix: str) -> Path:
@@ -122,9 +122,9 @@ def _plot_line_sidecars(
         return
 
     atm_idx = _nearest_atm_index(strike_grid)
-    mid_idx = _middle_maturity_index(maturity_days_grid)
+    short_idx = _short_maturity_index(maturity_days_grid)
     atm_strike = float(strike_grid[atm_idx])
-    smile_maturity = float(maturity_days_grid[mid_idx])
+    smile_maturity = float(maturity_days_grid[short_idx])
 
     lines_output = _sidecar_output_path(output_path, "_lines")
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), squeeze=False)
@@ -132,7 +132,7 @@ def _plot_line_sidecars(
 
     for label, surface, color in line_series:
         atm_ax.plot(maturity_days_grid, surface[:, atm_idx], linewidth=2.0, label=label, color=color)
-        smile_ax.plot(strike_grid, surface[mid_idx, :], linewidth=2.0, label=label, color=color)
+        smile_ax.plot(strike_grid, surface[short_idx, :], linewidth=2.0, label=label, color=color)
 
     _style_line_axis(
         atm_ax,
@@ -144,7 +144,7 @@ def _plot_line_sidecars(
         smile_ax,
         xlabel="Strike / Forward",
         ylabel="Implied Volatility",
-        title=f"Middle-Maturity Smile ({smile_maturity:.1f}d)",
+        title=f"Short-Maturity Smile ({smile_maturity:.1f}d)",
     )
     fig.suptitle(f"{sample_id} Line Views")
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))

@@ -8,7 +8,7 @@ import torch
 import yaml
 from wgan_option.config_parsing import load_yaml_config_values, parse_typed_overrides
 
-DEFAULT_CONFIG_PATH = "configs/wgan/train_default.yaml"
+DEFAULT_CONFIG_PATH = "configs/wgan/train_vol_xlsx.yaml"
 LEGACY_OUTPUT_PATH_FIELDS = (
     "models_path",
     "outputs_path",
@@ -49,6 +49,13 @@ class Config:
     channels: int = 1
     embedding_dim: int = 1024
     noise_dim: int = 32
+    gen_base_channels: int = 32
+    disc_base_channels: int = 32
+    gen_res_blocks: int = 0
+    disc_res_blocks: int = 0
+    gen_text_hidden_dim: int = 256
+    gen_text_out_dim: int = 128
+    disc_text_hidden_dim: int = 128
     gen_hidden_dim: int = 512
     disc_hidden_dim: int = 256
 

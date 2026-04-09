@@ -2,63 +2,37 @@
 
 This directory contains the runnable research workflows for the repository.
 
-At a high level, the scripts layer is organized into four main stages:
+## Pipeline
 
-1. `generate_surface`
-   - Build daily surfaces and minute-level surface calibration outputs from raw option trades.
-2. `merge_file`
-   - Join generated SVI outputs with the news embedding workbook and write training-ready Excel files.
-3. `train`
-   - Train models on the merged Excel datasets.
-4. `generate_result` / `analyze_error`
-   - Run trained models on selected samples and inspect the generated outputs.
+```text
+raw option files
+-> scripts/generate_surface
+-> data/processed/<model>-<data_range>/<run_ts>/
+-> scripts/merge_file
+-> merged_svi.xlsx / merged_vol.xlsx / merged_params.xlsx
+-> scripts/train
+-> outputs/training/<model>-<data_range>/<run_ts>/
+-> scripts/generate_result or scripts/analyze_error
+```
 
-Existing script-level READMEs:
+## Main Script Areas
+
+- `scripts/generate_surface`
+  - unified minute surface-generation CLI
+  - supports `--model {svi,sabr,cubic,raw}` and `--data_range {all,window,excel}`
+- `scripts/merge_file`
+  - converts one generated run directory into merged audit and training workbooks
+- `scripts/train`
+  - trains on merged workbook datasets
+- `scripts/generate_result`
+  - runs saved checkpoints on selected workbook samples
+- `scripts/analyze_error`
+  - computes error distributions and bootstrap summaries from saved checkpoints
+
+## Script-Level READMEs
 
 - `scripts/generate_surface/README.md`
 - `scripts/merge_file/README.md`
 - `scripts/train/README.md`
 - `scripts/generate_result/README.md`
 - `scripts/analyze_error/README.md`
-
-## Directory Map
-
-- `scripts/generate_surface`
-  - Unified surface-generation CLI.
-  - Supports daily-surface generation and several minute surface jobs.
-- `scripts/merge_file`
-  - Builds `merged_svi.xlsx` and `merged_vol.xlsx`.
-- `scripts/train`
-  - Unified CLI for merged-xlsx training.
-- `scripts/train.py`
-  - Legacy training entrypoint for the older daily-surface WGAN path.
-- `scripts/generate_result`
-  - Re-run inference from trained checkpoints and save generated-vs-real comparisons.
-- `scripts/analyze_error`
-  - Re-run inference, compute per-sample MSE-style error metrics, bootstrap them, and save histograms.
-
-## Recommended Workflow
-
-For the current merged-xlsx pipeline, the typical order is:
-
-```text
-raw option files
--> scripts/generate_surface
--> data/processed/<model>/<run_ts>/minute_svi_params.json + minute_svi_precalib_points.csv
--> scripts/merge_file
--> merged_svi.xlsx / merged_vol.xlsx
--> scripts/train
--> trained checkpoints and metrics
--> scripts/generate_result or scripts/analyze_error
-```
-
-For the legacy daily-surface workflow, `scripts/train.py` still exists and trains directly from the older data path.
-
-## Notes
-
-- `merged_vol.xlsx` is already pair-based for current -> future surface training.
-- `merged_svi.xlsx` is primarily an audit workbook; paired SVI forecasting is assembled during training and inference.
-- The newer preferred training CLI is `scripts/train/main.py`.
-- The newer preferred post-training inspection CLIs are:
-  - `scripts/generate_result/main.py`
-  - `scripts/analyze_error/main.py`

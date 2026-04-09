@@ -13,6 +13,11 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from scripts.merge_file import merge_svi  # noqa: E402
+from scripts.merge_file._merge_common import (  # noqa: E402
+    resolve_surface_csv_path,
+    resolve_surface_json_path,
+    resolve_surface_resolved_config_path,
+)
 
 
 def _model_iv(total_var: float, business_days: int) -> float:
@@ -350,6 +355,44 @@ class TestMergeSvi(unittest.TestCase):
             self.assertEqual(gan_ready.loc[0, "direction"], "backward")
             self.assertEqual(gan_ready.loc[0, "matched_snapshot_time_utc"], "2022-12-30T13:28:00Z")
             self.assertEqual(int(gan_ready.loc[0, "training_candidate_flag"]), 1)
+
+    def test_surface_path_resolution_prefers_new_surface_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result_dir = Path(tmpdir) / "result"
+            result_dir.mkdir()
+            legacy_json = result_dir / "minute_svi_params.json"
+            legacy_csv = result_dir / "minute_svi_precalib_points.csv"
+            new_json = result_dir / "surface-svi-all.json"
+            new_csv = result_dir / "surface-svi-all-precalib-points.csv"
+            new_resolved = result_dir / "surface-resolved_config.yaml"
+            legacy_resolved = result_dir / "resolved_config.yaml"
+
+            legacy_json.write_text("{}", encoding="utf-8")
+            legacy_csv.write_text("col\n", encoding="utf-8")
+            new_json.write_text("{}", encoding="utf-8")
+            new_csv.write_text("col\n", encoding="utf-8")
+            new_resolved.write_text("surface_builder: {}\n", encoding="utf-8")
+            legacy_resolved.write_text("surface_builder: {}\n", encoding="utf-8")
+
+            self.assertEqual(resolve_surface_json_path(result_dir), new_json)
+            self.assertEqual(resolve_surface_csv_path(result_dir), new_csv)
+            self.assertEqual(resolve_surface_resolved_config_path(result_dir), new_resolved)
+
+    def test_surface_path_resolution_falls_back_to_legacy_surface_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result_dir = Path(tmpdir) / "result"
+            result_dir.mkdir()
+            legacy_json = result_dir / "minute_svi_params.json"
+            legacy_csv = result_dir / "minute_svi_precalib_points.csv"
+            legacy_resolved = result_dir / "resolved_config.yaml"
+
+            legacy_json.write_text("{}", encoding="utf-8")
+            legacy_csv.write_text("col\n", encoding="utf-8")
+            legacy_resolved.write_text("surface_builder: {}\n", encoding="utf-8")
+
+            self.assertEqual(resolve_surface_json_path(result_dir), legacy_json)
+            self.assertEqual(resolve_surface_csv_path(result_dir), legacy_csv)
+            self.assertEqual(resolve_surface_resolved_config_path(result_dir), legacy_resolved)
 
 
 if __name__ == "__main__":

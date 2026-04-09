@@ -7,6 +7,31 @@ def _conv2d_out_size(size: int, kernel_size: int = 3, stride: int = 2, padding: 
     return ((size + 2 * padding - dilation * (kernel_size - 1) - 1) // stride) + 1
 
 
+def _group_count(channels: int) -> int:
+    for groups in (8, 4, 2, 1):
+        if channels % groups == 0:
+            return groups
+    return 1
+
+
+class _ResidualConvBlock(nn.Module):
+    """Small residual block used to widen the surface encoder without changing resolution."""
+
+    def __init__(self, channels: int):
+        super().__init__()
+        groups = _group_count(channels)
+        self.block = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1),
+            nn.GroupNorm(groups, channels),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1),
+            nn.GroupNorm(groups, channels),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.leaky_relu(x + self.block(x), negative_slope=0.2, inplace=False)
+
+
 class Generator(nn.Module):
     """
     Conditional generator:
@@ -20,36 +45,45 @@ class Generator(nn.Module):
         noise_dim: int,
         surface_height: int,
         surface_width: int,
+        base_channels: int = 32,
+        res_blocks: int = 0,
+        text_hidden_dim: int = 256,
+        text_out_dim: int = 128,
         hidden_dim: int = 512,
     ):
         super().__init__()
         self.noise_dim = noise_dim
         self.surface_height = surface_height
         self.surface_width = surface_width
+        self.base_channels = base_channels
+        self.res_blocks = max(0, int(res_blocks))
 
-        self.surface_encoder = nn.Sequential(
-            nn.Conv2d(channels, 32, kernel_size=3, stride=1, padding=1),
+        encoder_layers = [
+            nn.Conv2d(channels, base_channels, kernel_size=3, stride=1, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(base_channels, base_channels * 2, kernel_size=3, stride=2, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(base_channels * 2, base_channels * 4, kernel_size=3, stride=2, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
-        )
+        ]
+        for _ in range(self.res_blocks):
+            encoder_layers.append(_ResidualConvBlock(base_channels * 4))
+        self.surface_encoder = nn.Sequential(*encoder_layers)
 
         reduced_h = _conv2d_out_size(_conv2d_out_size(surface_height))
         reduced_w = _conv2d_out_size(_conv2d_out_size(surface_width))
-        self.surface_feat_dim = 128 * reduced_h * reduced_w
+        self.surface_feat_dim = (base_channels * 4) * reduced_h * reduced_w
 
         self.text_encoder = nn.Sequential(
-            nn.Linear(embedding_dim, 256),
-            nn.LayerNorm(256),
+            nn.Linear(embedding_dim, text_hidden_dim),
+            nn.LayerNorm(text_hidden_dim),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.1),
-            nn.Linear(256, 128),
+            nn.Linear(text_hidden_dim, text_out_dim),
             nn.LeakyReLU(0.2, inplace=True),
         )
 
-        fusion_dim = self.surface_feat_dim + 128 + noise_dim
+        fusion_dim = self.surface_feat_dim + text_out_dim + noise_dim
         self.fusion = nn.Sequential(
             nn.Linear(fusion_dim, hidden_dim),
             nn.LeakyReLU(0.2, inplace=True),

@@ -1,7 +1,7 @@
 # Data
 data_path: data/processed/svi-all/20260330-01/merged_vol.xlsx
 sheet_name: gan_input_ready
-text_embedding_mode: hd
+text_embedding_mode: none
 train_ratio: 0.8
 
 # Runtime
@@ -10,28 +10,22 @@ seed: 42
 num_workers: 0
 
 # Checkpoints
-checkpoint_path: ""
+checkpoint_path: outputs/training/svi-all/20260409_154906/checkpoints/generator_best.pt
 models_path: outputs/training/svi-all
 metrics_path: outputs/training/svi-all
 
 # Sample selection
-split: all
-selection_mode: all
+split: val
+selection_mode: first_n
 sample_id: ""
-row_index: -1
-limit: 5
+row_index: 1
+limit: 20
 
 # Outputs
-output_dir: outputs/analyze_error/vol
-histogram_bins: 30
-save_mse_histogram: true
-save_bootstrap_histogram: true
-
-# Bootstrap
-bootstrap_samples: 10000
-confidence_level: 0.95
-bootstrap_seed: 42
-save_bootstrap_distribution: true
+output_dir: outputs/generate_result/vol
+save_plots: true
+save_json: true
+plot_style: heatmap_diff
 
 # Unused by vol mode, kept to share one schema with svi mode
 strike_bins: 16

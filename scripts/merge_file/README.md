@@ -1,6 +1,6 @@
 # merge_file
 
-This directory contains the Excel merge stage that connects generated minute-SVI outputs with the news embedding workbook.
+This directory contains the Excel merge stage that connects generated minute-surface outputs with the news embedding workbook.
 
 It builds the two merged workbooks used by the later training and inference pipelines:
 
@@ -10,8 +10,12 @@ It builds the two merged workbooks used by the later training and inference pipe
 
 Both scripts consume the same upstream generation outputs:
 
-- `minute_svi_params.json`
-- `minute_svi_precalib_points.csv`
+- `surface-<model>-<data_range>.json`
+- `surface-<model>-<data_range>-precalib-points.csv`
+- optional `surface-resolved_config.yaml`
+
+The merge loaders prefer the new `surface-*` names and still fall back to legacy
+`minute_svi_*` filenames when reading older processed runs.
 
 and combine them with:
 
@@ -22,19 +26,19 @@ and combine them with:
 Build the SVI workbook:
 
 ```bash
-python scripts/merge_file/merge_svi.py --input-dir data/processed/svi/20260330-01
+python scripts/merge_file/merge_svi.py --input-dir data/processed/svi-all/20260330-01
 ```
 
 Build the vol workbook:
 
 ```bash
-python scripts/merge_file/merge_vol.py --input-dir data/processed/svi/20260330-01
+python scripts/merge_file/merge_vol.py --input-dir data/processed/svi-all/20260330-01
 ```
 
 Build the model-neutral parameter audit workbook:
 
 ```bash
-python scripts/merge_file/merge_params.py --input-dir data/processed/svi/20260330-01
+python scripts/merge_file/merge_params.py --input-dir data/processed/svi-all/20260330-01
 ```
 
 ## Shared Input Semantics
@@ -44,13 +48,13 @@ The merge step relies on the minute-SVI direction convention:
 - `backward` corresponds to the news row’s original `timestamp_utc`
 - `forward` corresponds to `timestamp_utc + offset_minutes`
 
-Both scripts:
+All three scripts:
 
 1. load the news Excel file
 2. derive UTC timestamps from `PD` and `ET`
 3. load pre-calibration CSV rows
-4. load the minute-SVI JSON output
-5. align news timestamps to generated SVI snapshots
+4. load the model-aware surface JSON output
+5. align news timestamps to generated surface snapshots
 6. compute audit-quality statistics
 7. write a multi-sheet workbook
 
@@ -220,7 +224,7 @@ This workbook keeps parameter-level audit fields generic:
 
 ## Surface Reconstruction Logic
 
-`merge_vol.py` reconstructs a vol surface from the SVI slices on a fixed grid.
+`merge_vol.py` reconstructs a vol surface from model-aware slices on a fixed grid.
 
 The grid is defined by the default config values for:
 
@@ -229,16 +233,17 @@ The grid is defined by the default config values for:
 - minimum and maximum moneyness
 - minimum and maximum maturity days
 
-For each maturity on the grid, the script interpolates SVI parameters across business-day slices and then computes model implied vol across the strike grid.
+For each maturity on the grid, the script interpolates surface slices across business-day terms and then computes model implied vol across the strike grid.
 
 ## Typical Workflow Position
 
 The merge stage sits between generation and training:
 
 ```text
-minute_svi_params.json + minute_svi_precalib_points.csv
--> merge_svi.py / merge_vol.py
--> merged_svi.xlsx / merged_vol.xlsx
+surface-<model>-<data_range>.json
++ surface-<model>-<data_range>-precalib-points.csv
+-> merge_svi.py / merge_vol.py / merge_params.py
+-> merged_svi.xlsx / merged_vol.xlsx / merged_params.xlsx
 -> train / generate_result / analyze_error
 ```
 
@@ -247,14 +252,14 @@ minute_svi_params.json + minute_svi_precalib_points.csv
 Build both merged workbooks from the same processed directory:
 
 ```bash
-python scripts/merge_file/merge_svi.py --input-dir data/processed/svi/20260330-01
-python scripts/merge_file/merge_vol.py --input-dir data/processed/svi/20260330-01
-python scripts/merge_file/merge_params.py --input-dir data/processed/svi/20260330-01
+python scripts/merge_file/merge_svi.py --input-dir data/processed/svi-all/20260330-01
+python scripts/merge_file/merge_vol.py --input-dir data/processed/svi-all/20260330-01
+python scripts/merge_file/merge_params.py --input-dir data/processed/svi-all/20260330-01
 ```
 
 Use a different forward offset:
 
 ```bash
-python scripts/merge_file/merge_svi.py --input-dir data/processed/svi/20260330-01 --offset-minutes 10
-python scripts/merge_file/merge_vol.py --input-dir data/processed/svi/20260330-01 --offset-minutes 10
+python scripts/merge_file/merge_svi.py --input-dir data/processed/svi-all/20260330-01 --offset-minutes 10
+python scripts/merge_file/merge_vol.py --input-dir data/processed/svi-all/20260330-01 --offset-minutes 10
 ```

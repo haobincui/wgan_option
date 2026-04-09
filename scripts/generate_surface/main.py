@@ -1,4 +1,4 @@
-"""Unified CLI for daily and minute surface generation."""
+"""Unified CLI for minute surface generation."""
 
 from __future__ import annotations
 
@@ -17,12 +17,12 @@ from scripts.generate_surface.common.config_utils import (
     load_surface_builder_root,
     resolve_config_path as _resolve_config_path,
 )
-
-from scripts.generate_surface.daily_surface import (  # noqa: E402
-    DEFAULT_CONFIG_PATH,
-    main as daily_surface_main,
-)
 from scripts.generate_surface.dispatch import ensure_cuda_available, extract_device_arg  # noqa: E402
+from scripts.generate_surface.data_helperd.all import (  # noqa: E402
+    DEFAULT_CONFIG_PATH,
+    DEFAULT_DATA_RANGE,
+    SUPPORTED_DATA_RANGES,
+)
 from scripts.generate_surface.backend.surface_cpu.all import main as cpu_minute_main  # noqa: E402
 from scripts.generate_surface.backend.surface_cpu.window import (  # noqa: E402
     main as cpu_window_main,
@@ -41,33 +41,27 @@ from scripts.generate_surface.backend.surface_gpu.excel import (  # noqa: E402
 HELP_TEXT = dedent(
     """
     Usage:
-      python scripts/generate_surface/main.py daily-surface [args...]
-      python scripts/generate_surface/main.py minute-svi [--device {cpu,gpu}] [--model {svi,sabr,cubic,raw}] [args...]
-      python scripts/generate_surface/main.py minute-svi-window [--device {cpu,gpu}] [--model {svi,sabr,cubic,raw}] [args...]
-      python scripts/generate_surface/main.py minute-svi-excel [--device {cpu,gpu}] [--model {svi,sabr,cubic,raw}] [args...]
-      python scripts/generate_surface/main.py [--config CONFIG] [--device {cpu,gpu}] [--model {svi,sabr,cubic,raw}] [args...]
+      python scripts/generate_surface/main.py generate_surface [--device {cpu,gpu}] [--model {svi,sabr,cubic,raw}] [--data_range {all,window,excel}] [args...]
+      python scripts/generate_surface/main.py [--config CONFIG] [--device {cpu,gpu}] [--model {svi,sabr,cubic,raw}] [--data_range {all,window,excel}] [args...]
 
     Subcommands:
-      daily-surface      Build daily surface tensors.
-      minute-svi         Build minute surfaces for all eligible minutes.
-      minute-svi-window  Build minute surfaces around target datetime windows.
-      minute-svi-excel   Build minute surfaces from Excel PD/ET target timestamps.
+      generate_surface   Build minute surfaces for the requested model + data_range.
 
     Notes:
       When no subcommand is provided, the CLI reads `surface_builder.job` from the config file.
-      minute-* commands default to --device cpu.
-      minute-* commands also support --model {svi,sabr,cubic,raw}; default is svi.
+      generate_surface defaults to --device cpu.
+      generate_surface also supports --model {svi,sabr,cubic,raw} and --data_range {all,window,excel}.
       If --device gpu is selected and CUDA is unavailable, the command exits with an error.
       Pass --help after a subcommand to see that job's detailed arguments.
     """
 ).strip()
 
 MINUTE_COMMANDS = {
-    "minute-svi": {"cpu": cpu_minute_main, "gpu": gpu_minute_main},
-    "minute-svi-window": {"cpu": cpu_window_main, "gpu": gpu_window_main},
-    "minute-svi-excel": {"cpu": cpu_excel_main, "gpu": gpu_excel_main},
+    "all": {"cpu": cpu_minute_main, "gpu": gpu_minute_main},
+    "window": {"cpu": cpu_window_main, "gpu": gpu_window_main},
+    "excel": {"cpu": cpu_excel_main, "gpu": gpu_excel_main},
 }
-ALL_COMMANDS = {"daily-surface", *MINUTE_COMMANDS.keys()}
+ALL_COMMANDS = {"generate_surface"}
 
 
 def _extract_config_path(argv_list: list[str]) -> Path:
@@ -95,6 +89,24 @@ def _load_job_from_config(argv_list: list[str]) -> str:
     return job
 
 
+def _extract_data_range(argv_list: list[str]) -> str:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--config", type=str, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument("--data_range", "--data-range", dest="data_range", type=str, default=None)
+    parsed, _ = parser.parse_known_args(argv_list)
+    if parsed.data_range:
+        return str(parsed.data_range).strip().lower()
+
+    config_path = _resolve_config_path(str(parsed.config))
+    _, config_root = load_surface_builder_root(str(config_path))
+    section = config_root.get("generate_surface")
+    if not isinstance(section, dict):
+        raise ValueError(
+            f"Missing `surface_builder.generate_surface` mapping in config file: {config_path}"
+        )
+    return str(section.get("data_range", DEFAULT_DATA_RANGE)).strip().lower()
+
+
 def main(argv=None) -> None:
     argv_list = list(argv) if argv is not None else sys.argv[1:]
     if argv_list and argv_list[0] in {"-h", "--help"}:
@@ -108,15 +120,15 @@ def main(argv=None) -> None:
         subcommand = _load_job_from_config(argv_list)
         remaining = argv_list
 
-    if subcommand == "daily-surface":
-        _, forwarded_argv = extract_device_arg(remaining, default="cpu")
-        daily_surface_main(forwarded_argv)
-        return
-
     device, forwarded_argv = extract_device_arg(remaining, default="cpu")
     if device == "gpu":
         ensure_cuda_available(device)
-    MINUTE_COMMANDS[subcommand][device](forwarded_argv)
+    data_range = _extract_data_range(remaining)
+    if data_range not in SUPPORTED_DATA_RANGES:
+        raise ValueError(
+            f"Unsupported data_range `{data_range}`. Expected one of: {sorted(SUPPORTED_DATA_RANGES)}"
+        )
+    MINUTE_COMMANDS[data_range][device](forwarded_argv)
 
 
 if __name__ == "__main__":

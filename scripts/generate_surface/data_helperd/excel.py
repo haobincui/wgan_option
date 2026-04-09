@@ -20,12 +20,11 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(_ROOT_DIR))
     import scripts._path_setup  # noqa: F401
     from scripts.generate_surface.common.config_utils import (  # noqa: E402
-        build_config_scope,
-        load_surface_builder_section,
         resolve_config_variables,
     )
     from scripts.generate_surface.data_helperd.all import (  # noqa: E402
         DEFAULT_CONFIG_PATH,
+        _load_generate_surface_config,
         _parse_args as _parse_base_args,
         _resolve_config_path,
     )
@@ -34,9 +33,10 @@ if __package__ in {None, ""}:
         generate_surfaces_for_datetime_windows,
     )
 else:
-    from ..common.config_utils import build_config_scope, load_surface_builder_section, resolve_config_variables  # noqa: E402
+    from ..common.config_utils import resolve_config_variables  # noqa: E402
     from .all import (  # noqa: E402
         DEFAULT_CONFIG_PATH,
+        _load_generate_surface_config,
         _parse_args as _parse_base_args,
         _resolve_config_path,
     )
@@ -47,30 +47,17 @@ else:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_EXCEL_CONFIG_PATH = "configs/surface_builder/svi/minute-svi-excel.yaml"
+DEFAULT_EXCEL_CONFIG_PATH = "configs/surface_builder/svi/generate_surface-svi-excel.yaml"
 DEFAULT_TARGET_XLSX = "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx"
 DEFAULT_SHEET_NAME = "Sheet1"
 DEFAULT_DATE_COLUMN = "PD"
 DEFAULT_TIME_COLUMN = "ET"
 DEFAULT_SOURCE_TIMEZONE = "America/New_York"
-SUPPORTED_MINUTE_SVI_EXCEL_CONFIG_KEYS = {
-    "target_xlsx",
-    "sheet_name",
-    "date_column",
-    "time_column",
-    "source_timezone",
-    "max_target_datetimes",
-    "window_minutes",
-}
 
 
 def _load_excel_config(config_path_value: str) -> Dict[str, Any]:
-    _, config_root, excel_section = load_surface_builder_section(
-        config_path_value,
-        section_key="minute_svi_excel",
-        supported_keys=SUPPORTED_MINUTE_SVI_EXCEL_CONFIG_KEYS,
-    )
-    return resolve_config_variables(excel_section, extra_scope=build_config_scope(config_root))
+    defaults = _load_generate_surface_config(config_path_value)
+    return resolve_config_variables(defaults)
 
 
 def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:

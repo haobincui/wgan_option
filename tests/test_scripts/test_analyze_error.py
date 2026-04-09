@@ -172,6 +172,7 @@ class TestAnalyzeErrorScripts(unittest.TestCase):
         *,
         run_ts: str,
         embedding_dim: int = 2,
+        text_embedding_mode: str = "hd",
     ) -> tuple[Path, Path]:
         run_root = Path(tmpdir) / "vol_xlsx"
         run_dir = run_root / run_ts
@@ -185,6 +186,7 @@ class TestAnalyzeErrorScripts(unittest.TestCase):
             cuda=False,
             channels=1,
             embedding_dim=embedding_dim,
+            text_embedding_mode=text_embedding_mode,
             noise_dim=4,
             gen_hidden_dim=16,
             disc_hidden_dim=8,
@@ -459,6 +461,52 @@ class TestAnalyzeErrorScripts(unittest.TestCase):
                 distribution_rows = list(csv.DictReader(handle))
             self.assertEqual(len(distribution_rows), 128)
             self.assertAlmostEqual(float(distribution_rows[0]["mean_mse"]), float(bootstrap_distribution[0]), places=12)
+
+    def test_analyze_vol_script_supports_none_text_mode_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = self._write_vol_workbook(tmpdir)
+            run_root, _ = self._write_generator_checkpoint_run_root(
+                tmpdir,
+                run_ts="20260407_141414",
+                embedding_dim=1,
+                text_embedding_mode="none",
+            )
+            output_dir = Path(tmpdir) / "analyze_vol_none"
+            config_path = Path(tmpdir) / "analyze_vol_none.yaml"
+            _write_yaml(
+                config_path,
+                {
+                    "data_path": str(workbook_path),
+                    "sheet_name": "gan_input_ready",
+                    "text_embedding_mode": "none",
+                    "train_ratio": 2 / 3,
+                    "cuda": False,
+                    "seed": 123,
+                    "checkpoint_path": "",
+                    "models_path": str(run_root),
+                    "metrics_path": str(run_root),
+                    "split": "val",
+                    "selection_mode": "row_index",
+                    "row_index": 0,
+                    "output_dir": str(output_dir),
+                    "histogram_bins": 10,
+                    "save_mse_histogram": False,
+                    "save_bootstrap_histogram": False,
+                    "bootstrap_samples": 32,
+                    "confidence_level": 0.95,
+                    "bootstrap_seed": 11,
+                    "save_bootstrap_distribution": False,
+                },
+            )
+
+            module = _load_script_module(ROOT_DIR / "scripts/analyze_error/analyze_vol.py", "analyze_vol_none_script")
+            run_dir = module.main(["--config", str(config_path)])
+
+            self.assertTrue((run_dir / "errors.csv").exists())
+            with (run_dir / "errors.csv").open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["sample_id"], "news_3")
 
     def test_analyze_svi_script_outputs_errors_and_bootstrap(self):
         with tempfile.TemporaryDirectory() as tmpdir:
