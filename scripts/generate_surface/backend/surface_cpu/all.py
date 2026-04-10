@@ -33,6 +33,7 @@ from scripts.generate_surface.data_helperd.all import (  # noqa: E402
     _parse_data_date,
     _prepare_option_candidates,
     _resolve_config_path,
+    resolve_parallel_calibration_workers,
     _tau_years_from_trade_to_expiry,
     _to_json_native,
     _to_utc_minute_string,
@@ -126,6 +127,11 @@ def _process_minute(
 
 
 def run(args):
+    resolve_parallel_calibration_workers(
+        args,
+        device="cpu",
+        data_range="all",
+    )
     return run_minute_svi_job(args, _process_minute)
 
 

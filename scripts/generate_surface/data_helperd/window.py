@@ -8,13 +8,15 @@ import glob
 import gzip
 import json
 import logging
+import multiprocessing
 import shlex
 import sys
 import time
 from collections import defaultdict
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import pandas as pd
 
@@ -58,11 +60,87 @@ else:
         _setup_runtime,
         _to_utc_minute_string,
     )
+from quantlib.calendar.daycount import DayCountBusN  # noqa: E402
+from quantlib.calendar.holidays import usd_calendar  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 DatetimeLike = Union[str, datetime, pd.Timestamp]
 DEFAULT_WINDOW_CONFIG_PATH = "configs/surface_builder/svi/generate_surface-svi-window.yaml"
+
+
+class _PrecalibRowCollector:
+    def __init__(self) -> None:
+        self.rows: List[Dict[str, Any]] = []
+
+    def writerow(self, row: Dict[str, Any]) -> None:
+        self.rows.append(dict(row))
+
+
+def _merge_stats_delta(stats: Dict[str, int], stats_delta: Dict[str, int]) -> None:
+    for key, value in stats_delta.items():
+        stats[key] += int(value)
+
+
+def _write_precalib_rows(
+    precalib_writer: Optional[csv.DictWriter],
+    rows: Sequence[Dict[str, Any]],
+    stats: Dict[str, int],
+) -> None:
+    if precalib_writer is None or not rows:
+        return
+    for row in rows:
+        precalib_writer.writerow(row)
+    stats["precalib_rows_written"] += len(rows)
+    stats["precalib_minutes_written"] += 1
+
+
+def _run_window_calibration_task(
+    *,
+    process_minute_fn: ProcessMinuteFn,
+    anchor_ts: pd.Timestamp,
+    rows: List[Any],
+    days_in_year: int,
+    min_strikes_per_expiry: int,
+    min_expiries_per_minute: int,
+    max_precalib_iv: float,
+    last_spot_by_key: Dict[Tuple[str, str], float],
+    surface_model: str,
+    save_precalib_csv: bool,
+) -> Dict[str, Any]:
+    calendar = usd_calendar()
+    vol_daycount = DayCountBusN(
+        f"BUS{int(days_in_year)}USD",
+        calendar,
+        int(days_in_year),
+    )
+    local_results: Dict[str, Dict[str, Any]] = {}
+    local_stats: Dict[str, int] = defaultdict(int)
+    precalib_collector = _PrecalibRowCollector() if save_precalib_csv else None
+    process_minute_fn(
+        minute_ts=anchor_ts,
+        rows=rows,
+        days_in_year=int(days_in_year),
+        min_strikes_per_expiry=int(min_strikes_per_expiry),
+        min_expiries_per_minute=int(min_expiries_per_minute),
+        max_precalib_iv=float(max_precalib_iv),
+        vol_daycount=vol_daycount,
+        calendar=calendar,
+        target_future_month_code=_get_target_future_month_code(anchor_ts.month),
+        last_spot_by_key=dict(last_spot_by_key),
+        results=local_results,
+        stats=local_stats,
+        precalib_writer=precalib_collector,
+        tau_anchor_ts=anchor_ts,
+        count_stat_key="window_surface_attempts",
+        surface_model=surface_model,
+    )
+    minute_key = _to_utc_minute_string(anchor_ts)
+    return {
+        "surface_result": local_results.get(minute_key),
+        "stats_delta": dict(local_stats),
+        "precalib_rows": precalib_collector.rows if precalib_collector is not None else [],
+    }
 
 
 def _coerce_target_datetime_defaults(value: Any) -> List[str]:
@@ -305,6 +383,8 @@ def generate_surfaces_for_datetime_windows(
     target_datetimes: Sequence[DatetimeLike],
     process_minute_fn: ProcessMinuteFn,
     window_minutes: int = 3,
+    parallel_calibration_workers: int = 0,
+    executor_factory: Optional[Callable[[int], Any]] = None,
 ) -> Dict[str, Dict[str, Dict[str, Any]]]:
     (
         output_json_path,
@@ -360,6 +440,7 @@ def generate_surfaces_for_datetime_windows(
     logger.info("Target datetimes=%d", len(target_window_map))
     logger.info("Window minutes=%d", int(window_minutes))
     logger.info("Window surface sides=%d", len(pending_buckets))
+    logger.info("Parallel calibration workers=%d", int(parallel_calibration_workers))
     if all_window_minutes:
         logger.info(
             "Target window minute range=%s..%s",
@@ -382,6 +463,20 @@ def generate_surfaces_for_datetime_windows(
     precalib_csv_path = Path(args.precalib_csv)
     precalib_writer: Optional[csv.DictWriter] = None
     precalib_fp = None
+    executor = None
+    inflight_futures: Dict[Any, Tuple[int, str, str]] = {}
+    completed_results: Dict[int, Tuple[str, str, Dict[str, Any]]] = {}
+    next_flush_idx = 0
+    max_inflight = max(1, int(parallel_calibration_workers) * 2)
+
+    if parallel_calibration_workers > 0:
+        if executor_factory is not None:
+            executor = executor_factory(int(parallel_calibration_workers))
+        else:
+            executor = ProcessPoolExecutor(
+                max_workers=int(parallel_calibration_workers),
+                mp_context=multiprocessing.get_context("spawn"),
+            )
 
     if args.save_precalib_csv:
         precalib_csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -391,6 +486,31 @@ def generate_surfaces_for_datetime_windows(
 
     stop_due_to_max_minutes = False
     next_bucket_idx = 0
+
+    def flush_completed_parallel_results() -> None:
+        nonlocal next_flush_idx
+        while next_flush_idx in completed_results:
+            target_key, direction, payload = completed_results.pop(next_flush_idx)
+            side_results[(target_key, direction)] = payload["surface_result"]
+            _merge_stats_delta(stats, payload["stats_delta"])
+            _write_precalib_rows(precalib_writer, payload["precalib_rows"], stats)
+            next_flush_idx += 1
+
+    def collect_completed_parallel_results(*, wait_for_completion: bool) -> None:
+        if not inflight_futures:
+            return
+
+        done_futures = {future for future in inflight_futures if future.done()}
+        if wait_for_completion and not done_futures:
+            done_futures, _ = wait(
+                list(inflight_futures.keys()),
+                return_when=FIRST_COMPLETED,
+            )
+
+        for future in done_futures:
+            task_idx, target_key, direction = inflight_futures.pop(future)
+            completed_results[task_idx] = (target_key, direction, future.result())
+        flush_completed_parallel_results()
 
     def finalize_pending_buckets(current_minute: Optional[pd.Timestamp], include_equal: bool) -> None:
         nonlocal next_bucket_idx
@@ -402,26 +522,49 @@ def generate_surfaces_for_datetime_windows(
                 if anchor_ts == current_minute and not include_equal:
                     break
 
-            local_results: Dict[str, Dict[str, Any]] = {}
-            process_minute_fn(
-                minute_ts=anchor_ts,
-                rows=bucket_rows[(target_key, direction)],
-                days_in_year=int(args.days_in_year),
-                min_strikes_per_expiry=int(args.min_strikes_per_expiry),
-                min_expiries_per_minute=int(args.min_expiries_per_minute),
-                max_precalib_iv=float(args.max_precalib_iv),
-                vol_daycount=vol_daycount,
-                calendar=calendar,
-                target_future_month_code=_get_target_future_month_code(anchor_ts.month),
-                last_spot_by_key=dict(visible_spot_by_key),
-                results=local_results,
-                stats=stats,
-                precalib_writer=precalib_writer,
-                tau_anchor_ts=anchor_ts,
-                count_stat_key="window_surface_attempts",
-                surface_model=str(args.model),
-            )
-            side_results[(target_key, direction)] = local_results.get(_to_utc_minute_string(anchor_ts))
+            task_idx = next_bucket_idx
+            task_rows = list(bucket_rows[(target_key, direction)])
+            task_spot_state = dict(visible_spot_by_key)
+            if executor is None:
+                local_results: Dict[str, Dict[str, Any]] = {}
+                process_minute_fn(
+                    minute_ts=anchor_ts,
+                    rows=task_rows,
+                    days_in_year=int(args.days_in_year),
+                    min_strikes_per_expiry=int(args.min_strikes_per_expiry),
+                    min_expiries_per_minute=int(args.min_expiries_per_minute),
+                    max_precalib_iv=float(args.max_precalib_iv),
+                    vol_daycount=vol_daycount,
+                    calendar=calendar,
+                    target_future_month_code=_get_target_future_month_code(anchor_ts.month),
+                    last_spot_by_key=task_spot_state,
+                    results=local_results,
+                    stats=stats,
+                    precalib_writer=precalib_writer,
+                    tau_anchor_ts=anchor_ts,
+                    count_stat_key="window_surface_attempts",
+                    surface_model=str(args.model),
+                )
+                side_results[(target_key, direction)] = local_results.get(_to_utc_minute_string(anchor_ts))
+            else:
+                future = executor.submit(
+                    _run_window_calibration_task,
+                    process_minute_fn=process_minute_fn,
+                    anchor_ts=anchor_ts,
+                    rows=task_rows,
+                    days_in_year=int(args.days_in_year),
+                    min_strikes_per_expiry=int(args.min_strikes_per_expiry),
+                    min_expiries_per_minute=int(args.min_expiries_per_minute),
+                    max_precalib_iv=float(args.max_precalib_iv),
+                    last_spot_by_key=task_spot_state,
+                    surface_model=str(args.model),
+                    save_precalib_csv=bool(args.save_precalib_csv),
+                )
+                inflight_futures[future] = (task_idx, target_key, direction)
+                collect_completed_parallel_results(wait_for_completion=False)
+                while len(inflight_futures) >= max_inflight:
+                    collect_completed_parallel_results(wait_for_completion=True)
+            bucket_rows[(target_key, direction)] = []
             next_bucket_idx += 1
 
     try:
@@ -558,8 +701,16 @@ def generate_surfaces_for_datetime_windows(
                 break
     finally:
         finalize_pending_buckets(current_minute=None, include_equal=True)
-        if precalib_fp is not None:
-            precalib_fp.close()
+        try:
+            if executor is not None:
+                while inflight_futures:
+                    collect_completed_parallel_results(wait_for_completion=True)
+                flush_completed_parallel_results()
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
+            if precalib_fp is not None:
+                precalib_fp.close()
 
     surfaces_by_target = _extract_target_surfaces(
         side_results,
@@ -612,7 +763,12 @@ def generate_surfaces_for_datetime_windows(
     return surfaces_by_target
 
 
-def run_window_job(args: argparse.Namespace, process_minute_fn: ProcessMinuteFn) -> Dict[str, Dict[str, Dict[str, Any]]]:
+def run_window_job(
+    args: argparse.Namespace,
+    process_minute_fn: ProcessMinuteFn,
+    *,
+    parallel_calibration_workers: int = 0,
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
     target_tokens = _collect_target_datetime_tokens(
         cli_values=args.target_datetimes,
         file_path=args.target_datetimes_file,
@@ -628,4 +784,5 @@ def run_window_job(args: argparse.Namespace, process_minute_fn: ProcessMinuteFn)
         target_datetimes=target_tokens,
         process_minute_fn=process_minute_fn,
         window_minutes=int(args.window_minutes),
+        parallel_calibration_workers=int(parallel_calibration_workers),
     )

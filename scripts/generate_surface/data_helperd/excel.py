@@ -274,7 +274,12 @@ def _load_target_datetimes_from_excel(args: argparse.Namespace) -> Tuple[List[pd
     return deduped_targets, stats
 
 
-def run_excel_job(args: argparse.Namespace, process_minute_fn: ProcessMinuteFn):
+def run_excel_job(
+    args: argparse.Namespace,
+    process_minute_fn: ProcessMinuteFn,
+    *,
+    parallel_calibration_workers: int = 0,
+):
     target_datetimes, stats = _load_target_datetimes_from_excel(args)
 
     surfaces_by_target = generate_surfaces_for_datetime_windows(
@@ -282,6 +287,7 @@ def run_excel_job(args: argparse.Namespace, process_minute_fn: ProcessMinuteFn):
         target_datetimes=target_datetimes,
         process_minute_fn=process_minute_fn,
         window_minutes=int(args.window_minutes),
+        parallel_calibration_workers=int(parallel_calibration_workers),
     )
 
     logger.info("Excel target datetime extraction summary:")

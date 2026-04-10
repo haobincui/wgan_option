@@ -22,10 +22,20 @@ from scripts.generate_surface.data_helperd.window import (  # noqa: E402
     run_window_job,
 )
 from scripts.generate_surface.backend.surface_cpu.all import _process_minute  # noqa: E402
+from scripts.generate_surface.data_helperd.all import resolve_parallel_calibration_workers  # noqa: E402
 
 
 def run(args):
-    return run_window_job(args, _process_minute)
+    parallel_workers = resolve_parallel_calibration_workers(
+        args,
+        device="cpu",
+        data_range="window",
+    )
+    return run_window_job(
+        args,
+        _process_minute,
+        parallel_calibration_workers=parallel_workers,
+    )
 
 
 def main(argv=None) -> None:

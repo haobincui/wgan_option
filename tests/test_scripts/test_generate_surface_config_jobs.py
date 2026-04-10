@@ -245,6 +245,7 @@ class TestGenerateSurfaceConfigParsing(unittest.TestCase):
                           - 2026-03-09T14:36:00Z
                         target_datetimes_file: data/raw/targets.txt
                         window_minutes: 7
+                        calibration_workers: 8
                     """
                 ).strip()
                 + "\n",
@@ -265,6 +266,7 @@ class TestGenerateSurfaceConfigParsing(unittest.TestCase):
             )
             self.assertEqual(args.target_datetimes_file, "data/raw/targets.txt")
             self.assertEqual(args.window_minutes, 7)
+            self.assertEqual(args.calibration_workers, 8)
 
     def test_generate_surface_args_track_model_data_range_run_ts_and_output_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -327,6 +329,7 @@ class TestGenerateSurfaceConfigParsing(unittest.TestCase):
                         source_timezone: Europe/London
                         max_target_datetimes: 12
                         window_minutes: 9
+                        calibration_workers: 6
                     """
                 ).strip()
                 + "\n",
@@ -347,6 +350,7 @@ class TestGenerateSurfaceConfigParsing(unittest.TestCase):
             self.assertEqual(args.source_timezone, "Europe/London")
             self.assertEqual(args.max_target_datetimes, 12)
             self.assertEqual(args.window_minutes, 9)
+            self.assertEqual(args.calibration_workers, 6)
 
 
 if __name__ == "__main__":

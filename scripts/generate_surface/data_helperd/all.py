@@ -63,6 +63,7 @@ PRECALIB_CSV_HEADERS = [
 DEFAULT_CONFIG_PATH = "configs/surface_builder/svi/generate_surface-svi-all.yaml"
 DEFAULT_EXPIRATION_TIME_UTC = "20:00:00"
 DEFAULT_MAX_PRECALIB_IV = 3.0
+DEFAULT_CALIBRATION_WORKERS = 0
 DEFAULT_SURFACE_MODEL = "svi"
 DEFAULT_DATA_RANGE = "all"
 SUPPORTED_SURFACE_MODELS = {"svi", "sabr", "cubic", "raw"}
@@ -86,6 +87,7 @@ SUPPORTED_GENERATE_SURFACE_CONFIG_KEYS = {
     "max_files",
     "max_minutes",
     "chunk_size",
+    "calibration_workers",
     "save_precalib_csv",
     "precalib_csv",
     "target_datetimes",
@@ -388,6 +390,12 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="CSV chunk size.",
     )
     parser.add_argument(
+        "--calibration-workers",
+        type=int,
+        default=int(config_defaults.get("calibration_workers", DEFAULT_CALIBRATION_WORKERS)),
+        help="CPU worker processes for SVI window/excel calibration (0 means serial).",
+    )
+    parser.add_argument(
         "--save-precalib-csv",
         dest="save_precalib_csv",
         action="store_true",
@@ -411,6 +419,11 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     args.model = _normalize_surface_model(args.model)
     args.data_range = _normalize_data_range(args.data_range)
     args.run_ts = str(args.run_ts).strip() or _default_run_ts()
+    args.calibration_workers = int(args.calibration_workers)
+    if args.calibration_workers < 0:
+        raise ValueError(
+            f"Invalid --calibration-workers: {args.calibration_workers}. Expected >= 0."
+        )
 
     resolved_defaults = _load_generate_surface_config(
         args.config,
@@ -516,6 +529,7 @@ def _build_resolved_config_payload(args: argparse.Namespace) -> Dict[str, Any]:
         "max_files": int(args.max_files),
         "max_minutes": int(args.max_minutes),
         "chunk_size": int(args.chunk_size),
+        "calibration_workers": int(args.calibration_workers),
         "save_precalib_csv": bool(args.save_precalib_csv),
         "precalib_csv": str(args.precalib_csv),
     }
@@ -1114,6 +1128,28 @@ def _setup_runtime(
         expiration_time_utc,
         files,
     )
+
+
+def resolve_parallel_calibration_workers(
+    args: argparse.Namespace,
+    *,
+    device: str,
+    data_range: str,
+) -> int:
+    requested = int(getattr(args, "calibration_workers", 0) or 0)
+    if requested <= 0:
+        return 0
+
+    normalized_model = _normalize_surface_model(getattr(args, "model", DEFAULT_SURFACE_MODEL))
+    normalized_data_range = _normalize_data_range(data_range)
+    if device == "cpu" and normalized_model == "svi" and normalized_data_range in {"window", "excel"}:
+        return requested
+
+    logger.warning(
+        "Ignoring calibration_workers=%d; only CPU SVI window/excel jobs support parallel calibration.",
+        requested,
+    )
+    return 0
 
 
 def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinuteFn) -> Dict[str, Dict[str, Any]]:

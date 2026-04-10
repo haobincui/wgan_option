@@ -21,6 +21,7 @@ surface_builder:
     max_files: 0
     max_minutes: 0
     chunk_size: 100000
+    calibration_workers: 0
     save_precalib_csv: true
     precalib_csv: ${output_dir}/surface-${model}-${data_range}-precalib-points.csv
     target_xlsx: data/raw/text_embedding/news_with_openai_embeddings_large.xlsx

@@ -2,282 +2,228 @@
 
 `wgan_option` is a research codebase for building bond-option volatility representations and training text-conditioned forecasting models on them.
 
-The repo currently supports three closely related workflows:
+The repository is being developed as part of a PhD thesis chapter, so the code is organized around reproducibility, data lineage, and experiment comparability as much as around model training itself.
 
-- surface generation from raw option data
-- merged workbook construction that joins option-side artifacts with news embeddings
-- model training on either vol surfaces or SVI parameter representations
+At a high level, the project asks how news embeddings and option-surface representations can be combined to study and forecast changes in bond-option volatility structure. The current repo supports both vol-surface workflows and SVI-parameter workflows, plus the supporting analysis steps needed to inspect model behavior after training.
 
-The project is being developed as part of a PhD thesis chapter, so reproducibility, data lineage, and experiment comparability matter as much as model code.
+## Architecture Overview
 
-## Main Workflows
+The main executable flow is:
 
-### 1. Surface generation
-
-Build minute-level surface outputs from raw option data with one unified CLI.
-
-Main entrypoint:
-
-```bash
-python scripts/generate_surface/main.py --help
+```text
+raw option data
+-> scripts/generate_surface
+-> data/processed/<model>-<data_range>/<run_ts>/
+-> scripts/merge_file
+-> merged_svi.xlsx / merged_vol.xlsx / merged_params.xlsx
+-> scripts/train
+-> outputs/training/<family>/<run_ts>/
+-> scripts/generate_result or scripts/analyze_error
 ```
 
-Common commands:
+This is not just ETL. In thesis terms, it is the experimental data lineage that links raw inputs, generated surfaces, merged audit workbooks, trainable datasets, saved checkpoints, and post-training evaluation artifacts.
 
-```bash
-python scripts/generate_surface/main.py generate_surface --device gpu --model svi --data_range excel --config configs/surface_builder/svi/generate_surface-svi-excel.yaml
-python scripts/generate_surface/main.py generate_surface --device cpu --model svi --data_range all --config configs/surface_builder/svi/generate_surface-svi-all.yaml
-python scripts/generate_surface/main.py generate_surface --device cpu --model raw --data_range all --config configs/surface_builder/raw/generate_surface-raw-all.yaml
-```
+## `src/` Architecture
 
-Minute generation now supports four models:
+### `src/wgan_option`
 
-- `svi`
-- `sabr`
-- `cubic`
-- `raw`
+Training and experiment runtime code.
 
-Outputs are written under:
+- config models and CLI-facing config parsing for training, result generation, and error analysis
+- merged-xlsx trainers for vol-surface WGAN training and SVI regressor training
+- neural network definitions for generator, discriminator, GAN wrapper, and SVI regressor
+- dataset loaders for merged workbooks and the older daily-surface training path
+- shared helpers for inference, metrics export, run-directory layout, and training plots
 
-- `data/processed/<model>-<data_range>/<run_ts>/`
+This is the package to read first when reviewing model behavior, experiment configuration, or output artifact conventions.
 
-Default generation artifacts inside one run directory:
+### `src/quantlib`
 
-- `surface-<model>-<data_range>.json`
-- `surface-<model>-<data_range>.log`
-- `surface-<model>-<data_range>-precalib-points.csv`
-- `surface-resolved_config.yaml`
+Numerical and calendar core for surface construction and reconstruction.
 
-### 2. Merge generated outputs with news embeddings
+- business-day calendars, holiday logic, daycount conventions, and date utilities
+- implied-volatility surface abstractions and interpolation helpers
+- raw option-surface construction from trade files
+- lower-level quantitative utilities used by generation, reconstruction, and analysis workflows
 
-Build training-ready Excel workbooks from minute surface outputs.
+This package is the main source of truth for how surfaces and SVI parameters are interpreted numerically.
 
-```bash
-python scripts/merge_file/merge_svi.py --input-dir data/processed/svi-all/20260330-01
-python scripts/merge_file/merge_vol.py --input-dir data/processed/svi-all/20260330-01
-python scripts/merge_file/merge_params.py --input-dir data/processed/svi-all/20260330-01
-```
+### `src/market_data`
 
-Outputs:
+Market-data contracts and preprocessing helpers.
 
-- `merged_svi.xlsx`
-- `merged_vol.xlsx`
-- `merged_params.xlsx`
+- contract parsing for futures and options
+- DTOs for raw quote and trade records
+- filtering and validation helpers for raw market-data files
 
-Important semantics:
+This package is less central than `wgan_option` and `quantlib` for the current merged-workbook workflows, but it still documents important assumptions about the upstream data model.
 
-- `merged_vol.xlsx` is already pair-based:
-  - `current_surface` corresponds to the backward snapshot
-  - `target_surface` corresponds to the forward snapshot
-- `merged_svi.xlsx` is direction-based:
-  - the SVI trainer pairs backward and forward rows during training
-  - the executable training sheet is `news_direction_audit`, not `gan_input_ready`
+### Shared Utilities
 
-### 3. Train models
+- `src/logger.py`
+  - shared logging setup helper for consistent runtime logs
+- `src/utils/draw.py`
+  - local plotting helper for visualizing processed surface data
 
-The preferred training CLI is:
+## `scripts/` Jobs
 
-```bash
-python scripts/train/main.py --help
-```
+The repo contains several script families. The preferred entrypoints are the unified CLIs under `scripts/generate_surface`, `scripts/train`, `scripts/generate_result`, and `scripts/analyze_error`.
 
-Merged vol-surface WGAN:
+### Core Pipeline Jobs
 
-```bash
-python scripts/train/main.py vol-xlsx --config configs/wgan/train_vol_xlsx.yaml
-```
+| Job | Entrypoint | Task | Main input | Main output | Status |
+| --- | --- | --- | --- | --- | --- |
+| `generate_surface` | `python scripts/generate_surface/main.py generate_surface ...` | Build minute-level surface or parameter outputs from raw option files | raw option data under `data/raw/option_data` plus a surface-builder config | one processed run directory under `data/processed/<model>-<data_range>/<run_ts>/` | Core pipeline |
+| `merge_svi` | `python scripts/merge_file/merge_svi.py --input-dir ...` | Build a direction-level SVI audit workbook | one generated run directory plus the news embedding workbook | `merged_svi.xlsx` | Core pipeline |
+| `merge_vol` | `python scripts/merge_file/merge_vol.py --input-dir ...` | Reconstruct paired current/target vol surfaces and build the training workbook | one generated run directory plus the news embedding workbook | `merged_vol.xlsx` | Core pipeline |
+| `merge_params` | `python scripts/merge_file/merge_params.py --input-dir ...` | Build a model-neutral parameter audit workbook across surface models | one generated run directory plus the news embedding workbook | `merged_params.xlsx` | Core pipeline |
+| `train vol-xlsx` | `python scripts/train/main.py vol-xlsx ...` | Train the merged vol-surface WGAN workflow | `merged_vol.xlsx` plus a training config | timestamped training artifacts under `outputs/training/vol_xlsx/` or inferred output root | Core pipeline, preferred training entrypoint |
+| `train svi-xlsx` | `python scripts/train/main.py svi-xlsx ...` | Train the merged SVI supervised regressor workflow | `merged_svi.xlsx` plus a training config | timestamped training artifacts under `outputs/training/svi_xlsx/` or inferred output root | Core pipeline, preferred training entrypoint |
 
-Merged SVI supervised training:
+### Supporting Research Jobs
 
-```bash
-python scripts/train/main.py svi-xlsx --config configs/wgan/train_svi_xlsx.yaml
-```
+| Job | Entrypoint | Task | Main input | Main output | Status |
+| --- | --- | --- | --- | --- | --- |
+| `generate_result vol` | `python scripts/generate_result/main.py vol ...` | Re-run a trained vol model on selected samples and save comparison payloads | `merged_vol.xlsx` plus a saved generator checkpoint | JSON payloads, plots, and `summary.csv` | Supporting research |
+| `generate_result svi` | `python scripts/generate_result/main.py svi ...` | Predict future SVI, reconstruct surfaces, and save sample-level comparisons | `merged_svi.xlsx` plus a saved SVI regressor checkpoint | JSON payloads, plots, and `summary.csv` | Supporting research |
+| `generate_result plot` | `python scripts/generate_result/main.py plot --input-json ...` | Render a saved sample payload into comparison plots | one saved payload JSON | PNG comparison plots | Supporting research |
+| `analyze_error vol` | `python scripts/analyze_error/main.py vol ...` | Compute distributional error summaries for generated future vol surfaces | `merged_vol.xlsx` plus a saved generator checkpoint | `errors.csv`, bootstrap outputs, and histograms | Supporting research |
+| `analyze_error svi` | `python scripts/analyze_error/main.py svi ...` | Compute distributional error summaries after SVI prediction and surface reconstruction | `merged_svi.xlsx` plus a saved SVI regressor checkpoint | `errors.csv`, bootstrap outputs, and histograms | Supporting research |
 
-Dry runs:
+### Maintenance and Data Utility Jobs
 
-```bash
-python scripts/train/train_vol.py --config configs/wgan/train_vol_xlsx.yaml --dry-run
-python scripts/train/train_svi.py --config configs/wgan/train_svi_xlsx.yaml --dry-run
-```
+| Job | Entrypoint | Task | Main input | Main output | Status |
+| --- | --- | --- | --- | --- | --- |
+| `merge_raw_option_data` | `python scripts/merge_raw_option_data.py ...` | Merge raw gzip CSV files into one inspection dataset | a directory of raw `*.csv.gz` option files | one merged gzip CSV | Maintenance / data utility |
+| `migrate_training_outputs` | `python scripts/train/migrate_training_outputs.py ...` | Move older training run directories into the newer `outputs/training/...` layout | legacy training output directories | migrated run directories in the normalized layout | Maintenance / migration |
 
-## Shell Wrappers
+### Convenience Wrappers
 
-The repo root currently contains a few convenience shell scripts for background runs:
+These are helpers for launching background jobs. They are not the primary APIs of the repo.
 
-- `run_train.sh`
-  - wraps `python scripts/train/main.py ...`
-  - default subcommand is `vol-xlsx`
-- `run_analyze_error.sh`
-  - wraps `python scripts/analyze_error/main.py ...`
-  - supports `vol`, `svi`, or `both`
-- `run_minute_svi_excel_gpu.sh`
-  - wraps `python scripts/generate_surface/main.py generate_surface --device gpu --data_range excel ...`
-  - use it with an explicit modern config path, for example:
+| Wrapper | Wraps | Purpose | Status |
+| --- | --- | --- | --- |
+| `run_train.sh` | `scripts/train/main.py` | background launcher for training jobs | Convenience wrapper |
+| `run_analyze_error.sh` | `scripts/analyze_error/main.py` | background launcher for error-analysis jobs | Convenience wrapper |
+| `run_minute_svi_excel_gpu.sh` | `scripts/generate_surface/main.py generate_surface ...` | background launcher for GPU `svi` + `excel` generation | Convenience wrapper |
 
-```bash
-bash run_minute_svi_excel_gpu.sh --config configs/surface_builder/svi/generate_surface-svi-excel.yaml
-bash run_minute_svi_excel_gpu.sh --config configs/surface_builder/sabr/generate_surface-sabr-excel.yaml
-```
+## Semantics That Matter
 
-Those wrappers create `logs/` entries and PID files in the repository root.
+- `backward` means the current snapshot aligned with the original news timestamp.
+- `forward` means the future snapshot aligned with the forward offset window.
+- In practice, this means `backward = current` and `forward = future` throughout the merged workflows.
+- `merged_vol.xlsx` is already paired:
+  - one usable row is already `current_surface -> target_surface`
+  - this is the training-ready workbook for vol-surface forecasting
+- `merged_svi.xlsx` is direction-level, not pair-level:
+  - the SVI training path pairs `backward` and `forward` rows later during training
+  - the executable pairing logic uses `news_direction_audit`, not the direction-level `gan_input_ready` sheet
+- merged-xlsx training supports three text embedding modes:
+  - `hd`
+  - `lp`
+  - `concat`
+- the default text mode remains `hd`, which keeps the merged workflows aligned with the earlier experiments
 
-## Training Modes
+## Canonical Commands
 
-### Merged vol-surface WGAN
-
-- entrypoint: `scripts/train/main.py vol-xlsx`
-- config: `configs/wgan/train_vol_xlsx.yaml`
-- dataset source: `merged_vol.xlsx`
-- target: `current_surface + text_embedding -> target_surface`
-- model: conditional WGAN-GP with reconstruction and arbitrage-aware penalties
-
-### Merged SVI supervised trainer
-
-- entrypoint: `scripts/train/main.py svi-xlsx`
-- config: `configs/wgan/train_svi_xlsx.yaml`
-- dataset source: `merged_svi.xlsx`, sheet `news_direction_audit`
-- target: future padded SVI parameters plus future slice count
-- model: supervised MLP regressor
-
-## Current Training Features
-
-The training stack now supports:
-
-- resolved run-config snapshots under the metrics directory
-- JSON and CSV metrics export
-- loss-curve plots
-- periodic checkpoints
-- best-checkpoint saving
-- optional early stopping
-- optional `ReduceLROnPlateau`
-
-### Best-checkpoint rules
-
-- WGAN vol path: best model is selected by lowest `val_recon`
-- SVI path: best model is selected by lowest `val_regression`
-
-### Plateau LR scheduling
-
-Available config fields:
-
-```yaml
-use_reduce_lr_on_plateau: false
-reduce_lr_factor: 0.5
-reduce_lr_patience: 8
-reduce_lr_min_lr: 1.0e-5
-```
-
-The global dataclass default is `false`, while individual experiment YAMLs can override it.
-
-Current monitor metrics:
-
-- WGAN vol path: `val_recon`
-- SVI path: `val_regression`
-
-## Output Artifacts
-
-Typical output tree:
-
-- `outputs/training/<model>-<data_range>/<run_ts>/`
-
-Typical metrics artifacts:
-
-- `training_metrics.json`
-- `training_metrics.csv`
-- `loss_curves.png`
-- `best_checkpoint.json`
-- `run_config_YYYYMMDD_HHMMSS.yaml`
-
-Typical checkpoint artifacts:
-
-- WGAN final:
-  - `generator.pt`
-  - `discriminator.pt`
-- WGAN best:
-  - `generator_best.pt`
-  - `discriminator_best.pt`
-- SVI final:
-  - `svi_regressor.pt`
-- SVI best:
-  - `svi_regressor_best.pt`
-
-## Text Embedding Modes
-
-Merged-xlsx training supports:
-
-- `hd`
-- `lp`
-- `concat`
-
-Defaults remain aligned with earlier experiments:
-
-- default mode is `hd`
-- if `concat` is used, embedding dimension is inferred automatically from both embedding columns
-
-## Installation
-
-Requirements:
-
-- Python 3.10+
-
-Editable install:
+Install the package in editable mode:
 
 ```bash
 python -m pip install -e .
 ```
 
-If you are installing on a GPU server with CUDA 12.4 drivers, install the matching PyTorch wheel after the editable install:
+Build one processed minute-surface run:
 
 ```bash
-python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+python scripts/generate_surface/main.py generate_surface \
+  --device gpu \
+  --model svi \
+  --data_range excel \
+  --config configs/surface_builder/svi/generate_surface-svi-excel.yaml
 ```
 
-Requirements-based install is also available:
+Build merged workbooks from one processed run:
 
 ```bash
-python -m pip install -r requirements.txt
+python scripts/merge_file/merge_svi.py --input-dir data/processed/svi-excel/<run_ts>
+python scripts/merge_file/merge_vol.py --input-dir data/processed/svi-excel/<run_ts>
 ```
+
+Train the preferred merged-workbook paths:
+
+```bash
+python scripts/train/main.py vol-xlsx --config configs/wgan/train_vol_xlsx.yaml
+python scripts/train/main.py svi-xlsx --config configs/wgan/train_svi_xlsx.yaml
+```
+
+Run post-training inspection:
+
+```bash
+python scripts/generate_result/main.py vol --config configs/generate_result/vol-lp.yaml
+python scripts/analyze_error/main.py vol --config configs/analyze_error/vol.yaml
+```
+
+For flags, advanced configuration, and workflow-specific details, read the script-level READMEs under `scripts/`.
 
 ## Project Layout
 
 ```text
 wgan_option/
 ├── configs/
-│   ├── surface_builder/            # Surface-generation jobs
-│   └── wgan/                       # Merged training configs
-├── docs/                           # Research and training documentation
+│   ├── analyze_error/             # Error-analysis configs
+│   ├── generate_result/           # Post-training inference configs
+│   ├── surface_builder/           # Surface-generation configs by model
+│   └── wgan/                      # Merged-workbook training configs
+├── data/                          # Raw inputs and processed run directories
+├── docs/                          # Thesis design notes and architecture writeups
 ├── scripts/
-│   ├── generate_surface/           # Unified generation CLI
-│   ├── merge_file/                 # Workbook construction
-│   └── train/                      # Unified merged-xlsx training CLI
-├── run_train.sh                    # Background wrapper for training jobs
-├── run_analyze_error.sh            # Background wrapper for error analysis jobs
-├── run_minute_svi_excel_gpu.sh     # Background wrapper for GPU excel minute generation
+│   ├── analyze_error/             # Post-training error distribution analysis
+│   ├── generate_result/           # Post-training sample generation and plotting
+│   ├── generate_surface/          # Unified minute surface-generation CLI
+│   ├── merge_file/                # Workbook construction from generated runs
+│   ├── train/                     # Unified merged-xlsx training CLI
+│   └── merge_raw_option_data.py   # Raw-data inspection utility
 ├── src/
-│   ├── quantlib/                   # Vol surface, SVI, and numerical utilities
-│   ├── market_data/                # Market-data contracts / DTO helpers
-│   └── wgan_option/                # Trainers, loaders, configs, models
-├── tests/
-└── outputs/
+│   ├── market_data/               # Contract parsing and raw-data DTO helpers
+│   ├── quantlib/                  # Numerical and calendar core
+│   ├── utils/                     # Local plotting utilities
+│   ├── wgan_option/               # Training, inference, configs, and loaders
+│   └── logger.py                  # Shared logging helper
+├── tests/                         # Script, quantlib, and workflow tests
+├── run_train.sh                   # Training launcher helper
+├── run_analyze_error.sh           # Analyze-error launcher helper
+├── run_minute_svi_excel_gpu.sh    # Generate-surface launcher helper
+└── README.md
 ```
 
-## Recommended Reading
+## Where To Read Next
 
-Project and experiment design:
+Thesis design and experiment framing:
 
 - [docs/input_vol.md](docs/input_vol.md)
 - [docs/input_svi.md](docs/input_svi.md)
 - [docs/vol_surface_gan_architecture.md](docs/vol_surface_gan_architecture.md)
+- [docs/current_executable_workflows.md](docs/current_executable_workflows.md)
 
-Training diagnostics:
+Script-level operational details:
+
+- [scripts/README.md](scripts/README.md)
+- [scripts/generate_surface/README.md](scripts/generate_surface/README.md)
+- [scripts/merge_file/README.md](scripts/merge_file/README.md)
+- [scripts/train/README.md](scripts/train/README.md)
+- [scripts/generate_result/README.md](scripts/generate_result/README.md)
+- [scripts/analyze_error/README.md](scripts/analyze_error/README.md)
+
+Training diagnostics and model notes:
 
 - [docs/gan_model_detailed_architecture.md](docs/gan_model_detailed_architecture.md)
+- [docs/svi_regressor_architecture.md](docs/svi_regressor_architecture.md)
 - [docs/training_loss_curves.md](docs/training_loss_curves.md)
 - [docs/reduce_lr_on_plateau.md](docs/reduce_lr_on_plateau.md)
 
 ## Notes
 
-- The merged vol workflow is currently the closest executable path to the thesis-facing vol-surface forecasting setup.
-- The merged SVI workflow is a paired forecasting implementation, even though `merged_svi.xlsx` itself is direction-oriented.
-- The minute generation CLI is now fully model-aware through `--model` and `--data_range`.
-- The most up-to-date surface-generation details live in `scripts/generate_surface/README.md`.
+- The preferred merged-workbook training entrypoint is `scripts/train/main.py`; older daily-surface training logic still lives under `src/wgan_option`.
+- The merged vol workflow is currently the closest executable path to the thesis-facing current-surface -> future-surface forecasting setup.
+- The merged SVI workflow is a paired forecasting implementation, even though the source workbook remains direction-oriented.
+- The script families under `scripts/` are intentionally thin wrappers around reusable logic in `src/`.

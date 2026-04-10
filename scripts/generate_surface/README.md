@@ -87,9 +87,13 @@ All minute configs now use one section:
 The shared `generate_surface` section contains:
 
 - common runtime fields such as `model`, `data_range`, `run_ts`, `input_glob`, `output_dir`, `output_json`, `log_file`, `precalib_csv`
-- quality-filter and chunking fields such as `days_in_year`, `min_strikes_per_expiry`, `min_expiries_per_minute`, `max_precalib_iv`, `max_files`, `max_minutes`, `chunk_size`
+- quality-filter and chunking fields such as `days_in_year`, `min_strikes_per_expiry`, `min_expiries_per_minute`, `max_precalib_iv`, `max_files`, `max_minutes`, `chunk_size`, `calibration_workers`
 - `window` fields such as `target_datetimes`, `target_datetimes_file`, `window_minutes`
 - `excel` fields such as `target_xlsx`, `sheet_name`, `date_column`, `time_column`, `source_timezone`, `max_target_datetimes`, `window_minutes`
+
+`calibration_workers` is currently used only by CPU `svi` jobs with `data_range=window` or `data_range=excel`.
+Set it to `0` to keep serial behavior, or a positive value such as `32` to parallelize minute SVI calibration across CPU processes.
+GPU jobs still run serially for this stage.
 
 ## Models
 

@@ -21,9 +21,15 @@ from scripts.generate_surface.data_helperd.excel import (  # noqa: E402
     run_excel_job,
 )
 from scripts.generate_surface.backend.surface_gpu.all import _process_minute  # noqa: E402
+from scripts.generate_surface.data_helperd.all import resolve_parallel_calibration_workers  # noqa: E402
 
 
 def run(args):
+    resolve_parallel_calibration_workers(
+        args,
+        device="gpu",
+        data_range="excel",
+    )
     return run_excel_job(args, _process_minute)
 
 

@@ -36,6 +36,28 @@ from scripts.generate_surface.backend.surface_cpu.all import (  # noqa: E402
 )
 
 
+class _ImmediateFuture:
+    def __init__(self, result):
+        self._result = result
+
+    def done(self) -> bool:
+        return True
+
+    def result(self):
+        return self._result
+
+
+class _ImmediateExecutor:
+    def __init__(self, max_workers: int):
+        self.max_workers = max_workers
+
+    def submit(self, fn, *args, **kwargs):
+        return _ImmediateFuture(fn(*args, **kwargs))
+
+    def shutdown(self, wait: bool = True) -> None:
+        del wait
+
+
 class TestGenerateSurfaceWindowLogic(unittest.TestCase):
     TARGET_TS = pd.Timestamp("2026-03-09T14:35:00Z")
     FORWARD_TS = pd.Timestamp("2026-03-09T14:40:00Z")
@@ -62,6 +84,7 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
             max_files=0,
             max_minutes=0,
             chunk_size=1000,
+            calibration_workers=0,
             save_precalib_csv=False,
             precalib_csv=str(Path(tmpdir) / "window_precalib.csv"),
         )
@@ -423,6 +446,60 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
             self.assertEqual(surfaces[target_key]["backward"]["surface_params"], {"ok": True})
             self.assertEqual(surfaces[target_key]["backward"]["surface_model"], "svi")
             self.assertIsNone(surfaces[target_key]["forward"]["surface_params"])
+
+    def test_parallel_window_calibration_matches_serial_output(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = self._write_trade_csv(
+                tmpdir,
+                [
+                    {"#RIC": "FUT_PRIOR", "Date-Time": "2026-03-09T14:30:00Z", "Price": 100.0, "Volume": 1.0},
+                    {"#RIC": "OPTP110", "Date-Time": "2026-03-09T14:34:00Z", "Price": 0.25, "Volume": 1.0},
+                    {"#RIC": "OPTP111", "Date-Time": "2026-03-09T14:35:00Z", "Price": 0.35, "Volume": 1.0},
+                    {"#RIC": "FUT_WIN", "Date-Time": "2026-03-09T14:36:00Z", "Price": 101.0, "Volume": 1.0},
+                    {"#RIC": "OPTC112", "Date-Time": "2026-03-09T14:36:00Z", "Price": 0.45, "Volume": 1.0},
+                    {"#RIC": "OPTC113", "Date-Time": "2026-03-09T14:40:00Z", "Price": 0.55, "Volume": 1.0},
+                ],
+            )
+            serial_args = self._make_args(tmpdir, csv_path)
+            serial_args.output_json = str(Path(tmpdir) / "serial.json")
+            serial_args.log_file = str(Path(tmpdir) / "serial.log")
+            serial_args.output_dir = str(Path(tmpdir) / "serial-run")
+            serial_args.resolved_config_path = str(Path(tmpdir) / "serial-run" / "surface-resolved_config.yaml")
+            parallel_args = self._make_args(tmpdir, csv_path)
+            parallel_args.output_json = str(Path(tmpdir) / "parallel.json")
+            parallel_args.log_file = str(Path(tmpdir) / "parallel.log")
+            parallel_args.output_dir = str(Path(tmpdir) / "parallel-run")
+            parallel_args.resolved_config_path = str(Path(tmpdir) / "parallel-run" / "surface-resolved_config.yaml")
+            parallel_args.calibration_workers = 2
+
+            serial_calls: Dict[str, Dict[str, object]] = {}
+            parallel_calls: Dict[str, Dict[str, object]] = {}
+            serial_process = self._make_fake_process(serial_calls, self.TARGET_TS)
+            parallel_process = self._make_fake_process(parallel_calls, self.TARGET_TS)
+
+            with patch.object(
+                window_common,
+                "_build_rows_for_minute",
+                side_effect=self._fake_build_rows_for_minute,
+            ):
+                serial_surfaces = window_common.generate_surfaces_for_datetime_windows(
+                    args=serial_args,
+                    target_datetimes=[self.TARGET_TS],
+                    process_minute_fn=serial_process,
+                    window_minutes=5,
+                )
+                parallel_surfaces = window_common.generate_surfaces_for_datetime_windows(
+                    args=parallel_args,
+                    target_datetimes=[self.TARGET_TS],
+                    process_minute_fn=parallel_process,
+                    window_minutes=5,
+                    parallel_calibration_workers=2,
+                    executor_factory=_ImmediateExecutor,
+                )
+                logging.shutdown()
+
+            self.assertEqual(serial_surfaces, parallel_surfaces)
+            self.assertEqual(serial_calls, parallel_calls)
 
     def test_prepare_option_candidates_uses_window_anchor_for_tau(self):
         anchor_ts = pd.Timestamp("2026-03-09T14:40:00Z")
