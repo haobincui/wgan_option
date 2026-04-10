@@ -12,9 +12,6 @@ __pycache__/
 /validator_output/
 /merged_output/
 
-# Script-local input/output data drops
-/scripts/data_to_distribution/input/
-/scripts/data_to_distribution/output/
 
 # Common generated surface artifacts
 **/daily_csv/
