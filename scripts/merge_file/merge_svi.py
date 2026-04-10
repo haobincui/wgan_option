@@ -18,13 +18,13 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(_ROOT_DIR))
 
 import scripts._path_setup  # noqa: F401
-from scripts._path_setup import ROOT_DIR
 
 from quantlib.vol_surface.algo.svi_algo import _svi_function, _vars_to_vols  # noqa: E402
-from scripts.generate_surface.data_helperd.excel import (  # noqa: E402
-    DEFAULT_SOURCE_TIMEZONE,
-)
 from scripts.merge_file._merge_common import (  # noqa: E402
+    DEFAULT_DAYS_IN_YEAR as _DEFAULT_DAYS_IN_YEAR,
+    DEFAULT_NEWS_XLSX_PATH,
+    DEFAULT_OFFSET_MINUTES,
+    DEFAULT_SOURCE_TIMEZONE,
     assign_raw_row_to_slice as _assign_raw_row_to_slice,
     coerce_optional_numeric as _coerce_optional_numeric,
     int_range_summary as _int_range_summary,
@@ -50,10 +50,8 @@ from scripts.merge_file._merge_common import (  # noqa: E402
     write_workbook,
 )
 
-DEFAULT_NEWS_XLSX_PATH = ROOT_DIR / "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx"
 DEFAULT_OUTPUT_NAME = "merged_svi.xlsx"
-DEFAULT_OFFSET_MINUTES = 5
-DAYS_IN_YEAR = 250
+DAYS_IN_YEAR = _DEFAULT_DAYS_IN_YEAR
 
 AUDIT_SHEET = "news_direction_audit"
 SLICE_SHEET = "svi_slice_detail"
@@ -164,6 +162,11 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         "--input-dir",
         required=True,
         help="Directory containing surface-<model>-<data_range>.json and surface-<model>-<data_range>-precalib-points.csv.",
+    )
+    parser.add_argument(
+        "--news-xlsx",
+        default=str(DEFAULT_NEWS_XLSX_PATH),
+        help="Path to the news embedding workbook used for alignment.",
     )
     parser.add_argument(
         "--source-timezone",
@@ -443,7 +446,7 @@ def main(argv: Optional[Iterable[str]] = None) -> Path:
     input_dir = Path(args.input_dir).expanduser()
     workbook_frames = build_workbook_frames(
         input_dir,
-        news_xlsx_path=DEFAULT_NEWS_XLSX_PATH,
+        news_xlsx_path=Path(args.news_xlsx).expanduser(),
         source_timezone=str(args.source_timezone),
         offset_minutes=int(args.offset_minutes),
     )

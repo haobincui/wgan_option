@@ -10,8 +10,11 @@ from unittest.mock import patch
 import pandas as pd
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+SRC_DIR = ROOT_DIR / "src"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 from quantlib.calculation.analytics.position.instruments.features import OptionType  # noqa: E402
 from quantlib.calculation.analytics.models.analytical.equity.formula import (  # noqa: E402
@@ -394,7 +397,7 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         stats = defaultdict(int)
         results = {}
 
-        with patch("scripts.generate_surface.model.svi.SviCalibrationQuasiExplicit") as calibration_cls:
+        with patch("wgan_option.surface_generation.model.svi.SviCalibrationQuasiExplicit") as calibration_cls:
             calibration_cls.return_value.params = {
                 "a": [0.01],
                 "b": [0.02],
@@ -503,7 +506,7 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
             return _CalibrationResult()
 
         with patch(
-            "scripts.generate_surface.model.svi.SviCalibrationQuasiExplicit",
+            "wgan_option.surface_generation.model.svi.SviCalibrationQuasiExplicit",
             side_effect=_fake_calibration,
         ) as calibration_cls:
             _finalize_minute_surface(
@@ -614,7 +617,7 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         stats = defaultdict(int)
         results = {}
 
-        with patch("scripts.generate_surface.model.svi.SviCalibrationQuasiExplicit") as calibration_cls:
+        with patch("wgan_option.surface_generation.model.svi.SviCalibrationQuasiExplicit") as calibration_cls:
             calibration_cls.return_value.params = {
                 "a": [0.01],
                 "b": [0.02],
@@ -684,7 +687,7 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         stats = defaultdict(int)
         results = {}
 
-        with patch("scripts.generate_surface.model.sabr.SabrCalibrationHagan") as calibration_cls:
+        with patch("wgan_option.surface_generation.model.sabr.SabrCalibrationHagan") as calibration_cls:
             calibration_cls.return_value.params = {
                 "alpha": [0.2],
                 "beta": [1.0],
@@ -736,7 +739,7 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         stats = defaultdict(int)
         results = {}
 
-        with patch("scripts.generate_surface.model.cubic.CubicSplineVolSurfaceBuilder") as builder_cls:
+        with patch("wgan_option.surface_generation.model.cubic.CubicSplineVolSurfaceBuilder") as builder_cls:
             builder_cls.return_value.get_vol_surface.return_value = object()
             _finalize_minute_surface(
                 minute_ts=minute_ts,

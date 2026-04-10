@@ -13,8 +13,11 @@ import pandas as pd
 import torch
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+SRC_DIR = ROOT_DIR / "src"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 from wgan_option.config import Config, load_config, parse_cli_overrides  # noqa: E402
 from wgan_option.models.gan_model import WGAN_GP  # noqa: E402

@@ -7,8 +7,11 @@ from typing import Optional
 import torch
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+SRC_DIR = ROOT_DIR / "src"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 from market_data.contract_handler.contract_type import ContractType  # noqa: E402
 from market_data.contract_handler.future_contract import FutureContract  # noqa: E402

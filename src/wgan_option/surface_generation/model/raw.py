@@ -1,0 +1,33 @@
+"""Raw non-parametric surface parameter construction."""
+
+from __future__ import annotations
+
+from datetime import date
+from typing import Any, Dict, List
+
+from quantlib.calendar.daycount import DayCountBusN
+from quantlib.vol_surface.algo.raw_surface import RawVolSurface
+
+
+def build_raw_surface_params(
+    *,
+    valuation_date: date,
+    vols: List[List[float]],
+    percent_strikes: List[List[float]],
+    business_days_list: List[int],
+    vol_daycount: DayCountBusN,
+    stats: Dict[str, int],
+) -> Dict[str, Any]:
+    del stats
+    RawVolSurface(
+        valuation_date=valuation_date,
+        vols=vols,
+        percent_strikes=percent_strikes,
+        business_days=business_days_list,
+        vol_daycount=vol_daycount,
+    )
+    return {
+        "business_days": business_days_list,
+        "percent_strikes": percent_strikes,
+        "implied_vols": vols,
+    }

@@ -25,4 +25,6 @@ activate_py312() {
 
 activate_py312
 
+export PYTHONPATH="${SCRIPT_DIR}/src:${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+
 python -m unittest discover -s tests -p 'test*.py' "$@"

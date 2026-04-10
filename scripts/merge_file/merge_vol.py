@@ -18,9 +18,11 @@ if __package__ in {None, ""}:
 
 import scripts._path_setup  # noqa: F401
 
-from scripts.generate_surface.data_helperd.excel import DEFAULT_SOURCE_TIMEZONE  # noqa: E402
-from scripts.merge_file import merge_svi  # noqa: E402
 from scripts.merge_file._merge_common import (  # noqa: E402
+    DEFAULT_DAYS_IN_YEAR as _DEFAULT_DAYS_IN_YEAR,
+    DEFAULT_NEWS_XLSX_PATH,
+    DEFAULT_OFFSET_MINUTES,
+    DEFAULT_SOURCE_TIMEZONE,
     build_surface_from_params,
     coerce_optional_numeric,
     evaluate_raw_row_against_surface,
@@ -42,12 +44,19 @@ from scripts.merge_file._merge_common import (  # noqa: E402
     weighted_rmse,
     write_workbook,
 )
-from wgan_option.config import default_config  # noqa: E402
+from wgan_option.surface_grid import (  # noqa: E402
+    DEFAULT_MATURITY_BINS,
+    DEFAULT_MATURITY_MAX_DAYS,
+    DEFAULT_MATURITY_MIN_DAYS,
+    DEFAULT_MONEYNESS_MAX,
+    DEFAULT_MONEYNESS_MIN,
+    DEFAULT_STRIKE_BINS,
+    build_surface_grids,
+    surface_shape,
+)
 
-DEFAULT_NEWS_XLSX_PATH = merge_svi.DEFAULT_NEWS_XLSX_PATH
 DEFAULT_OUTPUT_NAME = "merged_vol.xlsx"
-DEFAULT_OFFSET_MINUTES = merge_svi.DEFAULT_OFFSET_MINUTES
-DAYS_IN_YEAR = merge_svi.DAYS_IN_YEAR
+DAYS_IN_YEAR = _DEFAULT_DAYS_IN_YEAR
 
 PAIR_AUDIT_SHEET = "news_surface_pair_audit"
 SIDE_DETAIL_SHEET = "surface_side_detail"
@@ -168,6 +177,11 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Directory containing surface-<model>-<data_range>.json and surface-<model>-<data_range>-precalib-points.csv.",
     )
     parser.add_argument(
+        "--news-xlsx",
+        default=str(DEFAULT_NEWS_XLSX_PATH),
+        help="Path to the news embedding workbook used for alignment.",
+    )
+    parser.add_argument(
         "--source-timezone",
         default=DEFAULT_SOURCE_TIMEZONE,
         help="Timezone used to parse PD + ET in the news xlsx.",
@@ -178,26 +192,37 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         default=DEFAULT_OFFSET_MINUTES,
         help="Forward direction offset in minutes.",
     )
+    parser.add_argument("--strike-bins", type=int, default=DEFAULT_STRIKE_BINS, help="Number of moneyness bins.")
+    parser.add_argument("--maturity-bins", type=int, default=DEFAULT_MATURITY_BINS, help="Number of maturity bins.")
+    parser.add_argument("--moneyness-min", type=float, default=DEFAULT_MONEYNESS_MIN, help="Minimum percent-strike grid value.")
+    parser.add_argument("--moneyness-max", type=float, default=DEFAULT_MONEYNESS_MAX, help="Maximum percent-strike grid value.")
+    parser.add_argument("--maturity-min-days", type=int, default=DEFAULT_MATURITY_MIN_DAYS, help="Minimum maturity in business days for the reconstruction grid.")
+    parser.add_argument("--maturity-max-days", type=int, default=DEFAULT_MATURITY_MAX_DAYS, help="Maximum maturity in business days for the reconstruction grid.")
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
-def _grid_definition() -> Tuple[List[float], List[float], str]:
-    strike_grid = np.linspace(
-        default_config.moneyness_min,
-        default_config.moneyness_max,
-        default_config.strike_bins,
-        dtype=np.float64,
-    )
-    maturity_days_grid = np.linspace(
-        default_config.maturity_min_days,
-        default_config.maturity_max_days,
-        default_config.maturity_bins,
+def _grid_definition(
+    *,
+    strike_bins: int = DEFAULT_STRIKE_BINS,
+    maturity_bins: int = DEFAULT_MATURITY_BINS,
+    moneyness_min: float = DEFAULT_MONEYNESS_MIN,
+    moneyness_max: float = DEFAULT_MONEYNESS_MAX,
+    maturity_min_days: int = DEFAULT_MATURITY_MIN_DAYS,
+    maturity_max_days: int = DEFAULT_MATURITY_MAX_DAYS,
+) -> Tuple[List[float], List[float], str]:
+    strike_grid, maturity_days_grid = build_surface_grids(
+        strike_bins=strike_bins,
+        maturity_bins=maturity_bins,
+        moneyness_min=moneyness_min,
+        moneyness_max=moneyness_max,
+        maturity_min_days=maturity_min_days,
+        maturity_max_days=maturity_max_days,
         dtype=np.float64,
     )
     return (
         [float(value) for value in strike_grid.tolist()],
         [float(value) for value in maturity_days_grid.tolist()],
-        serialize_list([int(default_config.maturity_bins), int(default_config.strike_bins)]),
+        serialize_list(surface_shape(strike_bins=strike_bins, maturity_bins=maturity_bins)),
     )
 
 
@@ -472,6 +497,12 @@ def build_workbook_frames(
     news_xlsx_path: Path = DEFAULT_NEWS_XLSX_PATH,
     source_timezone: str = DEFAULT_SOURCE_TIMEZONE,
     offset_minutes: int = DEFAULT_OFFSET_MINUTES,
+    strike_bins: int = DEFAULT_STRIKE_BINS,
+    maturity_bins: int = DEFAULT_MATURITY_BINS,
+    moneyness_min: float = DEFAULT_MONEYNESS_MIN,
+    moneyness_max: float = DEFAULT_MONEYNESS_MAX,
+    maturity_min_days: int = DEFAULT_MATURITY_MIN_DAYS,
+    maturity_max_days: int = DEFAULT_MATURITY_MAX_DAYS,
 ) -> Dict[str, pd.DataFrame]:
     input_dir = resolve_existing_path(Path(input_dir), "Input directory")
     if not input_dir.is_dir():
@@ -490,7 +521,14 @@ def build_workbook_frames(
         if str(timestamp).strip()
     }
 
-    strike_grid, maturity_days_grid, surface_shape_text = _grid_definition()
+    strike_grid, maturity_days_grid, surface_shape_text = _grid_definition(
+        strike_bins=strike_bins,
+        maturity_bins=maturity_bins,
+        moneyness_min=moneyness_min,
+        moneyness_max=moneyness_max,
+        maturity_min_days=maturity_min_days,
+        maturity_max_days=maturity_max_days,
+    )
     strike_grid_text = serialize_list(strike_grid)
     maturity_grid_text = serialize_list(maturity_days_grid)
 
@@ -587,9 +625,15 @@ def main(argv: Optional[Iterable[str]] = None) -> Path:
     input_dir = Path(args.input_dir).expanduser()
     workbook_frames = build_workbook_frames(
         input_dir,
-        news_xlsx_path=DEFAULT_NEWS_XLSX_PATH,
+        news_xlsx_path=Path(args.news_xlsx).expanduser(),
         source_timezone=str(args.source_timezone),
         offset_minutes=int(args.offset_minutes),
+        strike_bins=int(args.strike_bins),
+        maturity_bins=int(args.maturity_bins),
+        moneyness_min=float(args.moneyness_min),
+        moneyness_max=float(args.moneyness_max),
+        maturity_min_days=int(args.maturity_min_days),
+        maturity_max_days=int(args.maturity_max_days),
     )
     output_path = input_dir / DEFAULT_OUTPUT_NAME
     write_workbook(output_path, workbook_frames)

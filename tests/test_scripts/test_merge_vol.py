@@ -21,6 +21,36 @@ def _model_iv(total_var: float, business_days: int) -> float:
 
 
 class TestMergeVol(unittest.TestCase):
+    def test_parse_args_accepts_explicit_grid_contract(self):
+        args = merge_vol._parse_args(
+            [
+                "--input-dir",
+                "data/processed/example",
+                "--news-xlsx",
+                "data/raw/news.xlsx",
+                "--strike-bins",
+                "8",
+                "--maturity-bins",
+                "10",
+                "--moneyness-min",
+                "0.8",
+                "--moneyness-max",
+                "1.2",
+                "--maturity-min-days",
+                "14",
+                "--maturity-max-days",
+                "180",
+            ]
+        )
+
+        self.assertEqual(args.news_xlsx, "data/raw/news.xlsx")
+        self.assertEqual(args.strike_bins, 8)
+        self.assertEqual(args.maturity_bins, 10)
+        self.assertAlmostEqual(args.moneyness_min, 0.8)
+        self.assertAlmostEqual(args.moneyness_max, 1.2)
+        self.assertEqual(args.maturity_min_days, 14)
+        self.assertEqual(args.maturity_max_days, 180)
+
     def _write_fixture_files(self, tmpdir: str):
         xlsx_path = Path(tmpdir) / "news_input.xlsx"
         result_dir = Path(tmpdir) / "result"

@@ -21,6 +21,25 @@ def _model_iv(total_var: float, business_days: int) -> float:
 
 
 class TestMergeParams(unittest.TestCase):
+    def test_parse_args_accepts_explicit_news_workbook(self):
+        args = merge_params._parse_args(
+            [
+                "--input-dir",
+                "data/processed/example",
+                "--news-xlsx",
+                "data/raw/news.xlsx",
+                "--source-timezone",
+                "UTC",
+                "--offset-minutes",
+                "15",
+            ]
+        )
+
+        self.assertEqual(args.input_dir, "data/processed/example")
+        self.assertEqual(args.news_xlsx, "data/raw/news.xlsx")
+        self.assertEqual(args.source_timezone, "UTC")
+        self.assertEqual(args.offset_minutes, 15)
+
     def _write_model_payload_fixture_files(
         self,
         tmpdir: str,

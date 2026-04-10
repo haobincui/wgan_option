@@ -1,46 +1,9 @@
-"""CPU Excel-driven surface generation entrypoint."""
+"""Compatibility shim for CPU Excel surface generation backend."""
 
-from __future__ import annotations
+from scripts.generate_surface._compat import alias_module
 
-import sys
-from pathlib import Path
-
-if __package__ in {None, ""}:
-    _ROOT_DIR = Path(__file__).resolve().parents[3]
-    if str(_ROOT_DIR) not in sys.path:
-        sys.path.insert(0, str(_ROOT_DIR))
-
-import scripts._path_setup  # noqa: F401
-from scripts.generate_surface.data_helperd.excel import (  # noqa: E402
-    _excel_time_fraction_to_hms,
-    _load_target_datetimes_from_excel,
-    _normalize_date_value,
-    _normalize_time_value,
-    _parse_args,
-    _to_utc_string,
-    run_excel_job,
-)
-from scripts.generate_surface.backend.surface_cpu.all import _process_minute  # noqa: E402
-from scripts.generate_surface.data_helperd.all import resolve_parallel_calibration_workers  # noqa: E402
-
-
-def run(args):
-    parallel_workers = resolve_parallel_calibration_workers(
-        args,
-        device="cpu",
-        data_range="excel",
-    )
-    return run_excel_job(
-        args,
-        _process_minute,
-        parallel_calibration_workers=parallel_workers,
-    )
-
-
-def main(argv=None) -> None:
-    args = _parse_args(argv)
-    run(args)
+_module = alias_module(__name__, "wgan_option.surface_generation.backend.surface_cpu.excel")
 
 
 if __name__ == "__main__":
-    main()
+    _module.main()

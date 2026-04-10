@@ -18,9 +18,11 @@ if __package__ in {None, ""}:
 
 import scripts._path_setup  # noqa: F401
 
-from scripts.generate_surface.data_helperd.excel import DEFAULT_SOURCE_TIMEZONE  # noqa: E402
-from scripts.merge_file import merge_svi  # noqa: E402
 from scripts.merge_file._merge_common import (  # noqa: E402
+    DEFAULT_DAYS_IN_YEAR as _DEFAULT_DAYS_IN_YEAR,
+    DEFAULT_NEWS_XLSX_PATH,
+    DEFAULT_OFFSET_MINUTES,
+    DEFAULT_SOURCE_TIMEZONE,
     build_surface_from_params,
     coerce_optional_numeric,
     evaluate_raw_row_against_surface,
@@ -43,10 +45,8 @@ from scripts.merge_file._merge_common import (  # noqa: E402
     write_workbook,
 )
 
-DEFAULT_NEWS_XLSX_PATH = merge_svi.DEFAULT_NEWS_XLSX_PATH
 DEFAULT_OUTPUT_NAME = "merged_params.xlsx"
-DEFAULT_OFFSET_MINUTES = merge_svi.DEFAULT_OFFSET_MINUTES
-DAYS_IN_YEAR = merge_svi.DAYS_IN_YEAR
+DAYS_IN_YEAR = _DEFAULT_DAYS_IN_YEAR
 
 AUDIT_SHEET = "news_direction_audit"
 SLICE_SHEET = "surface_slice_detail"
@@ -137,6 +137,11 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         "--input-dir",
         required=True,
         help="Directory containing surface-<model>-<data_range>.json and surface-<model>-<data_range>-precalib-points.csv.",
+    )
+    parser.add_argument(
+        "--news-xlsx",
+        default=str(DEFAULT_NEWS_XLSX_PATH),
+        help="Path to the news embedding workbook used for alignment.",
     )
     parser.add_argument(
         "--source-timezone",
@@ -466,7 +471,7 @@ def main(argv: Optional[Iterable[str]] = None) -> Path:
     input_dir = Path(args.input_dir).expanduser()
     workbook_frames = build_workbook_frames(
         input_dir,
-        news_xlsx_path=DEFAULT_NEWS_XLSX_PATH,
+        news_xlsx_path=Path(args.news_xlsx).expanduser(),
         source_timezone=str(args.source_timezone),
         offset_minutes=int(args.offset_minutes),
     )

@@ -1,47 +1,9 @@
-"""CPU datetime-window surface generation entrypoint."""
+"""Compatibility shim for CPU window surface generation backend."""
 
-from __future__ import annotations
+from scripts.generate_surface._compat import alias_module
 
-import sys
-from pathlib import Path
-
-if __package__ in {None, ""}:
-    _ROOT_DIR = Path(__file__).resolve().parents[3]
-    if str(_ROOT_DIR) not in sys.path:
-        sys.path.insert(0, str(_ROOT_DIR))
-
-import scripts._path_setup  # noqa: F401
-from scripts.generate_surface.data_helperd.window import (  # noqa: E402
-    _build_target_window_map,
-    _collect_target_datetime_tokens,
-    _extract_target_surfaces,
-    _parse_args,
-    _split_datetime_tokens,
-    _to_utc_minute_ts,
-    generate_surfaces_for_datetime_windows,
-    run_window_job,
-)
-from scripts.generate_surface.backend.surface_cpu.all import _process_minute  # noqa: E402
-from scripts.generate_surface.data_helperd.all import resolve_parallel_calibration_workers  # noqa: E402
-
-
-def run(args):
-    parallel_workers = resolve_parallel_calibration_workers(
-        args,
-        device="cpu",
-        data_range="window",
-    )
-    return run_window_job(
-        args,
-        _process_minute,
-        parallel_calibration_workers=parallel_workers,
-    )
-
-
-def main(argv=None) -> None:
-    args = _parse_args(argv)
-    run(args)
+_module = alias_module(__name__, "wgan_option.surface_generation.backend.surface_cpu.window")
 
 
 if __name__ == "__main__":
-    main()
+    _module.main()

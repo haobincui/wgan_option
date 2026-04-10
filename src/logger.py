@@ -48,6 +48,10 @@ def setup_logging(config: Optional[LoggingConfig] = None) -> logging.Logger:
     if cfg.force:
         for h in list(root.handlers):
             root.removeHandler(h)
+            try:
+                h.close()
+            except Exception:
+                pass
 
     root.setLevel(_coerce_level(cfg.level))
 
@@ -78,4 +82,3 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
     Wrapper for logging.getLogger to keep imports consistent across the repo.
     """
     return logging.getLogger(name)
-

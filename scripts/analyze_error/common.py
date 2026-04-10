@@ -11,7 +11,14 @@ import yaml
 
 import scripts._path_setup  # noqa: F401
 
-from scripts.generate_result.common import (  # noqa: E402
+from wgan_option.analysis_config import (  # noqa: E402
+    AnalysisConfig,
+    analysis_config_to_dict,
+    load_analysis_config,
+    parse_analysis_overrides,
+    save_analysis_config_yaml,
+)
+from wgan_option.postprocess_runtime import (  # noqa: E402
     VALID_SELECTION_MODES,
     VALID_SPLITS,
     add_shared_sample_selection_args,
@@ -23,13 +30,6 @@ from scripts.generate_result.common import (  # noqa: E402
     split_metadata,
     write_json,
     write_summary_csv,
-)
-from wgan_option.analysis_config import (  # noqa: E402
-    AnalysisConfig,
-    analysis_config_to_dict,
-    load_analysis_config,
-    parse_analysis_overrides,
-    save_analysis_config_yaml,
 )
 
 

@@ -9,6 +9,14 @@ from typing import Any, Dict, Iterable, Optional
 import torch
 import yaml
 from wgan_option.config_parsing import load_yaml_config_values, parse_typed_overrides
+from wgan_option.surface_grid import (
+    DEFAULT_MATURITY_BINS,
+    DEFAULT_MATURITY_MAX_DAYS,
+    DEFAULT_MATURITY_MIN_DAYS,
+    DEFAULT_MONEYNESS_MAX,
+    DEFAULT_MONEYNESS_MIN,
+    DEFAULT_STRIKE_BINS,
+)
 
 DEFAULT_VOL_RESULT_CONFIG_PATH = "configs/generate_result/vol.yaml"
 DEFAULT_SVI_RESULT_CONFIG_PATH = "configs/generate_result/svi.yaml"
@@ -46,12 +54,12 @@ class GenerateResultConfig:
     plot_style: str = "heatmap_diff"
 
     # Fixed-grid reconstruction for SVI
-    strike_bins: int = 16
-    maturity_bins: int = 16
-    moneyness_min: float = 0.7
-    moneyness_max: float = 1.3
-    maturity_min_days: int = 7
-    maturity_max_days: int = 365
+    strike_bins: int = DEFAULT_STRIKE_BINS
+    maturity_bins: int = DEFAULT_MATURITY_BINS
+    moneyness_min: float = DEFAULT_MONEYNESS_MIN
+    moneyness_max: float = DEFAULT_MONEYNESS_MAX
+    maturity_min_days: int = DEFAULT_MATURITY_MIN_DAYS
+    maturity_max_days: int = DEFAULT_MATURITY_MAX_DAYS
 
 
 def generate_result_config_to_dict(config: GenerateResultConfig) -> Dict[str, Any]:

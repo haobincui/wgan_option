@@ -15,8 +15,11 @@ import pandas as pd
 import yaml
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+SRC_DIR = ROOT_DIR / "src"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 from quantlib.calculation.analytics.position.instruments.features import OptionType  # noqa: E402
 from quantlib.calendar.daycount import DayCountBusN  # noqa: E402

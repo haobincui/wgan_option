@@ -25,6 +25,25 @@ def _model_iv(total_var: float, business_days: int) -> float:
 
 
 class TestMergeSvi(unittest.TestCase):
+    def test_parse_args_accepts_explicit_news_workbook(self):
+        args = merge_svi._parse_args(
+            [
+                "--input-dir",
+                "data/processed/example",
+                "--news-xlsx",
+                "data/raw/news.xlsx",
+                "--source-timezone",
+                "UTC",
+                "--offset-minutes",
+                "10",
+            ]
+        )
+
+        self.assertEqual(args.input_dir, "data/processed/example")
+        self.assertEqual(args.news_xlsx, "data/raw/news.xlsx")
+        self.assertEqual(args.source_timezone, "UTC")
+        self.assertEqual(args.offset_minutes, 10)
+
     def _write_fixture_files(self, tmpdir: str):
         xlsx_path = Path(tmpdir) / "news_input.xlsx"
         result_dir = Path(tmpdir) / "result"
