@@ -179,7 +179,7 @@ class ShortRateModelCalibrationer:
                    bond_Ts: List[float],
                    market_quote_bond_option_prices: List[float],
                    option_type: OptionType = OptionType.PUT) -> Tuple:
-        """
+        r"""
         r(t) = x(t) + y(t),
         dx(t) = - ax(t) + \sigma dW_1(t),
         dy(t) = -by(t) + \eta dW_2(t),

@@ -7,7 +7,7 @@ from quantlib.calendar.holidays import HolidayCalendar
 
 @dataclass()
 class ImpliedDistribution:
-    """
+    r"""
     implied distribution = \partial^2 C / \partial K^2 for a \tau
     """
     underlying_id: str
@@ -72,7 +72,6 @@ class ImpliedDistributionByTenor(ImpliedDistribution):
     def get_implied_probability_by_spot(self, spot: float, strike: float, r: float, q: float,
                                         expiration_date: date) -> float:
         pass
-
 
 
 

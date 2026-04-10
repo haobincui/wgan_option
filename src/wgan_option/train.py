@@ -50,6 +50,14 @@ class WGANTrainer:
         save_config_yaml(self.config, str(output_path))
         self.logger.info("Resolved config saved to: %s", output_path)
 
+    def _ensure_samples_dir(self):
+        """Create the optional samples scaffold without eagerly creating other artifact folders."""
+        if self.run_dir is None:
+            return
+        samples_path = str(self.config.samples_path).strip()
+        if samples_path:
+            Path(samples_path).mkdir(parents=True, exist_ok=True)
+
     def _log_device_info(self):
         """Log compute device information."""
         import torch
@@ -94,6 +102,7 @@ class WGANTrainer:
         """Execute full training run."""
         if self.run_dir is not None:
             self.logger.info("Training artifacts will be written under: %s", self.run_dir)
+        self._ensure_samples_dir()
         self.setup()
         self._save_run_config()
         self.logger.info("*** Start training: %s epochs, batch_size=%s, lr=%s ***",
@@ -107,6 +116,7 @@ class WGANTrainer:
         """Run setup and config snapshot without fitting the model."""
         if self.run_dir is not None:
             self.logger.info("Training artifacts will be written under: %s", self.run_dir)
+        self._ensure_samples_dir()
         self.setup()
         self._save_run_config()
         self.logger.info("Dry run finished. Training was not started.")

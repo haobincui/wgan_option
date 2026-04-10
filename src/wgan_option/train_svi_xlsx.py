@@ -62,6 +62,13 @@ class SviXlsxTrainer:
         save_config_yaml(self.config, str(output_path))
         self.logger.info("Resolved config saved to: %s", output_path)
 
+    def _ensure_samples_dir(self):
+        if self.run_dir is None:
+            return
+        samples_path = str(self.config.samples_path).strip()
+        if samples_path:
+            Path(samples_path).mkdir(parents=True, exist_ok=True)
+
     def _save_normalization_stats(self):
         assert self.bundle is not None
         output_path = self.config.normalization_stats_path
@@ -276,6 +283,7 @@ class SviXlsxTrainer:
     def start_train(self):
         if self.run_dir is not None:
             self.logger.info("Training artifacts will be written under: %s", self.run_dir)
+        self._ensure_samples_dir()
         self.setup()
         self._save_run_config()
         assert self.bundle is not None
@@ -415,6 +423,7 @@ class SviXlsxTrainer:
     def dry_run(self):
         if self.run_dir is not None:
             self.logger.info("Training artifacts will be written under: %s", self.run_dir)
+        self._ensure_samples_dir()
         self.setup()
         self._save_run_config()
         self.logger.info("Dry run finished. Training was not started.")

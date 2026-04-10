@@ -490,6 +490,44 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
         self.assertNotEqual(anchored[0].tau, unanchored[0].tau)
         self.assertEqual(anchored[0].business_days, anchored[1].business_days)
 
+    def test_prepare_option_candidates_uses_ty_underlying_future_month_in_window_mode(self):
+        anchor_ts = pd.Timestamp("2022-02-08T15:02:00Z")
+        option_rows = [
+            MinuteTradeRow(
+                trade_ts=pd.Timestamp("2022-02-08T15:02:19.094316781Z"),
+                meta=ContractMeta(
+                    contract_type="option",
+                    underlying="TY",
+                    maturity_month_code="F",
+                    strike=119.5,
+                    option_type=OptionType.CALL,
+                    expiry_date=date(2022, 6, 30),
+                    expiry_dt_utc=pd.Timestamp("2022-06-30T20:00:00Z").to_pydatetime(warn=False),
+                    contract_id="TY1195F2",
+                ),
+                price=6.984375,
+                volume=1.0,
+            )
+        ]
+
+        _, candidates = _prepare_option_candidates(
+            minute_ts=anchor_ts,
+            option_rows=option_rows,
+            minute_spot={
+                ("TY", "H"): 126.52635324112379,
+                ("TY", "M"): 126.390625,
+            },
+            last_spot_by_key={},
+            target_future_month_code="H",
+            vol_daycount=self._vol_daycount(),
+            calendar=usd_calendar(),
+            stats=defaultdict(int),
+            tau_anchor_ts=anchor_ts,
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertAlmostEqual(candidates[0].spot, 126.390625, places=12)
+
     def test_filter_files_for_target_windows_keeps_only_overlapping_month_files(self):
         window_map = window_common._build_target_window_map(
             [pd.Timestamp("2022-01-27T09:24:00Z")],

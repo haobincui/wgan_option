@@ -80,20 +80,6 @@ def _validate_shared_root(root_candidates: Iterable[tuple[str, Path]]) -> Path:
     return shared_root
 
 
-def _create_training_output_directories(
-    config: Config,
-    *,
-    include_normalization_stats: bool,
-) -> None:
-    for field_name in _DIRECTORY_FIELDS:
-        raw_value = str(getattr(config, field_name)).strip()
-        if raw_value:
-            Path(raw_value).mkdir(parents=True, exist_ok=True)
-
-    if include_normalization_stats and str(config.normalization_stats_path).strip():
-        Path(config.normalization_stats_path).parent.mkdir(parents=True, exist_ok=True)
-
-
 def _infer_training_group_from_data_path(data_path_value: str) -> str | None:
     data_path = Path(str(data_path_value).strip())
     if not str(data_path):
@@ -144,10 +130,6 @@ def prepare_timestamped_training_config(
         run_dir = Path(output_root) / timestamp
         updates = derive_training_output_paths(str(run_dir))
         resolved_config = replace(config, **updates)
-        _create_training_output_directories(
-            resolved_config,
-            include_normalization_stats=include_normalization_stats,
-        )
         return resolved_config, run_dir
 
     inferred_group = _infer_training_group_from_data_path(config.data_path)
@@ -159,10 +141,6 @@ def prepare_timestamped_training_config(
             config,
             output_root=str(base_root),
             **updates,
-        )
-        _create_training_output_directories(
-            resolved_config,
-            include_normalization_stats=include_normalization_stats,
         )
         return resolved_config, run_dir
 
@@ -191,8 +169,4 @@ def prepare_timestamped_training_config(
         updates["normalization_stats_path"] = str(run_dir / relative_tail)
 
     resolved_config = replace(config, **updates)
-    _create_training_output_directories(
-        resolved_config,
-        include_normalization_stats=include_normalization_stats,
-    )
     return resolved_config, run_dir

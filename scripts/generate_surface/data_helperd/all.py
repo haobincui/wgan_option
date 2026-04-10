@@ -39,6 +39,7 @@ from market_data.contract_handler.utils import ContractTerminationRule  # noqa: 
 from market_data.dto.tradedata_do import TradeDataDO  # noqa: E402
 from quantlib.calendar.daycount import DayCountBusN  # noqa: E402
 from quantlib.calendar.holidays import usd_calendar  # noqa: E402
+from quantlib.calendar.utils import month_map, option_maturity_month_map  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -614,6 +615,43 @@ def _make_spot_cache_key(underlying: str, target_future_month_code: Optional[str
     return underlying, (target_future_month_code or "").upper()
 
 
+def _get_ty_option_underlying_future_month_code(
+    option_month_code: Optional[str] = None,
+    expiry_date: Optional[date] = None,
+) -> Optional[str]:
+    normalized_option_month = str(option_month_code or "").strip().upper()
+    if normalized_option_month:
+        month_name = option_maturity_month_map.get(normalized_option_month)
+        if month_name:
+            calendar_month = month_map.get(month_name)
+            if calendar_month is not None:
+                return _get_target_future_month_code(int(calendar_month))
+
+    if expiry_date is not None:
+        return _get_target_future_month_code(int(expiry_date.month))
+
+    return None
+
+
+def _resolve_option_target_future_month_code(
+    meta: ContractMeta,
+    fallback_target_future_month_code: Optional[str],
+) -> str:
+    normalized_fallback = (fallback_target_future_month_code or "").upper()
+    if meta.contract_type != "option":
+        return normalized_fallback
+
+    if str(meta.underlying or "").upper() == "TY":
+        resolved = _get_ty_option_underlying_future_month_code(
+            option_month_code=meta.maturity_month_code,
+            expiry_date=meta.expiry_date,
+        )
+        if resolved:
+            return resolved
+
+    return normalized_fallback
+
+
 def _build_contract_meta(
     trade_do: TradeDataDO,
     expiry_inference_date: date,
@@ -640,6 +678,7 @@ def _build_contract_meta(
         return ContractMeta(
             contract_type="option",
             underlying=contract.get_underlying(),
+            maturity_month_code=contract.get_maturity_month_code(),
             strike=float(contract.get_strike()),
             option_type=contract.get_option_type(),
             expiry_date=expiry_date,
@@ -680,13 +719,19 @@ def _collect_spot_and_option_rows(
         if meta.contract_type == "future":
             if stats is not None:
                 stats["future_rows"] += 1
-            if normalized_target_month and meta.maturity_month_code != normalized_target_month:
+            future_month_code = (meta.maturity_month_code or "").upper()
+            if (
+                normalized_target_month
+                and str(meta.underlying or "").upper() != "TY"
+                and future_month_code
+                and future_month_code != normalized_target_month
+            ):
                 if stats is not None:
                     stats["skip_future_non_target_month"] += 1
                 continue
             spot_key = _make_spot_cache_key(
                 underlying=meta.underlying,
-                target_future_month_code=normalized_target_month or meta.maturity_month_code,
+                target_future_month_code=future_month_code or normalized_target_month,
             )
             fut_sum[spot_key] += row.price * row.volume
             fut_vol[spot_key] += row.volume
@@ -741,7 +786,6 @@ def _prepare_option_candidates(
     stats: Dict[str, int],
     tau_anchor_ts: Optional[pd.Timestamp] = None,
 ) -> Tuple[date, List[MinuteOptionCandidate]]:
-    normalized_target_month = (target_future_month_code or "").upper()
     minute_ts_utc = _to_utc_timestamp(minute_ts)
     valuation_date = minute_ts_utc.date()
 
@@ -750,7 +794,11 @@ def _prepare_option_candidates(
         meta = row.meta
         assert meta.contract_type == "option"
 
-        spot_key = _make_spot_cache_key(meta.underlying, normalized_target_month)
+        spot_month_code = _resolve_option_target_future_month_code(
+            meta,
+            fallback_target_future_month_code=target_future_month_code,
+        )
+        spot_key = _make_spot_cache_key(meta.underlying, spot_month_code)
         spot = minute_spot.get(spot_key, last_spot_by_key.get(spot_key))
         if spot is None or not math.isfinite(spot) or spot <= 0:
             stats["skip_no_spot"] += 1

@@ -79,8 +79,6 @@ class WGAN_GP:
 
         self.model_path = config.models_path
         self.metrics_path = config.metrics_path
-        os.makedirs(self.model_path, exist_ok=True)
-        os.makedirs(self.metrics_path, exist_ok=True)
 
         self._set_seed(config.seed)
 
@@ -299,6 +297,7 @@ class WGAN_GP:
     def save_model(self, epoch: Optional[int] = None, *, label: Optional[str] = None) -> Dict[str, str]:
         if epoch is not None and label is not None:
             raise ValueError("Specify either epoch or label when saving a model, not both.")
+        os.makedirs(self.model_path, exist_ok=True)
 
         suffix = ""
         if label:

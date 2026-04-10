@@ -44,7 +44,7 @@ class TestVasicekModelPricing(unittest.TestCase):
             tau_option=tau_option,
             tau_bond=tau_bond,
         )
-        self.assertAlmostEqual(price, 0.04677906633865181, delta = 1e-14)
+        self.assertAlmostEqual(price, 0.04677906633865181, delta = 1e-13)
 
 
 

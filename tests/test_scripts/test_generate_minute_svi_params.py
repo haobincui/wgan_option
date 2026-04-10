@@ -14,11 +14,16 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from quantlib.calculation.analytics.position.instruments.features import OptionType  # noqa: E402
+from quantlib.calculation.analytics.models.analytical.equity.formula import (  # noqa: E402
+    black_scholes_implied_vol,
+)
 from quantlib.calendar.daycount import DayCountBusN  # noqa: E402
 from quantlib.calendar.holidays import usd_calendar  # noqa: E402
 from scripts.generate_surface.data_helperd.all import (  # noqa: E402
     DEFAULT_EXPIRATION_TIME_UTC,
     DEFAULT_MAX_PRECALIB_IV,
+    _get_ty_option_underlying_future_month_code,
+    _prepare_option_candidates,
 )
 from scripts.generate_surface.backend.surface_cpu.all import (  # noqa: E402
     ContractMeta,
@@ -79,14 +84,54 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         )
         self.assertEqual(_get_file_target_future_month_code(path), "Z")
 
-    def test_collect_minute_spot_uses_target_future_month_only(self):
+    def test_ty_option_underlying_future_month_mapping_covers_all_months(self):
+        expected = {
+            "A": "H",
+            "M": "H",
+            "B": "H",
+            "N": "H",
+            "C": "H",
+            "O": "H",
+            "D": "M",
+            "P": "M",
+            "E": "M",
+            "Q": "M",
+            "F": "M",
+            "R": "M",
+            "G": "U",
+            "S": "U",
+            "H": "U",
+            "T": "U",
+            "I": "U",
+            "U": "U",
+            "J": "Z",
+            "V": "Z",
+            "K": "Z",
+            "W": "Z",
+            "L": "Z",
+            "X": "Z",
+        }
+
+        for option_month_code, future_month_code in expected.items():
+            with self.subTest(option_month_code=option_month_code):
+                self.assertEqual(
+                    _get_ty_option_underlying_future_month_code(option_month_code=option_month_code),
+                    future_month_code,
+                )
+
+        self.assertEqual(
+            _get_ty_option_underlying_future_month_code(expiry_date=date(2022, 6, 30)),
+            "M",
+        )
+
+    def test_collect_minute_spot_keeps_non_ty_fallback_filter(self):
         minute = pd.Timestamp("2025-11-14T18:03:00Z")
         rows = [
             MinuteTradeRow(
                 trade_ts=minute,
                 meta=ContractMeta(
                     contract_type="future",
-                    underlying="TY",
+                    underlying="FV",
                     maturity_month_code="Z",
                 ),
                 price=112.60,
@@ -96,7 +141,7 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
                 trade_ts=minute,
                 meta=ContractMeta(
                     contract_type="future",
-                    underlying="TY",
+                    underlying="FV",
                     maturity_month_code="H",
                 ),
                 price=112.50,
@@ -106,7 +151,7 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
                 trade_ts=minute,
                 meta=ContractMeta(
                     contract_type="option",
-                    underlying="TY",
+                    underlying="FV",
                     strike=110.0,
                 ),
                 price=0.328125,
@@ -123,12 +168,128 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
             stats=stats,
         )
 
-        self.assertEqual(minute_spot, {("TY", "Z"): 112.60})
-        self.assertEqual(last_spot_by_key, {("TY", "Z"): 112.60})
+        self.assertEqual(minute_spot, {("FV", "Z"): 112.60})
+        self.assertEqual(last_spot_by_key, {("FV", "Z"): 112.60})
         self.assertEqual(len(option_rows), 1)
         self.assertEqual(stats["future_rows"], 2)
         self.assertEqual(stats["skip_future_non_target_month"], 1)
         self.assertEqual(stats["option_rows"], 1)
+
+    def test_prepare_option_candidates_uses_ty_option_expiry_month_mapping(self):
+        minute_ts = pd.Timestamp("2022-02-08T15:02:00Z")
+        option_rows = [
+            MinuteTradeRow(
+                trade_ts=pd.Timestamp("2022-02-08T15:02:19.094316781Z"),
+                meta=ContractMeta(
+                    contract_type="option",
+                    underlying="TY",
+                    maturity_month_code="F",
+                    strike=119.5,
+                    option_type=OptionType.CALL,
+                    expiry_date=date(2022, 6, 30),
+                    expiry_dt_utc=pd.Timestamp("2022-06-30T20:00:00Z").to_pydatetime(warn=False),
+                    contract_id="TY1195F2",
+                ),
+                price=6.984375,
+                volume=1.0,
+            )
+        ]
+
+        _, candidates = _prepare_option_candidates(
+            minute_ts=minute_ts,
+            option_rows=option_rows,
+            minute_spot={
+                ("TY", "H"): 126.52317731522707,
+                ("TY", "M"): 126.390625,
+            },
+            last_spot_by_key={},
+            target_future_month_code="H",
+            vol_daycount=self._vol_daycount(),
+            calendar=usd_calendar(),
+            stats=defaultdict(int),
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertAlmostEqual(candidates[0].spot, 126.390625, places=12)
+
+    def test_ty1195f2_uses_tym2_even_when_file_fallback_month_is_h(self):
+        minute_ts = pd.Timestamp("2022-02-08T15:02:00Z")
+        rows = [
+            MinuteTradeRow(
+                trade_ts=minute_ts,
+                meta=ContractMeta(
+                    contract_type="future",
+                    underlying="TY",
+                    maturity_month_code="H",
+                    contract_id="TYH2",
+                ),
+                price=126.52317731522707,
+                volume=10.0,
+            ),
+            MinuteTradeRow(
+                trade_ts=minute_ts,
+                meta=ContractMeta(
+                    contract_type="future",
+                    underlying="TY",
+                    maturity_month_code="M",
+                    contract_id="TYM2",
+                ),
+                price=126.390625,
+                volume=13.0,
+            ),
+            MinuteTradeRow(
+                trade_ts=pd.Timestamp("2022-02-08T15:02:19.094316781Z"),
+                meta=ContractMeta(
+                    contract_type="option",
+                    underlying="TY",
+                    maturity_month_code="F",
+                    strike=119.5,
+                    option_type=OptionType.CALL,
+                    expiry_date=date(2022, 6, 30),
+                    expiry_dt_utc=pd.Timestamp("2022-06-30T20:00:00Z").to_pydatetime(warn=False),
+                    contract_id="TY1195F2",
+                ),
+                price=6.984375,
+                volume=1.0,
+            ),
+        ]
+
+        minute_spot, option_rows = _collect_minute_spot(
+            rows=rows,
+            target_future_month_code="H",
+            last_spot_by_key={},
+            stats=defaultdict(int),
+        )
+        _, candidates = _prepare_option_candidates(
+            minute_ts=minute_ts,
+            option_rows=option_rows,
+            minute_spot=minute_spot,
+            last_spot_by_key={},
+            target_future_month_code="H",
+            vol_daycount=self._vol_daycount(),
+            calendar=usd_calendar(),
+            stats=defaultdict(int),
+        )
+
+        self.assertEqual(minute_spot[("TY", "H")], 126.52317731522707)
+        self.assertEqual(minute_spot[("TY", "M")], 126.390625)
+        self.assertEqual(len(candidates), 1)
+        self.assertAlmostEqual(candidates[0].spot, 126.390625, places=12)
+
+    def test_ty1195f2_with_corrected_underlying_future_has_finite_implied_vol(self):
+        implied_vol = black_scholes_implied_vol(
+            price=6.984375,
+            strike=119.5,
+            option_type=OptionType.CALL,
+            spot=126.390625,
+            tau=99.0 / 250.0,
+            r=0.0,
+            q=0.0,
+        )
+
+        self.assertTrue(implied_vol > 0.0)
+        self.assertLess(implied_vol, 3.0)
+        self.assertAlmostEqual(implied_vol, 0.054929327695134575, places=12)
 
     def test_tau_years_from_trade_to_expiry_uses_exact_timestamp(self):
         vol_daycount = self._vol_daycount()

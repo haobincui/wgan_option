@@ -414,6 +414,22 @@ class TestTrainMergedXlsx(unittest.TestCase):
             self.assertEqual(resolved_config.models_path, str(run_dir / "checkpoints"))
             self.assertEqual(resolved_config.metrics_path, str(run_dir / "metrics"))
 
+    def test_prepare_timestamped_training_config_does_not_eagerly_create_artifact_dirs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "training" / "vol_xlsx"
+            config = Config(
+                data_path="data/example.xlsx",
+                sheet_name="gan_input_ready",
+                output_root=str(output_root),
+            )
+
+            resolved_config, run_dir = prepare_timestamped_training_config(config)
+
+            self.assertFalse(run_dir.exists())
+            self.assertFalse(Path(resolved_config.models_path).exists())
+            self.assertFalse(Path(resolved_config.metrics_path).exists())
+            self.assertFalse(Path(resolved_config.samples_path).exists())
+
     def test_load_config_derives_training_paths_from_output_root(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "train_vol_output_root.yaml"
@@ -491,6 +507,35 @@ class TestTrainMergedXlsx(unittest.TestCase):
         self.assertAlmostEqual(stats["g_smooth"], 3.0, places=6)
         expected_total = stats["g_adv"] + config.lambda_butterfly * stats["g_butterfly"]
         self.assertAlmostEqual(stats["g_total"], expected_total, places=6)
+
+    def test_wgan_initialization_does_not_eagerly_create_artifact_dirs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoints_dir = Path(tmpdir) / "training" / "checkpoints"
+            metrics_dir = Path(tmpdir) / "training" / "metrics"
+            config = Config(
+                cuda=False,
+                learning_rate=0.0,
+                noise_dim=4,
+                gen_hidden_dim=8,
+                disc_hidden_dim=8,
+                models_path=str(checkpoints_dir),
+                outputs_path=str(checkpoints_dir),
+                metrics_path=str(metrics_dir),
+            )
+
+            model = _build_test_wgan(config)
+
+            self.assertFalse(checkpoints_dir.exists())
+            self.assertFalse(metrics_dir.exists())
+
+            model._generator_step(
+                current_surface=torch.zeros((1, 1, 2, 2), device=model.device),
+                text_embedding=torch.zeros((1, 2), device=model.device),
+                real_future=torch.zeros((1, 1, 2, 2), device=model.device),
+            )
+
+            self.assertFalse(checkpoints_dir.exists())
+            self.assertFalse(metrics_dir.exists())
 
     def test_train_vol_script_dry_run_succeeds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -682,8 +727,9 @@ class TestTrainMergedXlsx(unittest.TestCase):
 
     def test_wgan_early_stopping_saves_best_checkpoint_before_last_epoch(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            metrics_dir = Path(tmpdir) / "metrics"
-            models_dir = Path(tmpdir) / "models"
+            run_dir = Path(tmpdir) / "training" / "vol_xlsx" / "20260410_010101"
+            metrics_dir = run_dir / "metrics"
+            models_dir = run_dir / "checkpoints"
             config = Config(
                 cuda=False,
                 learning_rate=0.1,
@@ -741,8 +787,9 @@ class TestTrainMergedXlsx(unittest.TestCase):
 
     def test_wgan_training_without_validation_skips_best_checkpoint_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            metrics_dir = Path(tmpdir) / "metrics"
-            models_dir = Path(tmpdir) / "models"
+            run_dir = Path(tmpdir) / "training" / "vol_xlsx" / "20260410_010102"
+            metrics_dir = run_dir / "metrics"
+            models_dir = run_dir / "checkpoints"
             config = Config(
                 cuda=False,
                 learning_rate=0.1,
@@ -781,8 +828,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
     def test_svi_early_stopping_saves_best_checkpoint_before_last_epoch(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_svi_workbook(tmpdir)
-            metrics_dir = Path(tmpdir) / "metrics"
-            models_dir = Path(tmpdir) / "models"
+            output_root = Path(tmpdir) / "training" / "svi_xlsx"
             config = Config(
                 data_path=str(workbook_path),
                 sheet_name="news_direction_audit",
@@ -795,10 +841,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
                 cuda=False,
                 max_slices=4,
                 svi_hidden_dim=16,
-                models_path=str(models_dir),
-                outputs_path=str(models_dir),
-                metrics_path=str(metrics_dir),
-                normalization_stats_path=str(metrics_dir / "normalization_stats.json"),
+                output_root=str(output_root),
                 use_early_stopping=True,
                 early_stopping_patience=2,
                 early_stopping_min_delta=0.0,
@@ -821,11 +864,13 @@ class TestTrainMergedXlsx(unittest.TestCase):
 
             trainer.start_train()
 
-            run_dir = self._find_only_run_dir(Path(tmpdir))
+            run_dir = self._find_only_run_dir(output_root)
             metrics_dir = run_dir / "metrics"
-            models_dir = run_dir / "models"
+            models_dir = run_dir / "checkpoints"
+            samples_dir = run_dir / "samples"
             metrics_rows = json.loads((metrics_dir / "training_metrics.json").read_text(encoding="utf-8"))
             self.assertEqual(len(metrics_rows), 3)
+            self.assertTrue(samples_dir.exists())
             self.assertAlmostEqual(metrics_rows[0]["lr"], 0.1, places=6)
             self.assertAlmostEqual(metrics_rows[2]["lr"], 0.05, places=6)
             with (metrics_dir / "training_metrics.csv").open(encoding="utf-8", newline="") as handle:
@@ -843,8 +888,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
     def test_svi_training_without_validation_skips_best_checkpoint_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_svi_workbook(tmpdir)
-            metrics_dir = Path(tmpdir) / "metrics"
-            models_dir = Path(tmpdir) / "models"
+            output_root = Path(tmpdir) / "training" / "svi_xlsx"
             config = Config(
                 data_path=str(workbook_path),
                 sheet_name="news_direction_audit",
@@ -857,10 +901,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
                 cuda=False,
                 max_slices=4,
                 svi_hidden_dim=16,
-                models_path=str(models_dir),
-                outputs_path=str(models_dir),
-                metrics_path=str(metrics_dir),
-                normalization_stats_path=str(metrics_dir / "normalization_stats.json"),
+                output_root=str(output_root),
                 use_early_stopping=True,
                 early_stopping_patience=1,
                 use_reduce_lr_on_plateau=True,
@@ -872,11 +913,13 @@ class TestTrainMergedXlsx(unittest.TestCase):
 
             trainer.start_train()
 
-            run_dir = self._find_only_run_dir(Path(tmpdir))
+            run_dir = self._find_only_run_dir(output_root)
             metrics_dir = run_dir / "metrics"
-            models_dir = run_dir / "models"
+            models_dir = run_dir / "checkpoints"
+            samples_dir = run_dir / "samples"
             metrics_rows = json.loads((metrics_dir / "training_metrics.json").read_text(encoding="utf-8"))
             self.assertEqual(len(metrics_rows), 2)
+            self.assertTrue(samples_dir.exists())
             self.assertTrue((metrics_dir / "training_metrics.csv").exists())
             self.assertTrue(all(abs(row["lr"] - 0.1) < 1e-9 for row in metrics_rows))
             self.assertFalse((metrics_dir / "best_checkpoint.json").exists())

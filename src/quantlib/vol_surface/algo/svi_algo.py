@@ -399,7 +399,7 @@ class SviCalibrationGatheral(SviCalibration):
 
 def _quasi_explicit_function(y: np.array, implied_vars: np.array, sigma: float) -> Tuple[
     float, float, float]:
-    """
+    r"""
     quasi_explicit function: var = a + d * y + c * z
     var = a + \sqrt(2) / 2 * (d - c) * (y + z) + \sqrt(2) / 2 * (d + c) * (- y + z)
     a_star = a; d_star = \sqrt(2) / 2 * (d - c); c_star = \sqrt(2) / 2 * (d + c)

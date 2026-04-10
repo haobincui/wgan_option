@@ -159,7 +159,7 @@ def black_scholes_implied_vol(price: float, strike: float, option_type: OptionTy
 
 
 def _norm_cdf(x, device):
-    """
+    r"""
     standard normal cumulative distribution function:
     \frac{1}{2} (1 + \text{erf}(\frac{x}{\sqrt{2}}))
     """
@@ -167,7 +167,7 @@ def _norm_cdf(x, device):
 
 
 def _norm_pdf(x, device):
-    """
+    r"""
     standard normal probability density function:
     \frac{1}{\sigma \sqrt{2\pi}} e^{-\frac{1}{2}(\frac{x-\mu}{\sigma})^2}
     """

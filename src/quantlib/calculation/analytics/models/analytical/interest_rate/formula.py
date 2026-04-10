@@ -151,8 +151,8 @@ def _cir_b(k, theta, sigma, h, tau):
 
 def _cir_validator(k, theta, sigma):
     if 2 * k * theta <= sigma * sigma:
-        raise ValueError(f'2 k \theta > \sigma^2 for cir model, '
-                         f'current k [{k}], \theta [{theta}], and \sigma [{sigma}]')
+        raise ValueError(f'2 k \\theta > \\sigma^2 for cir model, '
+                         f'current k [{k}], \\theta [{theta}], and \\sigma [{sigma}]')
 
 
 def cir_bond_price(long_term_rate: float, mean_revert_speed: float,
@@ -380,7 +380,7 @@ def gaussian_2_bond_price(mean_revert_speed_x: float, sigma_x: float,
                           tau_bond: float,
                           initial_x_t: float,
                           initial_y_t: float):
-    """
+    r"""
     r(t) = x(t) + y(t),
     dx(t) = -ax(t) + \sigma dW_1 (t),
     dy(t) = -by(t) + \eta dW_2 (t),
