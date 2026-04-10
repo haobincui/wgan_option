@@ -9,11 +9,14 @@ from unittest.mock import patch
 import pandas as pd
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+SRC_DIR = ROOT_DIR / "src"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 from scripts.merge_file import merge_svi  # noqa: E402
-from scripts.merge_file._merge_common import (  # noqa: E402
+from wgan_option.merge_support import (  # noqa: E402
     resolve_surface_csv_path,
     resolve_surface_json_path,
     resolve_surface_resolved_config_path,

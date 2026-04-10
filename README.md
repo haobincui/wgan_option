@@ -227,3 +227,27 @@ Training diagnostics and model notes:
 - The merged vol workflow is currently the closest executable path to the thesis-facing current-surface -> future-surface forecasting setup.
 - The merged SVI workflow is a paired forecasting implementation, even though the source workbook remains direction-oriented.
 - The script families under `scripts/` are intentionally thin wrappers around reusable logic in `src/`.
+
+
+
+run raw vol 
+```shell
+python -m pip install -e .
+
+python scripts/generate_surface/main.py generate_surface \
+  --device gpu \
+  --config configs/surface_builder/raw/generate_surface-raw-excel-pipeline.yaml
+
+python scripts/merge_file/merge_vol.py \
+  --input-dir data/processed/raw-excel/20260410-raw-01
+
+# python scripts/train/main.py vol-xlsx \
+#   --config configs/wgan/train_vol_xlsx_24gb_raw_lp_aggressive_es.yaml
+
+python scripts/train/main.py vol-xlsx \
+  --config configs/wgan/train_vol_xlsx_24gb_raw_lp_aggressive_es_noconta.yaml
+
+
+python scripts/generate_result/main.py vol \
+  --config configs/generate_result/vol-raw-lp.yaml
+```

@@ -18,7 +18,7 @@ if __package__ in {None, ""}:
 
 import scripts._path_setup  # noqa: F401
 
-from scripts.merge_file._merge_common import (  # noqa: E402
+from wgan_option.merge_support import (  # noqa: E402
     DEFAULT_DAYS_IN_YEAR as _DEFAULT_DAYS_IN_YEAR,
     DEFAULT_NEWS_XLSX_PATH,
     DEFAULT_OFFSET_MINUTES,

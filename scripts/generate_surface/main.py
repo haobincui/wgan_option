@@ -13,28 +13,28 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(_ROOT_DIR))
 
 import scripts._path_setup  # noqa: F401
-from scripts.generate_surface.common.config_utils import (
+from wgan_option.surface_generation.common.config_utils import (
     load_surface_builder_root,
     resolve_config_path as _resolve_config_path,
 )
-from scripts.generate_surface.dispatch import ensure_cuda_available, extract_device_arg  # noqa: E402
-from scripts.generate_surface.data_helperd.all import (  # noqa: E402
+from wgan_option.surface_generation.dispatch import ensure_cuda_available, extract_device_arg  # noqa: E402
+from wgan_option.surface_generation.data_helperd.all import (  # noqa: E402
     DEFAULT_CONFIG_PATH,
     DEFAULT_DATA_RANGE,
     SUPPORTED_DATA_RANGES,
 )
-from scripts.generate_surface.backend.surface_cpu.all import main as cpu_minute_main  # noqa: E402
-from scripts.generate_surface.backend.surface_cpu.window import (  # noqa: E402
+from wgan_option.surface_generation.backend.surface_cpu.all import main as cpu_minute_main  # noqa: E402
+from wgan_option.surface_generation.backend.surface_cpu.window import (  # noqa: E402
     main as cpu_window_main,
 )
-from scripts.generate_surface.backend.surface_cpu.excel import (  # noqa: E402
+from wgan_option.surface_generation.backend.surface_cpu.excel import (  # noqa: E402
     main as cpu_excel_main,
 )
-from scripts.generate_surface.backend.surface_gpu.all import main as gpu_minute_main  # noqa: E402
-from scripts.generate_surface.backend.surface_gpu.window import (  # noqa: E402
+from wgan_option.surface_generation.backend.surface_gpu.all import main as gpu_minute_main  # noqa: E402
+from wgan_option.surface_generation.backend.surface_gpu.window import (  # noqa: E402
     main as gpu_window_main,
 )
-from scripts.generate_surface.backend.surface_gpu.excel import (  # noqa: E402
+from wgan_option.surface_generation.backend.surface_gpu.excel import (  # noqa: E402
     main as gpu_excel_main,
 )
 

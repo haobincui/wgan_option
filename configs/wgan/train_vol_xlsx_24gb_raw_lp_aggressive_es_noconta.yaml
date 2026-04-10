@@ -1,5 +1,5 @@
 # Data
-data_path: data/processed/svi-excel/20260410-174929/merged_vol.xlsx
+data_path: data/processed/raw-excel/20260410-raw-01/merged_vol.xlsx
 sheet_name: gan_input_ready
 text_embedding_mode: lp
 train_ratio: 0.8
@@ -36,9 +36,9 @@ lambda_recon: 10.0
 lambda_calendar: 2.0
 lambda_butterfly: 2.0
 lambda_smooth: 0.1
-use_calendar_constraint: true
-use_butterfly_constraint: true
-use_smooth_constraint: true
+use_calendar_constraint: false
+use_butterfly_constraint: false
+use_smooth_constraint: false
 
 # Runtime
 seed: 42

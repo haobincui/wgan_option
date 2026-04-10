@@ -20,7 +20,10 @@ if str(ROOT_DIR) not in sys.path:
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from scripts.generate_result.common import resolve_checkpoint_path, select_samples_from_split  # noqa: E402
+from wgan_option.generate_result_runtime import (  # noqa: E402
+    resolve_checkpoint_path,
+    select_samples_from_split,
+)
 from wgan_option.config import Config  # noqa: E402
 from wgan_option.models.generator import Generator  # noqa: E402
 from wgan_option.models.svi_regressor import SviRegressor  # noqa: E402

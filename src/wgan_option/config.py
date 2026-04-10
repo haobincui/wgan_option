@@ -80,6 +80,7 @@ class Config:
     use_calendar_constraint: bool = True
     use_butterfly_constraint: bool = True
     use_smooth_constraint: bool = True
+    constraint_warmup_epochs: int = 0
     count_loss_weight: float = 0.2
 
     # Runtime

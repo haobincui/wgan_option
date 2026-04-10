@@ -1,4 +1,4 @@
-"""Result-generation CLI helpers plus compatibility re-exports."""
+"""Result-generation CLI helpers that used to live under ``scripts/``."""
 
 from __future__ import annotations
 
@@ -8,9 +8,7 @@ from typing import Iterable, Optional
 
 import yaml
 
-import scripts._path_setup  # noqa: F401
-
-from wgan_option.postprocess_runtime import (  # noqa: E402
+from wgan_option.postprocess_runtime import (
     VALID_SELECTION_MODES,
     VALID_SPLITS,
     add_shared_sample_selection_args,
@@ -26,7 +24,7 @@ from wgan_option.postprocess_runtime import (  # noqa: E402
     write_json,
     write_summary_csv,
 )
-from wgan_option.result_config import (  # noqa: E402
+from wgan_option.result_config import (
     DEFAULT_SVI_RESULT_CONFIG_PATH,
     DEFAULT_VOL_RESULT_CONFIG_PATH,
     GenerateResultConfig,
@@ -38,7 +36,7 @@ from wgan_option.result_config import (  # noqa: E402
 
 
 def build_result_arg_parser(*, description: str, default_config_path: str) -> argparse.ArgumentParser:
-    """Create a standard result-generation parser."""
+    """Create the standard result-generation parser."""
 
     parser = argparse.ArgumentParser(description=description)
     add_shared_sample_selection_args(parser, default_config_path=default_config_path)

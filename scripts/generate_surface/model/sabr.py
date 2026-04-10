@@ -1,5 +1,0 @@
-"""Compatibility shim for SABR surface builder."""
-
-from scripts.generate_surface._compat import alias_module
-
-alias_module(__name__, "wgan_option.surface_generation.model.sabr")

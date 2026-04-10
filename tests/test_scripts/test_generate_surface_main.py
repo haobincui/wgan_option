@@ -7,15 +7,18 @@ from unittest.mock import Mock, patch
 import torch
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+SRC_DIR = ROOT_DIR / "src"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 import scripts.generate_surface.main as surface_main  # noqa: E402
 from quantlib.calculation.analytics.position.instruments.features import OptionType  # noqa: E402
-from scripts.generate_surface.backend.surface_cpu.all import (  # noqa: E402
+from wgan_option.surface_generation.backend.surface_cpu.all import (  # noqa: E402
     _compute_implied_vols_cpu,
 )
-from scripts.generate_surface.backend.surface_gpu.all import (  # noqa: E402
+from wgan_option.surface_generation.backend.surface_gpu.all import (  # noqa: E402
     ContractMeta,
     MinuteOptionCandidate,
     _compute_implied_vols_gpu,
@@ -79,7 +82,7 @@ class TestGenerateSurfaceMain(unittest.TestCase):
             ["--model", "raw", "--data_range", "all", "--max-files", "1"]
         )
 
-    @patch("scripts.generate_surface.dispatch.torch.cuda.is_available", return_value=True)
+    @patch("wgan_option.surface_generation.dispatch.torch.cuda.is_available", return_value=True)
     def test_main_dispatches_gpu_window_job(self, _mock_cuda):
         mock_gpu_main = Mock()
         with patch.dict(
@@ -130,7 +133,7 @@ class TestGenerateSurfaceMain(unittest.TestCase):
             ["--data_range", "excel", "--window-minutes", "5"]
         )
 
-    @patch("scripts.generate_surface.dispatch.torch.cuda.is_available", return_value=False)
+    @patch("wgan_option.surface_generation.dispatch.torch.cuda.is_available", return_value=False)
     def test_main_raises_when_gpu_requested_without_cuda(self, _mock_cuda):
         mock_gpu_main = Mock()
         with patch.dict(

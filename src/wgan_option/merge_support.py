@@ -276,7 +276,11 @@ def load_news_base_frame(
 
 
 def load_precalib_csv(csv_path: Path) -> pd.DataFrame:
-    csv_df = pd.read_csv(csv_path)
+    csv_df = pd.read_csv(
+        csv_path,
+        dtype={"filter_reason": "object"},
+        low_memory=False,
+    )
     required = {
         "calibration_datetime_utc",
         "business_days",

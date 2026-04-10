@@ -12,19 +12,10 @@ python scripts/generate_surface/main.py generate_surface ...
 
 - `main.py`
   - top-level CLI and `data_range` dispatch
-- `dispatch.py`
-  - shared `--device` parsing and CUDA checks
-- `backend/`
-  - thin CPU and GPU runtime entrypoints
-- `data_helperd/`
-  - shared minute data helpers
-  - `all.py` for `data_range=all`
-  - `window.py` for `data_range=window`
-  - `excel.py` for `data_range=excel`
-- `model/`
-  - model-specific surface serializers for `svi`, `sabr`, `cubic`, and `raw`
-- `common/`
-  - shared config utilities
+- `src/wgan_option/surface_generation/`
+  - canonical implementation for config parsing, dispatch, minute data helpers, model-specific serializers, and CPU/GPU backends
+
+The `scripts/generate_surface` directory now keeps only the runnable script entrypoint plus shell launch helpers.
 
 ## CLI
 

@@ -6,17 +6,20 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+SRC_DIR = ROOT_DIR / "src"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 import scripts.generate_surface.main as surface_main  # noqa: E402
-from scripts.generate_surface.common.config_utils import load_yaml_mapping  # noqa: E402
-from scripts.generate_surface.data_helperd.all import (  # noqa: E402
+from wgan_option.surface_generation.common.config_utils import load_yaml_mapping  # noqa: E402
+from wgan_option.surface_generation.data_helperd.all import (  # noqa: E402
     _load_generate_surface_config,
     _parse_args as parse_generate_surface_args,
 )
-from scripts.generate_surface.data_helperd.excel import _parse_args as parse_excel_args  # noqa: E402
-from scripts.generate_surface.data_helperd.window import _parse_args as parse_window_args  # noqa: E402
+from wgan_option.surface_generation.data_helperd.excel import _parse_args as parse_excel_args  # noqa: E402
+from wgan_option.surface_generation.data_helperd.window import _parse_args as parse_window_args  # noqa: E402
 
 
 class TestGenerateSurfaceConfigDrivenJob(unittest.TestCase):

@@ -13,8 +13,7 @@ if __package__ in {None, ""}:
 
 import scripts._path_setup  # noqa: F401
 
-from scripts.analyze_error.bootstrap import bootstrap_from_error_rows  # noqa: E402
-from scripts.analyze_error.common import (  # noqa: E402
+from wgan_option.analysis_runtime import (  # noqa: E402
     build_surface_grids,
     compute_error_metrics,
     prepare_run_output_dir,
@@ -26,6 +25,7 @@ from scripts.analyze_error.common import (  # noqa: E402
     write_resolved_config,
     write_summary_csv,
 )
+from scripts.analyze_error.bootstrap import bootstrap_from_error_rows  # noqa: E402
 from scripts.analyze_error.plotting import (  # noqa: E402
     plot_bootstrap_mean_histogram,
     plot_mse_histogram,

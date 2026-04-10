@@ -13,7 +13,7 @@ if __package__ in {None, ""}:
 
 import scripts._path_setup  # noqa: F401
 
-from scripts.generate_result.common import (  # noqa: E402
+from wgan_option.generate_result_runtime import (  # noqa: E402
     build_surface_grids,
     compute_surface_metrics,
     prepare_run_output_dir,

@@ -1,5 +1,5 @@
 # Data
-data_path: data/processed/svi-excel/20260410-174929/merged_vol.xlsx
+data_path: data/processed/raw-excel/20260410-raw-01/merged_vol.xlsx
 sheet_name: gan_input_ready
 text_embedding_mode: lp
 train_ratio: 0.8
@@ -10,19 +10,19 @@ seed: 42
 num_workers: 0
 
 # Checkpoints
-checkpoint_path: outputs/training/svi-excel/20260410_194619/checkpoints/generator_best.pt
-models_path: outputs/training/svi-excel/20260410_194619
-metrics_path: outputs/training/svi-excel/20260410_194619
+checkpoint_path: outputs/training/raw-excel/20260410_215318/checkpoints/generator_best.pt
+models_path: outputs/training/raw-excel
+metrics_path: outputs/training/raw-excel
 
 # Sample selection
 split: val
-selection_mode: all
+selection_mode: first_n
 sample_id: ""
-row_index: 1
+row_index: 0
 limit: 20
 
 # Outputs
-output_dir: outputs/generate_result/vol
+output_dir: outputs/generate_result/raw-lp
 save_plots: true
 save_json: true
 plot_style: heatmap_diff

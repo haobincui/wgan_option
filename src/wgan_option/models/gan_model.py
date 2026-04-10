@@ -170,6 +170,18 @@ class WGAN_GP:
             penalty = penalty + (sigma[:, :, 1:] - sigma[:, :, :-1]).pow(2).mean()
         return penalty
 
+    def _constraint_warmup_epochs(self) -> int:
+        return max(0, int(getattr(self.config, "constraint_warmup_epochs", 0)))
+
+    def _constraint_switches_for_epoch(self, epoch: int) -> tuple[bool, bool, bool]:
+        if int(epoch) <= self._constraint_warmup_epochs():
+            return False, False, False
+        return (
+            bool(self.use_calendar_constraint),
+            bool(self.use_butterfly_constraint),
+            bool(self.use_smooth_constraint),
+        )
+
     def calculate_gradient_penalty(
         self,
         real_surface: torch.Tensor,
@@ -197,7 +209,14 @@ class WGAN_GP:
         grad_penalty = ((gradients.norm(2, dim=1) - 1.0) ** 2).mean() * self.lambda_gp
         return grad_penalty
 
-    def _generator_step(self, current_surface: torch.Tensor, text_embedding: torch.Tensor, real_future: torch.Tensor):
+    def _generator_step(
+        self,
+        current_surface: torch.Tensor,
+        text_embedding: torch.Tensor,
+        real_future: torch.Tensor,
+        *,
+        epoch: int = 1,
+    ):
         self.g_optimizer.zero_grad(set_to_none=True)
         fake_future = self.G(current_surface, text_embedding)
         adv_loss = -self.D(fake_future, current_surface, text_embedding).mean()
@@ -205,13 +224,14 @@ class WGAN_GP:
         cal_penalty = self.calendar_arbitrage_penalty(fake_future)
         bfly_penalty = self.butterfly_arbitrage_penalty(fake_future)
         smooth_penalty = self.smoothness_penalty(fake_future)
+        use_calendar_constraint, use_butterfly_constraint, use_smooth_constraint = self._constraint_switches_for_epoch(epoch)
 
         g_loss = adv_loss + self.lambda_recon * recon_loss
-        if self.use_calendar_constraint:
+        if use_calendar_constraint:
             g_loss = g_loss + self.lambda_calendar * cal_penalty
-        if self.use_butterfly_constraint:
+        if use_butterfly_constraint:
             g_loss = g_loss + self.lambda_butterfly * bfly_penalty
-        if self.use_smooth_constraint:
+        if use_smooth_constraint:
             g_loss = g_loss + self.lambda_smooth * smooth_penalty
         g_loss.backward()
         self.g_optimizer.step()
@@ -395,6 +415,14 @@ class WGAN_GP:
                 monitor_metric,
             )
 
+        warmup_epochs = self._constraint_warmup_epochs()
+        if warmup_epochs > 0:
+            logger.info(
+                "Constraint warmup active: enabled constraint losses will be skipped for the first %d epoch(s) and applied from epoch %d.",
+                warmup_epochs,
+                warmup_epochs + 1,
+            )
+
         for epoch in range(1, self.num_epochs + 1):
             running: Dict[str, list] = {}
             for batch_idx, (current_surface, text_embedding, real_future) in enumerate(train_loader, 1):
@@ -408,7 +436,12 @@ class WGAN_GP:
                     for key, value in d_stats.items():
                         running.setdefault(key, []).append(value)
 
-                g_stats = self._generator_step(current_surface, text_embedding, real_future)
+                g_stats = self._generator_step(
+                    current_surface,
+                    text_embedding,
+                    real_future,
+                    epoch=epoch,
+                )
                 for key, value in g_stats.items():
                     running.setdefault(key, []).append(value)
 

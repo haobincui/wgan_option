@@ -6,15 +6,15 @@ cd "$ROOT_DIR"
 
 RUN_TS="${RUN_TS:-$(date -u +%Y%m%d-%H%M%S)}"
 CONFIG_PATH="${CONFIG_PATH:-configs/surface_builder/svi/generate_surface-svi-excel.yaml}"
-CALIBRATION_WORKERS="${CALIBRATION_WORKERS:-32}"
+CALIBRATION_WORKERS="${CALIBRATION_WORKERS:-48}"
 MAX_TARGET_DATETIMES="${MAX_TARGET_DATETIMES:-0}"
 MAX_FILES="${MAX_FILES:-0}"
 CHUNK_SIZE="${CHUNK_SIZE:-0}"
-SAVE_PRECALIB_CSV="${SAVE_PRECALIB_CSV:-0}"
+SAVE_PRECALIB_CSV="${SAVE_PRECALIB_CSV:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 
 OUTPUT_DIR="${OUTPUT_DIR:-data/processed/svi-excel/${RUN_TS}}"
-LAUNCH_LOG="${LAUNCH_LOG:-${OUTPUT_DIR}/launch-svi-excel-parallel.log}"
+SURFACE_LOG="${OUTPUT_DIR}/surface-svi-excel.log"
 PID_FILE="${PID_FILE:-${OUTPUT_DIR}/launcher.pid}"
 
 mkdir -p "$OUTPUT_DIR"

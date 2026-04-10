@@ -37,7 +37,8 @@
       "Bash(git stash:*)",
       "Bash(python -m pytest tests/test_scripts/test_merge_file.py -v)",
       "Bash(python -m pytest tests/test_scripts/test_analyze_error.py tests/test_scripts/test_generate_result.py -v)",
-      "Bash(python -m pytest tests/test_scripts/test_generate_surface_config_jobs.py tests/test_scripts/test_generate_surface_main.py tests/test_scripts/test_daily_surface_config.py tests/test_scripts/test_generate_minute_svi_params.py -v)"
+      "Bash(python -m pytest tests/test_scripts/test_generate_surface_config_jobs.py tests/test_scripts/test_generate_surface_main.py tests/test_scripts/test_daily_surface_config.py tests/test_scripts/test_generate_minute_svi_params.py -v)",
+      "Bash(ls /home/haobin_cui/research_files_space_2/wgan_option-svi-speedup/*.sh)"
     ]
   }
 }

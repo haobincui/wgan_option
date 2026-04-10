@@ -1,4 +1,4 @@
-"""Build merged TY raw trades, minute trade counts, and a news-joined workbook."""
+"""Build TY minute trade counts and comparison workbooks from a merged raw trade CSV."""
 
 from __future__ import annotations
 
@@ -21,14 +21,9 @@ ROOT_DIR = Path(__file__).resolve().parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from scripts.merge_raw_option_data import (  # noqa: E402
-    DEFAULT_INPUT_DIR,
-    DEFAULT_OUTPUT_PATH,
-    EXPECTED_HEADER,
-    MergeStats,
-    merge_raw_option_data,
-)
+from scripts.merge_raw_option_data import DEFAULT_OUTPUT_PATH, EXPECTED_HEADER  # noqa: E402
 
+DEFAULT_MERGED_CSV = DEFAULT_OUTPUT_PATH
 DEFAULT_MINUTE_COUNTS_OUTPUT = Path("data/raw/option_data/ty_plus_minute_trade_counts.csv")
 DEFAULT_NEWS_XLSX = Path("data/raw/text_embedding/news_with_openai_embeddings_large.xlsx")
 DEFAULT_NEWS_OUTPUT = Path(
@@ -39,6 +34,7 @@ DEFAULT_SHEET_NAME = "Sheet1"
 DEFAULT_DATE_COLUMN = "PD"
 DEFAULT_TIME_COLUMN = "ET"
 DEFAULT_OFFSET_MINUTES = 5
+TRADE_COUNT_PAIR_THRESHOLD = 5
 EMBEDDING_COLUMNS_TO_DROP = ("HD_embedding", "LP_embedding")
 
 
@@ -91,6 +87,18 @@ def _normalize_time_value(value: object) -> str:
     return "" if text.lower() in {"", "nan", "nat", "none"} else text
 
 
+def _offset_timestamp_column(offset_minutes: int) -> str:
+    return f"timestamp_utc_plus_{int(offset_minutes)}m"
+
+
+def _trade_count_columns(offset_minutes: int) -> tuple[str, str, str]:
+    t_col = "trade_count_at_timestamp_utc"
+    offset_column = _offset_timestamp_column(offset_minutes)
+    t_plus_col = f"trade_count_at_{offset_column}"
+    flag_col = "trade_count_pair_ge_5_flag"
+    return t_col, t_plus_col, flag_col
+
+
 def load_news_base_frame(
     xlsx_path: Path,
     *,
@@ -121,7 +129,7 @@ def load_news_base_frame(
     shifted = utc_ts + pd.Timedelta(minutes=int(offset_minutes))
 
     news_df["timestamp_utc"] = utc_ts.map(lambda ts: ts.strftime("%Y-%m-%dT%H:%M:%SZ") if pd.notna(ts) else None)
-    news_df[f"timestamp_utc_plus_{int(offset_minutes)}m"] = shifted.map(
+    news_df[_offset_timestamp_column(offset_minutes)] = shifted.map(
         lambda ts: ts.strftime("%Y-%m-%dT%H:%M:%SZ") if pd.notna(ts) else None
     )
     return news_df
@@ -137,36 +145,32 @@ class MinuteCountSummary:
 
 @dataclass(frozen=True)
 class PipelineStats:
-    merge_stats: MergeStats
     count_summary: MinuteCountSummary
     minute_count_rows: int
     news_rows: int
     minute_counts_output: Path
     news_output: Path
+    merged_vol_output: Path | None
 
 
 def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Merge TY raw trades, build minute-level trade counts, and merge those counts "
-            "onto the news workbook timestamps."
+            "Build TY minute-level trade counts from a merged raw trade CSV, merge those counts "
+            "onto the news workbook timestamps, and optionally enrich merged_vol.xlsx."
         ),
     )
-    parser.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT_DIR)
-    parser.add_argument("--merged-output", type=Path, default=DEFAULT_OUTPUT_PATH)
+    parser.add_argument("--merged-csv", type=Path, default=DEFAULT_MERGED_CSV)
     parser.add_argument("--minute-counts-output", type=Path, default=DEFAULT_MINUTE_COUNTS_OUTPUT)
     parser.add_argument("--news-xlsx", type=Path, default=DEFAULT_NEWS_XLSX)
     parser.add_argument("--news-output", type=Path, default=DEFAULT_NEWS_OUTPUT)
+    parser.add_argument("--merged-vol-xlsx", type=Path, default=None)
+    parser.add_argument("--merged-vol-output", type=Path, default=None)
     parser.add_argument("--sheet-name", type=str, default=DEFAULT_SHEET_NAME)
     parser.add_argument("--date-column", type=str, default=DEFAULT_DATE_COLUMN)
     parser.add_argument("--time-column", type=str, default=DEFAULT_TIME_COLUMN)
     parser.add_argument("--source-timezone", type=str, default=DEFAULT_SOURCE_TIMEZONE)
     parser.add_argument("--offset-minutes", type=int, default=DEFAULT_OFFSET_MINUTES)
-    parser.add_argument(
-        "--fail-on-invalid",
-        action="store_true",
-        help="Fail instead of skipping invalid non-gzip or schema-mismatched source files.",
-    )
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -194,8 +198,57 @@ def _parse_numeric(value: object) -> float | None:
     return numeric
 
 
+def _normalize_news_row_id_series(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce").astype("Int64")
+
+
+def _default_merged_vol_output_path(merged_vol_xlsx: Path) -> Path:
+    return merged_vol_xlsx.with_name(
+        f"{merged_vol_xlsx.stem}_with_trade_counts{merged_vol_xlsx.suffix}"
+    )
+
+
+def _apply_trade_counts_to_news_df(
+    news_df: pd.DataFrame,
+    minute_df: pd.DataFrame,
+    *,
+    offset_minutes: int,
+) -> pd.DataFrame:
+    news_df = news_df.copy()
+    minute_lookup = minute_df.set_index("timestamp_utc")["trade_count"]
+    t_col, t_plus_col, flag_col = _trade_count_columns(offset_minutes)
+    offset_column = _offset_timestamp_column(offset_minutes)
+
+    news_df[t_col] = news_df["timestamp_utc"].map(minute_lookup).fillna(0).astype(int)
+    news_df[t_plus_col] = news_df[offset_column].map(minute_lookup).fillna(0).astype(int)
+    news_df[flag_col] = (
+        (news_df[t_col] >= TRADE_COUNT_PAIR_THRESHOLD)
+        & (news_df[t_plus_col] >= TRADE_COUNT_PAIR_THRESHOLD)
+    )
+    return news_df
+
+
+def _build_news_trade_lookup(news_df: pd.DataFrame, *, offset_minutes: int) -> pd.DataFrame:
+    t_col, t_plus_col, flag_col = _trade_count_columns(offset_minutes)
+    lookup = news_df[["news_row_id", t_col, t_plus_col, flag_col]].copy()
+    lookup["news_row_id"] = _normalize_news_row_id_series(lookup["news_row_id"])
+    return lookup
+
+
+def _finalize_trade_count_columns(
+    df: pd.DataFrame,
+    *,
+    offset_minutes: int,
+) -> pd.DataFrame:
+    t_col, t_plus_col, flag_col = _trade_count_columns(offset_minutes)
+    df[t_col] = pd.to_numeric(df[t_col], errors="coerce").fillna(0).astype(int)
+    df[t_plus_col] = pd.to_numeric(df[t_plus_col], errors="coerce").fillna(0).astype(int)
+    df[flag_col] = df[flag_col].fillna(False).astype(bool)
+    return df
+
+
 def build_minute_trade_counts(
-    merged_output: Path,
+    merged_csv: Path,
     minute_counts_output: Path,
 ) -> tuple[pd.DataFrame, MinuteCountSummary]:
     counts: Counter[str] = Counter()
@@ -204,7 +257,7 @@ def build_minute_trade_counts(
     filtered_non_positive_volume_rows = 0
     filtered_invalid_numeric_rows = 0
 
-    with gzip.open(merged_output, "rt", encoding="utf-8", newline="") as handle:
+    with gzip.open(merged_csv, "rt", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames != EXPECTED_HEADER:
             raise ValueError(
@@ -230,11 +283,7 @@ def build_minute_trade_counts(
             counted_rows += 1
 
     minute_counts_output.parent.mkdir(parents=True, exist_ok=True)
-    minute_df = pd.DataFrame(
-        {
-            "timestamp_utc": sorted(counts.keys()),
-        }
-    )
+    minute_df = pd.DataFrame({"timestamp_utc": sorted(counts.keys())})
     minute_df["trade_count"] = minute_df["timestamp_utc"].map(counts).astype(int)
     minute_df.to_csv(minute_counts_output, index=False)
     return minute_df, MinuteCountSummary(
@@ -256,7 +305,6 @@ def build_news_trade_count_workbook(
     source_timezone: str,
     offset_minutes: int,
 ) -> pd.DataFrame:
-    minute_lookup = minute_df.set_index("timestamp_utc")["trade_count"]
     news_df = load_news_base_frame(
         news_xlsx,
         sheet_name=sheet_name,
@@ -265,16 +313,8 @@ def build_news_trade_count_workbook(
         source_timezone=source_timezone,
         offset_minutes=offset_minutes,
     )
+    news_df = _apply_trade_counts_to_news_df(news_df, minute_df, offset_minutes=offset_minutes)
     news_df = news_df.drop(columns=list(EMBEDDING_COLUMNS_TO_DROP), errors="ignore")
-    news_df["trade_count_at_timestamp_utc"] = (
-        news_df["timestamp_utc"].map(minute_lookup).fillna(0).astype(int)
-    )
-
-    offset_column = f"timestamp_utc_plus_{int(offset_minutes)}m"
-    if offset_column in news_df.columns:
-        news_df[f"trade_count_at_{offset_column}"] = (
-            news_df[offset_column].map(minute_lookup).fillna(0).astype(int)
-        )
 
     news_output.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(news_output, engine="openpyxl") as writer:
@@ -283,10 +323,60 @@ def build_news_trade_count_workbook(
     return news_df
 
 
+def build_merged_vol_trade_count_workbook(
+    *,
+    merged_vol_xlsx: Path,
+    merged_vol_output: Path,
+    news_df: pd.DataFrame,
+    offset_minutes: int,
+) -> Path:
+    with pd.ExcelFile(merged_vol_xlsx) as workbook:
+        sheet_names = list(workbook.sheet_names)
+        sheets = {sheet_name: workbook.parse(sheet_name) for sheet_name in sheet_names}
+
+        if "news_surface_pair_audit" not in sheets:
+            raise ValueError(
+                f"merged_vol workbook is missing news_surface_pair_audit: {merged_vol_xlsx}"
+            )
+        if "gan_input_ready" not in sheets:
+            raise ValueError(f"merged_vol workbook is missing gan_input_ready: {merged_vol_xlsx}")
+
+        trade_lookup = _build_news_trade_lookup(news_df, offset_minutes=offset_minutes)
+        t_col, t_plus_col, flag_col = _trade_count_columns(offset_minutes)
+        trade_columns = [t_col, t_plus_col, flag_col]
+
+        audit_df = sheets["news_surface_pair_audit"].copy()
+        if "news_row_id" not in audit_df.columns:
+            raise ValueError(f"news_surface_pair_audit is missing news_row_id: {merged_vol_xlsx}")
+        audit_df = audit_df.drop(columns=trade_columns, errors="ignore")
+        audit_df["news_row_id"] = _normalize_news_row_id_series(audit_df["news_row_id"])
+        audit_df = audit_df.merge(trade_lookup, on="news_row_id", how="left")
+        audit_df = _finalize_trade_count_columns(audit_df, offset_minutes=offset_minutes)
+        sheets["news_surface_pair_audit"] = audit_df
+
+        sample_trade_lookup = (
+            audit_df[["sample_id", *trade_columns]]
+            .dropna(subset=["sample_id"])
+            .drop_duplicates(subset=["sample_id"], keep="first")
+        )
+        gan_df = sheets["gan_input_ready"].copy()
+        if "sample_id" not in gan_df.columns:
+            raise ValueError(f"gan_input_ready is missing sample_id: {merged_vol_xlsx}")
+        gan_df = gan_df.drop(columns=trade_columns, errors="ignore")
+        gan_df = gan_df.merge(sample_trade_lookup, on="sample_id", how="left")
+        gan_df = _finalize_trade_count_columns(gan_df, offset_minutes=offset_minutes)
+        sheets["gan_input_ready"] = gan_df
+
+    merged_vol_output.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(merged_vol_output, engine="openpyxl") as writer:
+        for sheet_name in sheet_names:
+            sheets[sheet_name].to_excel(writer, sheet_name=sheet_name, index=False)
+    return merged_vol_output
+
+
 def run_pipeline(
     *,
-    input_dir: Path,
-    merged_output: Path,
+    merged_csv: Path,
     minute_counts_output: Path,
     news_xlsx: Path,
     news_output: Path,
@@ -295,15 +385,11 @@ def run_pipeline(
     sheet_name: str,
     date_column: str,
     time_column: str,
-    fail_on_invalid: bool,
+    merged_vol_xlsx: Path | None,
+    merged_vol_output: Path | None,
 ) -> PipelineStats:
-    merge_stats = merge_raw_option_data(
-        input_dir=input_dir,
-        output_path=merged_output,
-        skip_invalid=not fail_on_invalid,
-    )
     minute_df, count_summary = build_minute_trade_counts(
-        merged_output=merged_output,
+        merged_csv=merged_csv,
         minute_counts_output=minute_counts_output,
     )
     news_df = build_news_trade_count_workbook(
@@ -316,21 +402,35 @@ def run_pipeline(
         source_timezone=source_timezone,
         offset_minutes=offset_minutes,
     )
+
+    written_merged_vol_output: Path | None = None
+    if merged_vol_xlsx is not None:
+        target_output = (
+            merged_vol_output
+            if merged_vol_output is not None
+            else _default_merged_vol_output_path(merged_vol_xlsx)
+        )
+        written_merged_vol_output = build_merged_vol_trade_count_workbook(
+            merged_vol_xlsx=merged_vol_xlsx,
+            merged_vol_output=target_output,
+            news_df=news_df,
+            offset_minutes=offset_minutes,
+        )
+
     return PipelineStats(
-        merge_stats=merge_stats,
         count_summary=count_summary,
         minute_count_rows=len(minute_df),
         news_rows=len(news_df),
         minute_counts_output=minute_counts_output,
         news_output=news_output,
+        merged_vol_output=written_merged_vol_output,
     )
 
 
 def main(argv: Iterable[str] | None = None) -> PipelineStats:
     args = _parse_args(argv)
     stats = run_pipeline(
-        input_dir=Path(args.input_dir),
-        merged_output=Path(args.merged_output),
+        merged_csv=Path(args.merged_csv),
         minute_counts_output=Path(args.minute_counts_output),
         news_xlsx=Path(args.news_xlsx),
         news_output=Path(args.news_output),
@@ -339,14 +439,9 @@ def main(argv: Iterable[str] | None = None) -> PipelineStats:
         sheet_name=str(args.sheet_name),
         date_column=str(args.date_column),
         time_column=str(args.time_column),
-        fail_on_invalid=bool(args.fail_on_invalid),
+        merged_vol_xlsx=Path(args.merged_vol_xlsx) if args.merged_vol_xlsx is not None else None,
+        merged_vol_output=Path(args.merged_vol_output) if args.merged_vol_output is not None else None,
     )
-    print(f"Merged files: {stats.merge_stats.files_merged}")
-    print(f"Merged rows: {stats.merge_stats.rows_written}")
-    if stats.merge_stats.skipped_files:
-        print(f"Skipped invalid files: {len(stats.merge_stats.skipped_files)}")
-        for path in stats.merge_stats.skipped_files:
-            print(f"  {path}")
     print(f"Counted rows: {stats.count_summary.counted_rows}")
     print(
         "Filtered non-positive price rows: "
@@ -364,6 +459,10 @@ def main(argv: Iterable[str] | None = None) -> PipelineStats:
     print(f"News rows written: {stats.news_rows}")
     print(f"Minute-count CSV: {stats.minute_counts_output}")
     print(f"News workbook: {stats.news_output}")
+    if stats.merged_vol_output is not None:
+        print(f"Merged-vol workbook: {stats.merged_vol_output}")
+    else:
+        print("Merged-vol workbook: not requested")
     return stats
 
 

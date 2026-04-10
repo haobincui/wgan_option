@@ -336,6 +336,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
         self.assertTrue(config.use_calendar_constraint)
         self.assertTrue(config.use_butterfly_constraint)
         self.assertTrue(config.use_smooth_constraint)
+        self.assertEqual(config.constraint_warmup_epochs, 0)
         self.assertFalse(config.use_early_stopping)
         self.assertEqual(config.early_stopping_patience, 10)
         self.assertEqual(config.early_stopping_min_delta, 0.0)
@@ -349,6 +350,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
                 "use_calendar_constraint=false",
                 "use_butterfly_constraint=true",
                 "use_smooth_constraint=false",
+                "constraint_warmup_epochs=20",
                 "use_early_stopping=true",
                 "early_stopping_patience=15",
                 "early_stopping_min_delta=0.05",
@@ -362,6 +364,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
         self.assertFalse(overridden.use_calendar_constraint)
         self.assertTrue(overridden.use_butterfly_constraint)
         self.assertFalse(overridden.use_smooth_constraint)
+        self.assertEqual(overridden.constraint_warmup_epochs, 20)
         self.assertTrue(overridden.use_early_stopping)
         self.assertEqual(overridden.early_stopping_patience, 15)
         self.assertEqual(overridden.early_stopping_min_delta, 0.05)
@@ -510,6 +513,49 @@ class TestTrainMergedXlsx(unittest.TestCase):
         self.assertAlmostEqual(stats["g_smooth"], 3.0, places=6)
         expected_total = stats["g_adv"] + config.lambda_butterfly * stats["g_butterfly"]
         self.assertAlmostEqual(stats["g_total"], expected_total, places=6)
+
+    def test_wgan_generator_loss_constraint_warmup_skips_penalties_until_epoch_threshold(self):
+        config = Config(
+            cuda=False,
+            learning_rate=0.0,
+            lambda_recon=0.0,
+            lambda_calendar=2.0,
+            lambda_butterfly=1.5,
+            lambda_smooth=0.25,
+            use_calendar_constraint=True,
+            use_butterfly_constraint=True,
+            use_smooth_constraint=True,
+            constraint_warmup_epochs=2,
+            noise_dim=4,
+            gen_hidden_dim=8,
+            disc_hidden_dim=8,
+        )
+        model = _build_test_wgan(config)
+        model.calendar_arbitrage_penalty = Mock(return_value=torch.tensor(1.5, device=model.device))
+        model.butterfly_arbitrage_penalty = Mock(return_value=torch.tensor(2.0, device=model.device))
+        model.smoothness_penalty = Mock(return_value=torch.tensor(3.0, device=model.device))
+
+        warmup_stats = model._generator_step(
+            current_surface=torch.zeros((1, 1, 2, 2), device=model.device),
+            text_embedding=torch.zeros((1, 2), device=model.device),
+            real_future=torch.zeros((1, 1, 2, 2), device=model.device),
+            epoch=1,
+        )
+        post_warmup_stats = model._generator_step(
+            current_surface=torch.zeros((1, 1, 2, 2), device=model.device),
+            text_embedding=torch.zeros((1, 2), device=model.device),
+            real_future=torch.zeros((1, 1, 2, 2), device=model.device),
+            epoch=3,
+        )
+
+        self.assertAlmostEqual(warmup_stats["g_total"], warmup_stats["g_adv"], places=6)
+        expected_post_warmup = (
+            post_warmup_stats["g_adv"]
+            + config.lambda_calendar * post_warmup_stats["g_calendar"]
+            + config.lambda_butterfly * post_warmup_stats["g_butterfly"]
+            + config.lambda_smooth * post_warmup_stats["g_smooth"]
+        )
+        self.assertAlmostEqual(post_warmup_stats["g_total"], expected_post_warmup, places=6)
 
     def test_wgan_initialization_does_not_eagerly_create_artifact_dirs(self):
         with tempfile.TemporaryDirectory() as tmpdir:

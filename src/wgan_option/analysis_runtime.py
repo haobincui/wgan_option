@@ -1,4 +1,4 @@
-"""Shared CLI and output helpers for analyze-error entrypoints."""
+"""Analyze-error CLI helpers that used to live under ``scripts/``."""
 
 from __future__ import annotations
 
@@ -9,16 +9,14 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 import numpy as np
 import yaml
 
-import scripts._path_setup  # noqa: F401
-
-from wgan_option.analysis_config import (  # noqa: E402
+from wgan_option.analysis_config import (
     AnalysisConfig,
     analysis_config_to_dict,
     load_analysis_config,
     parse_analysis_overrides,
     save_analysis_config_yaml,
 )
-from wgan_option.postprocess_runtime import (  # noqa: E402
+from wgan_option.postprocess_runtime import (
     VALID_SELECTION_MODES,
     VALID_SPLITS,
     add_shared_sample_selection_args,
@@ -34,7 +32,7 @@ from wgan_option.postprocess_runtime import (  # noqa: E402
 
 
 def build_analysis_arg_parser(*, description: str, default_config_path: str) -> argparse.ArgumentParser:
-    """Create a standard analysis parser."""
+    """Create the standard analysis parser."""
 
     parser = argparse.ArgumentParser(description=description)
     add_shared_sample_selection_args(parser, default_config_path=default_config_path)

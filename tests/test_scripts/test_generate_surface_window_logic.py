@@ -24,7 +24,7 @@ if str(SRC_DIR) not in sys.path:
 from quantlib.calculation.analytics.position.instruments.features import OptionType  # noqa: E402
 from quantlib.calendar.daycount import DayCountBusN  # noqa: E402
 from quantlib.calendar.holidays import usd_calendar  # noqa: E402
-from scripts.generate_surface.data_helperd.all import (  # noqa: E402
+from wgan_option.surface_generation.data_helperd.all import (  # noqa: E402
     PRECALIB_CSV_HEADERS,
     ContractMeta,
     MinuteTradeRow,
@@ -32,9 +32,9 @@ from scripts.generate_surface.data_helperd.all import (  # noqa: E402
     _prepare_option_candidates,
     _tau_years_from_trade_to_expiry,
 )
-from scripts.generate_surface.data_helperd import excel as excel_common  # noqa: E402
-from scripts.generate_surface.data_helperd import window as window_common  # noqa: E402
-from scripts.generate_surface.backend.surface_cpu.all import (  # noqa: E402
+from wgan_option.surface_generation.data_helperd import excel as excel_common  # noqa: E402
+from wgan_option.surface_generation.data_helperd import window as window_common  # noqa: E402
+from wgan_option.surface_generation.backend.surface_cpu.all import (  # noqa: E402
     _process_minute as cpu_process_minute,
 )
 

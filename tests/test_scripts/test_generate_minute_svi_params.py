@@ -22,13 +22,13 @@ from quantlib.calculation.analytics.models.analytical.equity.formula import (  #
 )
 from quantlib.calendar.daycount import DayCountBusN  # noqa: E402
 from quantlib.calendar.holidays import usd_calendar  # noqa: E402
-from scripts.generate_surface.data_helperd.all import (  # noqa: E402
+from wgan_option.surface_generation.data_helperd.all import (  # noqa: E402
     DEFAULT_EXPIRATION_TIME_UTC,
     DEFAULT_MAX_PRECALIB_IV,
     _get_ty_option_underlying_future_month_code,
     _prepare_option_candidates,
 )
-from scripts.generate_surface.backend.surface_cpu.all import (  # noqa: E402
+from wgan_option.surface_generation.backend.surface_cpu.all import (  # noqa: E402
     ContractMeta,
     MinuteOptionCandidate,
     MinuteTradeRow,
