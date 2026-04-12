@@ -15,16 +15,19 @@ import scripts._path_setup  # noqa: F401
 
 from scripts.train.train_svi import main as svi_train_main  # noqa: E402
 from scripts.train.train_vol import main as vol_train_main  # noqa: E402
+from scripts.train.train_vol_regression import main as vol_regression_train_main  # noqa: E402
 
 HELP_TEXT = dedent(
     """
     Usage:
       python scripts/train/main.py vol-xlsx [args...]
+      python scripts/train/main.py vol-regression-xlsx [args...]
       python scripts/train/main.py svi-xlsx [args...]
 
     Subcommands:
-      vol-xlsx   Train WGAN-GP on merged vol-surface xlsx data.
-      svi-xlsx   Train supervised SVI regressor on merged SVI xlsx data.
+      vol-xlsx              Train WGAN-GP on merged vol-surface xlsx data.
+      vol-regression-xlsx   Train deterministic residual regression on merged vol-surface xlsx data.
+      svi-xlsx              Train supervised SVI regressor on merged SVI xlsx data.
 
     Notes:
       Pass --help after a subcommand to see that job's detailed arguments.
@@ -35,6 +38,8 @@ HELP_TEXT = dedent(
 COMMANDS = {
     "vol-xlsx": vol_train_main,
     "train-vol": vol_train_main,
+    "vol-regression-xlsx": vol_regression_train_main,
+    "train-vol-regression": vol_regression_train_main,
     "svi-xlsx": svi_train_main,
     "train-svi": svi_train_main,
 }

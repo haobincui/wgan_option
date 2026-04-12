@@ -1,0 +1,50 @@
+# Data
+data_path: data/processed/svi-all/20260330-01/merged_vol.xlsx
+sheet_name: gan_input_ready
+text_embedding_mode: hd
+train_ratio: 0.8
+
+# Model dimensions
+channels: 1
+embedding_dim: 1024
+gen_hidden_dim: 512
+gen_base_channels: 32
+gen_res_blocks: 0
+gen_text_hidden_dim: 256
+gen_text_out_dim: 128
+
+# Optimization
+learning_rate: 0.0002
+use_reduce_lr_on_plateau: true
+reduce_lr_factor: 0.5
+reduce_lr_patience: 8
+reduce_lr_min_lr: 1.0e-5
+num_epochs: 100
+batch_size: 16
+beta_1: 0.5
+beta_2: 0.9
+
+# Loss weights
+lambda_recon: 10.0
+lambda_calendar: 2.0
+lambda_butterfly: 2.0
+lambda_smooth: 0.1
+lambda_delta_shrink: 0.0
+use_calendar_constraint: true
+use_butterfly_constraint: true
+use_smooth_constraint: true
+constraint_warmup_epochs: 0
+best_checkpoint_metric: val_hybrid_score
+baseline_penalty_weight: 2.0
+
+# Runtime
+seed: 42
+cuda: true
+num_workers: 0
+save_every: 10
+use_early_stopping: true
+early_stopping_patience: 10
+early_stopping_min_delta: 0.0
+
+# Paths
+output_root: ""

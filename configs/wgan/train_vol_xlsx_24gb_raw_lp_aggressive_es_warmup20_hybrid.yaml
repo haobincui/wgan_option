@@ -1,0 +1,57 @@
+# Data
+data_path: data/processed/raw-excel/20260410-raw-01/merged_vol.xlsx
+sheet_name: gan_input_ready
+text_embedding_mode: lp
+train_ratio: 0.8
+
+# Model dimensions
+channels: 1
+embedding_dim: 1024
+noise_dim: 128
+gen_base_channels: 96
+disc_base_channels: 96
+gen_res_blocks: 4
+disc_res_blocks: 2
+gen_text_hidden_dim: 768
+gen_text_out_dim: 384
+disc_text_hidden_dim: 384
+gen_hidden_dim: 4096
+disc_hidden_dim: 2048
+
+# Optimization
+learning_rate: 6.0e-5
+use_reduce_lr_on_plateau: true
+reduce_lr_factor: 0.5
+reduce_lr_patience: 12
+reduce_lr_min_lr: 1.0e-5
+num_epochs: 200
+batch_size: 128
+beta_1: 0.5
+beta_2: 0.9
+discriminator_iter: 5
+lambda_gp: 10.0
+
+# Modified loss weights
+lambda_recon: 10.0
+lambda_calendar: 2.0
+lambda_butterfly: 2.0
+lambda_smooth: 0.1
+lambda_delta_shrink: 0.05
+use_calendar_constraint: true
+use_butterfly_constraint: true
+use_smooth_constraint: true
+constraint_warmup_epochs: 20
+best_checkpoint_metric: val_hybrid_score
+baseline_penalty_weight: 2.0
+
+# Runtime
+seed: 42
+cuda: true
+num_workers: 0
+save_every: 10
+use_early_stopping: true
+early_stopping_patience: 20
+early_stopping_min_delta: 0.0
+
+# Paths
+output_root: ""

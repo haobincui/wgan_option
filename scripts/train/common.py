@@ -12,6 +12,7 @@ import scripts._path_setup  # noqa: F401
 from wgan_option.config import config_to_dict, load_config, parse_cli_overrides  # noqa: E402
 
 DEFAULT_VOL_CONFIG_PATH = "configs/wgan/train_vol_xlsx.yaml"
+DEFAULT_VOL_REGRESSION_CONFIG_PATH = "configs/wgan/train_vol_regression_xlsx.yaml"
 DEFAULT_SVI_CONFIG_PATH = "configs/wgan/train_svi_xlsx.yaml"
 
 

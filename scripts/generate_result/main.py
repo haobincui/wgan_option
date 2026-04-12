@@ -15,19 +15,22 @@ import scripts._path_setup  # noqa: F401
 
 from scripts.generate_result.generate_svi import main as svi_generate_main  # noqa: E402
 from scripts.generate_result.generate_vol import main as vol_generate_main  # noqa: E402
+from scripts.generate_result.generate_vol_regression import main as vol_regression_generate_main  # noqa: E402
 from scripts.generate_result.plot_surface import main as plot_surface_main  # noqa: E402
 
 HELP_TEXT = dedent(
     """
     Usage:
       python scripts/generate_result/main.py vol [args...]
+      python scripts/generate_result/main.py vol-regression [args...]
       python scripts/generate_result/main.py svi [args...]
       python scripts/generate_result/main.py plot [args...]
 
     Subcommands:
-      vol    Generate future vol surfaces from a trained WGAN checkpoint.
-      svi    Generate future SVI parameters, reconstruct surfaces, and compare them.
-      plot   Render a saved payload JSON into a comparison PNG.
+      vol              Generate future vol surfaces from a trained WGAN checkpoint.
+      vol-regression   Generate future vol surfaces from a deterministic regression checkpoint.
+      svi              Generate future SVI parameters, reconstruct surfaces, and compare them.
+      plot             Render a saved payload JSON into a comparison PNG.
 
     Notes:
       Pass --help after a subcommand to see that job's detailed arguments.
@@ -36,6 +39,7 @@ HELP_TEXT = dedent(
 
 COMMANDS = {
     "vol": vol_generate_main,
+    "vol-regression": vol_regression_generate_main,
     "svi": svi_generate_main,
     "plot": plot_surface_main,
 }

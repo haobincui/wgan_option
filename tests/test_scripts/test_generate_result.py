@@ -27,6 +27,7 @@ from wgan_option.generate_result_runtime import (  # noqa: E402
 from wgan_option.config import Config  # noqa: E402
 from wgan_option.models.generator import Generator  # noqa: E402
 from wgan_option.models.svi_regressor import SviRegressor  # noqa: E402
+from wgan_option.models.vol_regressor import VolSurfaceRegressor  # noqa: E402
 from wgan_option.result_config import (  # noqa: E402
     GenerateResultConfig,
     load_generate_result_config,
@@ -378,6 +379,56 @@ class TestGenerateResultScripts(unittest.TestCase):
         )
         return run_root, run_dir
 
+    def _write_vol_regression_checkpoint_run_root(
+        self,
+        tmpdir: str,
+        *,
+        run_ts: str,
+        embedding_dim: int = 2,
+        text_embedding_mode: str = "hd",
+    ) -> tuple[Path, Path]:
+        run_root = Path(tmpdir) / "vol_regression_xlsx"
+        run_dir = run_root / run_ts
+        checkpoints_dir = run_dir / "checkpoints"
+        metrics_dir = run_dir / "metrics"
+        checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+
+        torch.manual_seed(13)
+        config = Config(
+            cuda=False,
+            channels=1,
+            embedding_dim=embedding_dim,
+            text_embedding_mode=text_embedding_mode,
+            gen_hidden_dim=16,
+            models_path=str(checkpoints_dir),
+            metrics_path=str(metrics_dir),
+        )
+        model = VolSurfaceRegressor(
+            channels=1,
+            embedding_dim=embedding_dim,
+            surface_height=16,
+            surface_width=16,
+            hidden_dim=config.gen_hidden_dim,
+        )
+        checkpoint_path = checkpoints_dir / "vol_regressor_best.pt"
+        payload = {"state_dict": model.state_dict(), "config": asdict(config), "embedding_dim": embedding_dim}
+        torch.save(payload, checkpoint_path)
+        (metrics_dir / "best_checkpoint.json").write_text(
+            json.dumps(
+                {
+                    "monitor_metric": "val_hybrid_score",
+                    "best_epoch": 1,
+                    "best_metric": 0.1,
+                    "artifacts": {"model": str(checkpoint_path)},
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return run_root, run_dir
+
     def test_generate_result_config_loads_yaml_and_cli_overrides(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "vol.yaml"
@@ -403,6 +454,18 @@ class TestGenerateResultScripts(unittest.TestCase):
             self.assertEqual(config.selection_mode, "row_index")
             self.assertEqual(config.row_index, 2)
             self.assertFalse(config.save_json)
+
+            overrides = parse_generate_result_overrides(
+                [
+                    "fallback_mode=mc_uncertainty_to_current",
+                    "mc_samples=5",
+                    "uncertainty_threshold=0.2",
+                ]
+            )
+            config = load_generate_result_config(str(config_path), overrides=overrides)
+            self.assertEqual(config.fallback_mode, "mc_uncertainty_to_current")
+            self.assertEqual(config.mc_samples, 5)
+            self.assertAlmostEqual(config.uncertainty_threshold, 0.2, places=6)
 
             for invalid_bool in ["save_json=off", "save_json=yes", "save_json=1"]:
                 with self.subTest(invalid_bool=invalid_bool):
@@ -539,6 +602,110 @@ class TestGenerateResultScripts(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["sample_id"], "news_3")
 
+    def test_generate_vol_script_supports_fallback_to_current_surface(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = self._write_vol_workbook(tmpdir)
+            run_root, run_dir = self._write_generator_checkpoint_run_root(tmpdir, run_ts="20260407_121500")
+            metrics_dir = run_dir / "metrics"
+            (metrics_dir / "fallback_calibration.json").write_text(
+                json.dumps(
+                    {
+                        "uncertainty_threshold": 0.10,
+                        "mc_samples": 5,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            output_dir = Path(tmpdir) / "generate_vol_fallback"
+            config_path = Path(tmpdir) / "generate_vol_fallback.yaml"
+            _write_yaml(
+                config_path,
+                {
+                    "data_path": str(workbook_path),
+                    "sheet_name": "gan_input_ready",
+                    "text_embedding_mode": "hd",
+                    "train_ratio": 2 / 3,
+                    "cuda": False,
+                    "seed": 123,
+                    "checkpoint_path": "",
+                    "models_path": str(run_root),
+                    "metrics_path": str(run_root),
+                    "fallback_mode": "mc_uncertainty_to_current",
+                    "mc_samples": 3,
+                    "uncertainty_threshold": -1.0,
+                    "split": "val",
+                    "selection_mode": "row_index",
+                    "row_index": 0,
+                    "output_dir": str(output_dir),
+                    "save_plots": False,
+                    "save_json": True,
+                    "plot_style": "heatmap_diff",
+                },
+            )
+
+            module = _load_script_module(ROOT_DIR / "scripts/generate_result/generate_vol.py", "generate_vol_fallback_script")
+            with patch(
+                "wgan_option.utils.inference_helpers.infer_vol_surface_mc",
+                return_value=(np.full((16, 16), 0.5, dtype=np.float32), 0.25, []),
+            ):
+                run_dir = module.main(["--config", str(config_path)])
+
+            payload = json.loads(next((run_dir / "samples").glob("*.json")).read_text(encoding="utf-8"))
+            self.assertTrue(payload["metadata"]["used_fallback"])
+            self.assertEqual(payload["metadata"]["prediction_source"], "current_fallback")
+            self.assertAlmostEqual(payload["metadata"]["fallback_threshold"], 0.10, places=6)
+            self.assertEqual(payload["metadata"]["mc_samples"], 5)
+            with (run_dir / "summary.csv").open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["used_fallback"], "True")
+
+    def test_generate_vol_regression_script_outputs_json_png_and_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = self._write_vol_workbook(tmpdir)
+            run_root, _ = self._write_vol_regression_checkpoint_run_root(tmpdir, run_ts="20260407_151515")
+            output_dir = Path(tmpdir) / "generate_vol_regression"
+            config_path = Path(tmpdir) / "generate_vol_regression.yaml"
+            _write_yaml(
+                config_path,
+                {
+                    "data_path": str(workbook_path),
+                    "sheet_name": "gan_input_ready",
+                    "text_embedding_mode": "hd",
+                    "train_ratio": 2 / 3,
+                    "cuda": False,
+                    "seed": 123,
+                    "checkpoint_path": "",
+                    "models_path": str(run_root),
+                    "metrics_path": str(run_root),
+                    "split": "val",
+                    "selection_mode": "row_index",
+                    "row_index": 0,
+                    "output_dir": str(output_dir),
+                    "save_plots": False,
+                    "save_json": True,
+                    "plot_style": "heatmap_diff",
+                },
+            )
+
+            module = _load_script_module(
+                ROOT_DIR / "scripts/generate_result/generate_vol_regression.py",
+                "generate_vol_regression_script",
+            )
+            run_dir = module.main(["--config", str(config_path)])
+
+            json_files = sorted((run_dir / "samples").glob("*.json"))
+            self.assertEqual(len(json_files), 1)
+            payload = json.loads(json_files[0].read_text(encoding="utf-8"))
+            self.assertEqual(payload["sample_id"], "news_3")
+            self.assertEqual(payload["mode"], "vol-regression")
+            self.assertIn("current_metrics", payload)
+            with (run_dir / "summary.csv").open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["mode"], "vol-regression")
+
     def test_generate_vol_script_supports_none_text_mode_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_vol_workbook(tmpdir)
@@ -668,10 +835,10 @@ class TestGenerateResultScripts(unittest.TestCase):
             self.assertGreater(sidecar_atm.stat().st_size, 0)
 
     def test_plot_surface_helper_uses_nearest_atm_and_short_maturity(self):
-        module = _load_script_module(ROOT_DIR / "scripts/generate_result/plot_surface.py", "plot_surface_helper_script")
+        from wgan_option.visualization.surface_plot import _nearest_atm_index, _short_maturity_index
 
-        atm_idx = module._nearest_atm_index([0.7, 0.91, 1.03, 1.25])
-        short_idx = module._short_maturity_index([7.0, 30.0, 60.0, 120.0, 240.0])
+        atm_idx = _nearest_atm_index([0.7, 0.91, 1.03, 1.25])
+        short_idx = _short_maturity_index([7.0, 30.0, 60.0, 120.0, 240.0])
 
         self.assertEqual(atm_idx, 2)
         self.assertEqual(short_idx, 0)
@@ -683,10 +850,21 @@ class TestGenerateResultScripts(unittest.TestCase):
         def _record(argv):
             calls.append(list(argv))
 
-        with patch.dict(module.COMMANDS, {"vol": _record, "svi": _record, "plot": _record}, clear=False):
+        with patch.dict(
+            module.COMMANDS,
+            {"vol": _record, "vol-regression": _record, "svi": _record, "plot": _record},
+            clear=False,
+        ):
             module.main(["vol", "--config", "configs/generate_result/vol.yaml"])
+            module.main(["vol-regression", "--config", "configs/generate_result/vol-regression.yaml"])
 
-        self.assertEqual(calls, [["--config", "configs/generate_result/vol.yaml"]])
+        self.assertEqual(
+            calls,
+            [
+                ["--config", "configs/generate_result/vol.yaml"],
+                ["--config", "configs/generate_result/vol-regression.yaml"],
+            ],
+        )
 
 
 if __name__ == "__main__":

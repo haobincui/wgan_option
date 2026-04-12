@@ -21,6 +21,7 @@ if str(SRC_DIR) not in sys.path:
 
 from wgan_option.config import Config, load_config, parse_cli_overrides  # noqa: E402
 from wgan_option.models.gan_model import WGAN_GP  # noqa: E402
+from wgan_option.train_vol_regression_xlsx import VolSurfaceRegressionTrainer  # noqa: E402
 from wgan_option.train_svi_xlsx import SviXlsxTrainer  # noqa: E402
 from wgan_option.utils.merged_xlsx import (  # noqa: E402
     create_svi_xlsx_dataloaders,
@@ -337,6 +338,9 @@ class TestTrainMergedXlsx(unittest.TestCase):
         self.assertTrue(config.use_butterfly_constraint)
         self.assertTrue(config.use_smooth_constraint)
         self.assertEqual(config.constraint_warmup_epochs, 0)
+        self.assertEqual(config.lambda_delta_shrink, 0.0)
+        self.assertEqual(config.best_checkpoint_metric, "val_recon")
+        self.assertEqual(config.baseline_penalty_weight, 2.0)
         self.assertFalse(config.use_early_stopping)
         self.assertEqual(config.early_stopping_patience, 10)
         self.assertEqual(config.early_stopping_min_delta, 0.0)
@@ -351,6 +355,9 @@ class TestTrainMergedXlsx(unittest.TestCase):
                 "use_butterfly_constraint=true",
                 "use_smooth_constraint=false",
                 "constraint_warmup_epochs=20",
+                "lambda_delta_shrink=0.05",
+                "best_checkpoint_metric=val_hybrid_score",
+                "baseline_penalty_weight=3.0",
                 "use_early_stopping=true",
                 "early_stopping_patience=15",
                 "early_stopping_min_delta=0.05",
@@ -365,6 +372,9 @@ class TestTrainMergedXlsx(unittest.TestCase):
         self.assertTrue(overridden.use_butterfly_constraint)
         self.assertFalse(overridden.use_smooth_constraint)
         self.assertEqual(overridden.constraint_warmup_epochs, 20)
+        self.assertEqual(overridden.lambda_delta_shrink, 0.05)
+        self.assertEqual(overridden.best_checkpoint_metric, "val_hybrid_score")
+        self.assertEqual(overridden.baseline_penalty_weight, 3.0)
         self.assertTrue(overridden.use_early_stopping)
         self.assertEqual(overridden.early_stopping_patience, 15)
         self.assertEqual(overridden.early_stopping_min_delta, 0.05)
@@ -512,6 +522,31 @@ class TestTrainMergedXlsx(unittest.TestCase):
         self.assertAlmostEqual(stats["g_butterfly"], 2.0, places=6)
         self.assertAlmostEqual(stats["g_smooth"], 3.0, places=6)
         expected_total = stats["g_adv"] + config.lambda_butterfly * stats["g_butterfly"]
+        self.assertAlmostEqual(stats["g_total"], expected_total, places=6)
+
+    def test_wgan_generator_loss_adds_delta_shrink_when_enabled(self):
+        config = Config(
+            cuda=False,
+            learning_rate=0.0,
+            lambda_recon=0.0,
+            lambda_delta_shrink=0.5,
+            use_calendar_constraint=False,
+            use_butterfly_constraint=False,
+            use_smooth_constraint=False,
+            noise_dim=4,
+            gen_hidden_dim=8,
+            disc_hidden_dim=8,
+        )
+        model = _build_test_wgan(config)
+
+        stats = model._generator_step(
+            current_surface=torch.zeros((1, 1, 2, 2), device=model.device),
+            text_embedding=torch.zeros((1, 2), device=model.device),
+            real_future=torch.zeros((1, 1, 2, 2), device=model.device),
+        )
+
+        expected_total = stats["g_adv"] + config.lambda_delta_shrink * stats["g_delta_shrink"]
+        self.assertGreater(stats["g_delta_shrink"], 0.0)
         self.assertAlmostEqual(stats["g_total"], expected_total, places=6)
 
     def test_wgan_generator_loss_constraint_warmup_skips_penalties_until_epoch_threshold(self):
@@ -666,6 +701,9 @@ class TestTrainMergedXlsx(unittest.TestCase):
             self.assertTrue(metrics_rows)
             self.assertIn("g_calendar", metrics_rows[0])
             self.assertIn("val_calendar", metrics_rows[0])
+            self.assertIn("g_delta_shrink", metrics_rows[0])
+            self.assertIn("val_current_recon", metrics_rows[0])
+            self.assertIn("val_hybrid_score", metrics_rows[0])
             self.assertIn("g_lr", metrics_rows[0])
             self.assertIn("d_lr", metrics_rows[0])
             csv_path = metrics_dir / "training_metrics.csv"
@@ -680,8 +718,94 @@ class TestTrainMergedXlsx(unittest.TestCase):
             best_payload = json.loads(best_path.read_text(encoding="utf-8"))
             self.assertEqual(best_payload["monitor_metric"], "val_recon")
             self.assertEqual(best_payload["best_epoch"], 1)
+            self.assertIn("val_current_recon", best_payload["metrics"])
             self.assertTrue((models_dir / "generator_best.pt").exists())
             self.assertTrue((models_dir / "discriminator_best.pt").exists())
+            fallback_path = metrics_dir / "fallback_calibration.json"
+            self.assertTrue(fallback_path.exists())
+            fallback_payload = json.loads(fallback_path.read_text(encoding="utf-8"))
+            self.assertIn("uncertainty_threshold", fallback_payload)
+            self.assertEqual(fallback_payload["mc_samples"], 5)
+
+    def test_train_vol_regression_script_dry_run_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = self._write_vol_workbook(tmpdir)
+            output_root = Path(tmpdir) / "training" / "vol_regression_xlsx"
+            config_path = Path(tmpdir) / "train_vol_regression.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_path: {workbook_path}",
+                        "sheet_name: gan_input_ready",
+                        "text_embedding_mode: concat",
+                        "train_ratio: 0.67",
+                        "batch_size: 2",
+                        "num_workers: 0",
+                        "cuda: false",
+                        "best_checkpoint_metric: val_hybrid_score",
+                        f"output_root: {output_root}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            module = _load_script_module(ROOT_DIR / "scripts/train/train_vol_regression.py", "train_vol_regression_script")
+            module.main(["--config", str(config_path), "--dry-run"])
+
+            run_dir = self._find_only_run_dir(output_root)
+            metrics_dir = run_dir / "metrics"
+            models_dir = run_dir / "checkpoints"
+            samples_dir = run_dir / "samples"
+            self.assertTrue(samples_dir.exists())
+            self.assertTrue((metrics_dir / f"run_config_{run_dir.name}.yaml").exists())
+            self.assertFalse((metrics_dir / "training_metrics.csv").exists())
+            self.assertFalse((metrics_dir / "best_checkpoint.json").exists())
+            self.assertFalse((models_dir / "vol_regressor_best.pt").exists())
+
+    def test_train_vol_regression_script_full_run_saves_loss_curves(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = self._write_vol_workbook(tmpdir)
+            output_root = Path(tmpdir) / "training" / "vol_regression_xlsx"
+            config_path = Path(tmpdir) / "train_vol_regression.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_path: {workbook_path}",
+                        "sheet_name: gan_input_ready",
+                        "text_embedding_mode: concat",
+                        "train_ratio: 0.67",
+                        "batch_size: 2",
+                        "num_epochs: 1",
+                        "save_every: 1",
+                        "gen_hidden_dim: 32",
+                        "num_workers: 0",
+                        "cuda: false",
+                        "lambda_delta_shrink: 0.05",
+                        "best_checkpoint_metric: val_hybrid_score",
+                        f"output_root: {output_root}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            module = _load_script_module(
+                ROOT_DIR / "scripts/train/train_vol_regression.py",
+                "train_vol_regression_full_script",
+            )
+            module.main(["--config", str(config_path)])
+
+            run_dir = self._find_only_run_dir(output_root)
+            metrics_dir = run_dir / "metrics"
+            models_dir = run_dir / "checkpoints"
+            self.assertTrue((metrics_dir / "loss_curves.png").exists())
+            metrics_rows = json.loads((metrics_dir / "training_metrics.json").read_text(encoding="utf-8"))
+            self.assertTrue(metrics_rows)
+            self.assertIn("train_delta_shrink", metrics_rows[0])
+            self.assertIn("val_current_recon", metrics_rows[0])
+            self.assertIn("val_hybrid_score", metrics_rows[0])
+            best_payload = json.loads((metrics_dir / "best_checkpoint.json").read_text(encoding="utf-8"))
+            self.assertEqual(best_payload["monitor_metric"], "val_hybrid_score")
+            self.assertTrue((models_dir / "vol_regressor_best.pt").exists())
 
     def test_train_svi_script_dry_run_succeeds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -833,6 +957,57 @@ class TestTrainMergedXlsx(unittest.TestCase):
             self.assertTrue((models_dir / "discriminator.pt").exists())
             self.assertAlmostEqual(model.g_optimizer.param_groups[0]["lr"], 0.025, places=6)
             self.assertAlmostEqual(model.d_optimizer.param_groups[0]["lr"], 0.025, places=6)
+
+    def test_wgan_best_checkpoint_can_monitor_hybrid_score(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir) / "training" / "vol_xlsx" / "20260410_010103"
+            metrics_dir = run_dir / "metrics"
+            models_dir = run_dir / "checkpoints"
+            config = Config(
+                cuda=False,
+                learning_rate=0.1,
+                num_epochs=2,
+                batch_size=1,
+                discriminator_iter=1,
+                noise_dim=4,
+                gen_hidden_dim=8,
+                disc_hidden_dim=8,
+                models_path=str(models_dir),
+                outputs_path=str(models_dir),
+                metrics_path=str(metrics_dir),
+                save_every=10,
+                best_checkpoint_metric="val_hybrid_score",
+            )
+            model = _build_test_wgan(config)
+            model._evaluate = Mock(
+                side_effect=[
+                    {
+                        "val_recon": 0.20,
+                        "val_current_recon": 0.18,
+                        "val_baseline_gap": 0.02,
+                        "val_hybrid_score": 0.24,
+                        "val_calendar": 0.01,
+                        "val_butterfly": 0.01,
+                        "val_delta_shrink": 0.10,
+                    },
+                    {
+                        "val_recon": 0.19,
+                        "val_current_recon": 0.19,
+                        "val_baseline_gap": 0.0,
+                        "val_hybrid_score": 0.19,
+                        "val_calendar": 0.01,
+                        "val_butterfly": 0.01,
+                        "val_delta_shrink": 0.08,
+                    },
+                ]
+            )
+
+            model.train(_build_small_wgan_loader(), _build_small_wgan_loader())
+
+            best_payload = json.loads((metrics_dir / "best_checkpoint.json").read_text(encoding="utf-8"))
+            self.assertEqual(best_payload["monitor_metric"], "val_hybrid_score")
+            self.assertEqual(best_payload["best_epoch"], 2)
+            self.assertAlmostEqual(best_payload["best_metric"], 0.19, places=6)
 
     def test_wgan_training_without_validation_skips_best_checkpoint_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:

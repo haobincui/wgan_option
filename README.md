@@ -229,8 +229,13 @@ Training diagnostics and model notes:
 - The script families under `scripts/` are intentionally thin wrappers around reusable logic in `src/`.
 
 
+# Pipelines
 
-run raw vol 
+
+## 1. run vol xlsx
+
+
+## 2. run raw vol 
 ```shell
 python -m pip install -e .
 

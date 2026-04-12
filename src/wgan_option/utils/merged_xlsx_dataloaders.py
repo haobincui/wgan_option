@@ -146,6 +146,9 @@ def create_vol_surface_xlsx_dataloaders(config: Config) -> VolSurfaceXlsxBundle:
         timestamps=timestamps,
         train_timestamps=train_timestamps,
         val_timestamps=val_timestamps,
+        all_items=list(samples),
+        train_items=list(samples[:train_samples]),
+        val_items=list(samples[train_samples:]),
     )
 
 

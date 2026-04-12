@@ -2,7 +2,7 @@ import math
 import os
 import random
 from dataclasses import asdict
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 import numpy as np
 import torch
@@ -14,7 +14,13 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from wgan_option.config import Config
 from wgan_option.models.discriminator import Discriminator
 from wgan_option.models.generator import Generator
+from wgan_option.utils.inference_helpers import infer_vol_surface_mc, load_vol_generator
 from wgan_option.utils.training_artifacts import write_best_checkpoint, write_metrics_csv, write_metrics_json
+from wgan_option.utils.vol_forecast_metrics import (
+    mean_abs_error,
+    resolve_monitor_metric,
+    summarize_baseline_aware_metrics,
+)
 from wgan_option.utils.visualization import plot_training_curves
 
 
@@ -72,10 +78,13 @@ class WGAN_GP:
         self.lambda_calendar = config.lambda_calendar
         self.lambda_butterfly = config.lambda_butterfly
         self.lambda_smooth = config.lambda_smooth
+        self.lambda_delta_shrink = float(getattr(config, "lambda_delta_shrink", 0.0))
         self.use_calendar_constraint = config.use_calendar_constraint
         self.use_butterfly_constraint = config.use_butterfly_constraint
         self.use_smooth_constraint = config.use_smooth_constraint
         self.num_epochs = config.num_epochs
+        self.best_checkpoint_metric = str(getattr(config, "best_checkpoint_metric", "val_recon")).strip() or "val_recon"
+        self.baseline_penalty_weight = float(getattr(config, "baseline_penalty_weight", 2.0))
 
         self.model_path = config.models_path
         self.metrics_path = config.metrics_path
@@ -182,6 +191,22 @@ class WGAN_GP:
             bool(self.use_smooth_constraint),
         )
 
+    @staticmethod
+    def delta_shrink_penalty(fake_future: torch.Tensor, current_surface: torch.Tensor) -> torch.Tensor:
+        return torch.mean(torch.abs(fake_future - current_surface))
+
+    @staticmethod
+    def _allowed_monitor_metrics() -> set[str]:
+        return {
+            "val_recon",
+            "val_current_recon",
+            "val_baseline_gap",
+            "val_hybrid_score",
+            "val_calendar",
+            "val_butterfly",
+            "val_delta_shrink",
+        }
+
     def calculate_gradient_penalty(
         self,
         real_surface: torch.Tensor,
@@ -224,6 +249,7 @@ class WGAN_GP:
         cal_penalty = self.calendar_arbitrage_penalty(fake_future)
         bfly_penalty = self.butterfly_arbitrage_penalty(fake_future)
         smooth_penalty = self.smoothness_penalty(fake_future)
+        delta_shrink = self.delta_shrink_penalty(fake_future, current_surface)
         use_calendar_constraint, use_butterfly_constraint, use_smooth_constraint = self._constraint_switches_for_epoch(epoch)
 
         g_loss = adv_loss + self.lambda_recon * recon_loss
@@ -233,6 +259,8 @@ class WGAN_GP:
             g_loss = g_loss + self.lambda_butterfly * bfly_penalty
         if use_smooth_constraint:
             g_loss = g_loss + self.lambda_smooth * smooth_penalty
+        if self.lambda_delta_shrink > 0.0:
+            g_loss = g_loss + self.lambda_delta_shrink * delta_shrink
         g_loss.backward()
         self.g_optimizer.step()
 
@@ -243,6 +271,7 @@ class WGAN_GP:
             "g_calendar": float(cal_penalty.detach().cpu()),
             "g_butterfly": float(bfly_penalty.detach().cpu()),
             "g_smooth": float(smooth_penalty.detach().cpu()),
+            "g_delta_shrink": float(delta_shrink.detach().cpu()),
         }
 
     def _discriminator_step(
@@ -274,7 +303,7 @@ class WGAN_GP:
             return {}
 
         self.G.eval()
-        recon, calendar, butterfly = [], [], []
+        recon, current_recon, calendar, butterfly, delta_shrink = [], [], [], [], []
         with torch.no_grad():
             for current_surface, text_embedding, real_future in val_loader:
                 current_surface = self._to_device(current_surface)
@@ -282,24 +311,36 @@ class WGAN_GP:
                 real_future = self._to_device(real_future)
                 fake_future = self.G(current_surface, text_embedding)
                 recon.append(float(F.l1_loss(fake_future, real_future).detach().cpu()))
+                current_recon.append(float(F.l1_loss(current_surface, real_future).detach().cpu()))
                 calendar.append(float(self.calendar_arbitrage_penalty(fake_future).detach().cpu()))
                 butterfly.append(float(self.butterfly_arbitrage_penalty(fake_future).detach().cpu()))
+                delta_shrink.append(float(self.delta_shrink_penalty(fake_future, current_surface).detach().cpu()))
         self.G.train()
-        return {
-            "val_recon": float(np.mean(recon)) if recon else 0.0,
+        metrics = summarize_baseline_aware_metrics(
+            recon,
+            current_recon,
+            baseline_penalty_weight=self.baseline_penalty_weight,
+        )
+        metrics.update(
+            {
             "val_calendar": float(np.mean(calendar)) if calendar else 0.0,
             "val_butterfly": float(np.mean(butterfly)) if butterfly else 0.0,
-        }
+                "val_delta_shrink": float(np.mean(delta_shrink)) if delta_shrink else 0.0,
+            }
+        )
+        return metrics
 
     def _init_metrics_file(self):
         self._metrics_file = os.path.join(self.metrics_path, "training_metrics.json")
         self._metrics_csv_file = os.path.join(self.metrics_path, "training_metrics.csv")
         self._best_checkpoint_file = os.path.join(self.metrics_path, "best_checkpoint.json")
+        self._fallback_calibration_file = os.path.join(self.metrics_path, "fallback_calibration.json")
         self._metrics_rows = []
         write_metrics_json([], self._metrics_file)
         for stale_path in (
             self._metrics_csv_file,
             self._best_checkpoint_file,
+            self._fallback_calibration_file,
             os.path.join(self.model_path, "generator_best.pt"),
             os.path.join(self.model_path, "discriminator_best.pt"),
         ):
@@ -357,14 +398,110 @@ class WGAN_GP:
                 ("Primary losses", ("g_recon", "val_recon", "g_total", "d_total", "gp")),
                 (
                     "Constraint losses",
-                    ("g_calendar", "g_butterfly", "g_smooth", "val_calendar", "val_butterfly"),
+                    (
+                        "g_calendar",
+                        "g_butterfly",
+                        "g_smooth",
+                        "g_delta_shrink",
+                        "val_calendar",
+                        "val_butterfly",
+                        "val_current_recon",
+                        "val_hybrid_score",
+                        "val_delta_shrink",
+                    ),
                 ),
             ),
             output_path=output_path,
         )
         logger.info("Loss curve plot saved to: %s", output_path)
 
-    def train(self, train_loader, val_loader=None):
+    def _calibrate_fallback_threshold(self, val_samples: Sequence[object]) -> None:
+        checkpoint_path = os.path.join(self.model_path, "generator_best.pt")
+        if not val_samples or not os.path.exists(checkpoint_path):
+            return
+
+        model, train_config, _ = load_vol_generator(checkpoint_path, val_samples[0], self.device)
+        uncertainty_scores: list[float] = []
+        sample_metrics: list[dict[str, float]] = []
+
+        for sample in val_samples:
+            mean_surface, uncertainty_score, _ = infer_vol_surface_mc(
+                model,
+                sample,
+                noise_dim=int(train_config.noise_dim),
+                seed=int(self.config.seed),
+                device=self.device,
+                mc_samples=5,
+            )
+            current_surface = sample.current_surface[0]
+            target_surface = sample.target_surface[0]
+            uncertainty_scores.append(float(uncertainty_score))
+            sample_metrics.append(
+                {
+                    "model_recon": mean_abs_error(mean_surface, target_surface),
+                    "current_recon": mean_abs_error(current_surface, target_surface),
+                    "uncertainty_score": float(uncertainty_score),
+                }
+            )
+
+        if not sample_metrics:
+            return
+
+        score_array = np.asarray(uncertainty_scores, dtype=np.float32)
+        candidate_percentiles = (50, 60, 70, 80, 90, 95)
+        candidate_rows = []
+        best_payload = None
+
+        for percentile in candidate_percentiles:
+            threshold = float(np.percentile(score_array, percentile))
+            fallback_recon = []
+            current_recon = []
+            used_fallback_count = 0
+            for item in sample_metrics:
+                current_metric = float(item["current_recon"])
+                model_metric = float(item["model_recon"])
+                current_recon.append(current_metric)
+                if float(item["uncertainty_score"]) > threshold:
+                    fallback_recon.append(current_metric)
+                    used_fallback_count += 1
+                else:
+                    fallback_recon.append(model_metric)
+            summary = summarize_baseline_aware_metrics(
+                fallback_recon,
+                current_recon,
+                baseline_penalty_weight=self.baseline_penalty_weight,
+            )
+            row = {
+                "percentile": int(percentile),
+                "uncertainty_threshold": threshold,
+                "fallback_rate": float(used_fallback_count) / float(len(sample_metrics)),
+                **summary,
+            }
+            candidate_rows.append(row)
+            if best_payload is None or float(row["val_hybrid_score"]) < float(best_payload["val_hybrid_score"]):
+                best_payload = row
+
+        assert best_payload is not None
+        write_best_checkpoint(
+            {
+                "checkpoint_path": checkpoint_path,
+                "mc_samples": 5,
+                "baseline_penalty_weight": self.baseline_penalty_weight,
+                "selected_percentile": int(best_payload["percentile"]),
+                "uncertainty_threshold": float(best_payload["uncertainty_threshold"]),
+                "selected_metrics": {
+                    "val_recon": float(best_payload["val_recon"]),
+                    "val_current_recon": float(best_payload["val_current_recon"]),
+                    "val_baseline_gap": float(best_payload["val_baseline_gap"]),
+                    "val_hybrid_score": float(best_payload["val_hybrid_score"]),
+                    "fallback_rate": float(best_payload["fallback_rate"]),
+                },
+                "candidates": candidate_rows,
+            },
+            self._fallback_calibration_file,
+        )
+
+    def train(self, train_loader, val_loader=None, *, val_samples: Optional[Sequence[object]] = None):
         import logging
         logger = logging.getLogger("wgan_option.trainer")
 
@@ -372,7 +509,12 @@ class WGAN_GP:
 
         metrics_rows = []
         num_batches = len(train_loader)
-        monitor_metric = "val_recon"
+        monitor_metric = self.best_checkpoint_metric
+        if monitor_metric not in self._allowed_monitor_metrics():
+            raise ValueError(
+                f"Unsupported best_checkpoint_metric='{monitor_metric}'. "
+                f"Expected one of {sorted(self._allowed_monitor_metrics())}."
+            )
         best_metric = None
         best_epoch = None
         patience = max(1, int(self.config.early_stopping_patience))
@@ -464,7 +606,11 @@ class WGAN_GP:
 
             val_info = ""
             if "val_recon" in epoch_stats:
-                val_info = f" ValRecon={epoch_stats['val_recon']:.4f}"
+                val_info = (
+                    f" ValRecon={epoch_stats['val_recon']:.4f}"
+                    f" Curr={epoch_stats.get('val_current_recon', 0.0):.4f}"
+                    f" Hybrid={epoch_stats.get('val_hybrid_score', 0.0):.4f}"
+                )
 
             logger.info(
                 "[Epoch %04d/%04d] D=%.4f G=%.4f Recon=%.4f Cal=%.4f Bfly=%.4f%s",
@@ -478,7 +624,7 @@ class WGAN_GP:
             )
 
             if best_tracking_enabled and monitor_metric in epoch_stats:
-                current_metric = float(epoch_stats[monitor_metric])
+                current_metric = resolve_monitor_metric(epoch_stats, monitor_metric)
                 if best_metric is None or current_metric < (best_metric - min_delta):
                     best_metric = current_metric
                     best_epoch = epoch
@@ -489,6 +635,15 @@ class WGAN_GP:
                             "monitor_metric": monitor_metric,
                             "best_epoch": int(epoch),
                             "best_metric": current_metric,
+                            "metrics": {
+                                "val_recon": float(epoch_stats.get("val_recon", 0.0)),
+                                "val_current_recon": float(epoch_stats.get("val_current_recon", 0.0)),
+                                "val_baseline_gap": float(epoch_stats.get("val_baseline_gap", 0.0)),
+                                "val_hybrid_score": float(epoch_stats.get("val_hybrid_score", 0.0)),
+                                "val_calendar": float(epoch_stats.get("val_calendar", 0.0)),
+                                "val_butterfly": float(epoch_stats.get("val_butterfly", 0.0)),
+                                "val_delta_shrink": float(epoch_stats.get("val_delta_shrink", 0.0)),
+                            },
                             "artifacts": artifact_paths,
                         },
                         self._best_checkpoint_file,
@@ -544,6 +699,11 @@ class WGAN_GP:
 
         self.save_model()
         self._write_metrics(metrics_rows)
+        if best_tracking_enabled and val_samples:
+            try:
+                self._calibrate_fallback_threshold(val_samples)
+            except Exception as exc:
+                logger.warning("Failed to calibrate fallback threshold: %s", exc)
         try:
             self._save_loss_curves(metrics_rows, logger)
         except Exception as exc:

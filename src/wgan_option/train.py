@@ -109,7 +109,11 @@ class WGANTrainer:
                          self.config.num_epochs, self.config.batch_size, self.config.learning_rate)
         assert self.model is not None
         assert self.bundle is not None
-        self.model.train(self.bundle.train_loader, self.bundle.val_loader)
+        self.model.train(
+            self.bundle.train_loader,
+            self.bundle.val_loader,
+            val_samples=getattr(self.bundle, "val_items", None),
+        )
         self.logger.info("*** Training complete ***")
 
     def dry_run(self):

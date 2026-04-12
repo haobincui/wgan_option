@@ -38,7 +38,13 @@
       "Bash(python -m pytest tests/test_scripts/test_merge_file.py -v)",
       "Bash(python -m pytest tests/test_scripts/test_analyze_error.py tests/test_scripts/test_generate_result.py -v)",
       "Bash(python -m pytest tests/test_scripts/test_generate_surface_config_jobs.py tests/test_scripts/test_generate_surface_main.py tests/test_scripts/test_daily_surface_config.py tests/test_scripts/test_generate_minute_svi_params.py -v)",
-      "Bash(ls /home/haobin_cui/research_files_space_2/wgan_option-svi-speedup/*.sh)"
+      "Bash(ls /home/haobin_cui/research_files_space_2/wgan_option-svi-speedup/*.sh)",
+      "Bash(head -20 /home/haobin_cui/research_files_space_2/wgan_option-svi-speedup/src/volgan/*.py)",
+      "Bash(python -m pytest tests/ -x -q)",
+      "Bash(python -m pytest tests/ -x -q --ignore=tests/test_argument_order_hygiene.py)",
+      "Bash(python -m pytest tests/test_scripts/test_generate_result.py tests/test_scripts/test_train_xlsx.py -x -q)",
+      "Bash(python -m pytest tests/ -q --ignore=tests/test_argument_order_hygiene.py --ignore=tests/test_scripts/test_build_ty_plus_trade_tables.py)",
+      "Bash(python -m pytest tests/test_scripts/test_merge_file.py tests/test_scripts/test_merge_vol.py -x -q)"
     ]
   }
 }

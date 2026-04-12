@@ -15,6 +15,7 @@ from quantlib.vol_surface.algo.svi_surface import SviVolSurface
 from wgan_option.config import Config
 from wgan_option.models.generator import Generator
 from wgan_option.models.svi_regressor import SviRegressor
+from wgan_option.models.vol_regressor import VolSurfaceRegressor
 from wgan_option.utils.merged_xlsx import (
     SVI_FEATURE_ORDER,
     _build_svi_matrix_from_params,
@@ -62,11 +63,18 @@ def _coerce_inference_embedding(*, sample_id: str, embedding: np.ndarray, embedd
     )
 
 
-def deterministic_noise(noise_dim: int, seed: int, global_index: int, device: torch.device) -> torch.Tensor:
+def deterministic_noise(
+    noise_dim: int,
+    seed: int,
+    global_index: int,
+    device: torch.device,
+    *,
+    sample_offset: int = 0,
+) -> torch.Tensor:
     """Build deterministic generator noise for one sample."""
 
     generator = torch.Generator(device="cpu")
-    generator.manual_seed(int(seed) + int(global_index))
+    generator.manual_seed(int(seed) + int(global_index) + int(sample_offset) * 1000003)
     noise = torch.randn((1, int(noise_dim)), generator=generator, dtype=torch.float32)
     return noise.to(device)
 
@@ -120,6 +128,100 @@ def infer_vol_surface(
 
     with torch.no_grad():
         generated_surface = model(current_tensor, text_tensor, noise=noise).detach().cpu().numpy()[0, 0]
+    return np.asarray(generated_surface, dtype=np.float32)
+
+
+def infer_vol_surface_mc(
+    model: Generator,
+    sample: Any,
+    *,
+    noise_dim: int,
+    seed: int,
+    device: torch.device,
+    mc_samples: int,
+) -> tuple[np.ndarray, float, list[np.ndarray]]:
+    """Average deterministic MC draws and return the mean surface and uncertainty score."""
+
+    current_tensor = torch.tensor(sample.current_surface, dtype=torch.float32, device=device).unsqueeze(0)
+    if hasattr(model, "text_encoder") and len(model.text_encoder) > 0 and hasattr(model.text_encoder[0], "in_features"):
+        embedding_dim = int(model.text_encoder[0].in_features)
+    else:
+        embedding_dim = int(sample.text_embedding.size)
+    aligned_embedding = _coerce_inference_embedding(
+        sample_id=str(sample.sample_id),
+        embedding=sample.text_embedding,
+        embedding_dim=embedding_dim,
+    )
+    text_tensor = torch.tensor(aligned_embedding, dtype=torch.float32, device=device).unsqueeze(0)
+
+    surfaces: list[np.ndarray] = []
+    with torch.no_grad():
+        for draw_idx in range(max(1, int(mc_samples))):
+            noise = deterministic_noise(
+                noise_dim,
+                seed,
+                sample.global_index,
+                device,
+                sample_offset=draw_idx,
+            )
+            generated_surface = model(current_tensor, text_tensor, noise=noise).detach().cpu().numpy()[0, 0]
+            surfaces.append(np.asarray(generated_surface, dtype=np.float32))
+
+    stacked = np.stack(surfaces, axis=0).astype(np.float32)
+    mean_surface = np.mean(stacked, axis=0).astype(np.float32)
+    uncertainty_score = float(np.mean(np.std(stacked, axis=0, ddof=0)))
+    return mean_surface, uncertainty_score, surfaces
+
+
+def load_vol_regressor(
+    checkpoint_path: str | Path,
+    sample: Any,
+    device: torch.device,
+) -> tuple[VolSurfaceRegressor, Config, int]:
+    """Load the trained deterministic vol regressor used by surface inference."""
+
+    checkpoint = torch.load(Path(checkpoint_path), map_location=device)
+    train_config = Config(**checkpoint["config"])
+    embedding_dim = int(checkpoint.get("embedding_dim", train_config.embedding_dim))
+
+    model = VolSurfaceRegressor(
+        channels=int(train_config.channels),
+        embedding_dim=embedding_dim,
+        surface_height=int(sample.current_surface.shape[1]),
+        surface_width=int(sample.current_surface.shape[2]),
+        base_channels=int(getattr(train_config, "gen_base_channels", 32)),
+        res_blocks=int(getattr(train_config, "gen_res_blocks", 0)),
+        text_hidden_dim=int(getattr(train_config, "gen_text_hidden_dim", 256)),
+        text_out_dim=int(getattr(train_config, "gen_text_out_dim", 128)),
+        hidden_dim=int(train_config.gen_hidden_dim),
+    ).to(device)
+    model.load_state_dict(checkpoint["state_dict"])
+    model.eval()
+    return model, train_config, embedding_dim
+
+
+def infer_vol_regression_surface(
+    model: VolSurfaceRegressor,
+    sample: Any,
+    *,
+    device: torch.device,
+) -> np.ndarray:
+    """Run one deterministic forward pass of the vol regressor and return a 2D surface."""
+
+    current_tensor = torch.tensor(sample.current_surface, dtype=torch.float32, device=device).unsqueeze(0)
+    if hasattr(model, "text_encoder") and len(model.text_encoder) > 0 and hasattr(model.text_encoder[0], "in_features"):
+        embedding_dim = int(model.text_encoder[0].in_features)
+    else:
+        embedding_dim = int(sample.text_embedding.size)
+    aligned_embedding = _coerce_inference_embedding(
+        sample_id=str(sample.sample_id),
+        embedding=sample.text_embedding,
+        embedding_dim=embedding_dim,
+    )
+    text_tensor = torch.tensor(aligned_embedding, dtype=torch.float32, device=device).unsqueeze(0)
+
+    with torch.no_grad():
+        generated_surface = model(current_tensor, text_tensor).detach().cpu().numpy()[0, 0]
     return np.asarray(generated_surface, dtype=np.float32)
 
 

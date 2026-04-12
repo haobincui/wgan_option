@@ -77,10 +77,13 @@ class Config:
     lambda_calendar: float = 2.0
     lambda_butterfly: float = 2.0
     lambda_smooth: float = 0.1
+    lambda_delta_shrink: float = 0.0
     use_calendar_constraint: bool = True
     use_butterfly_constraint: bool = True
     use_smooth_constraint: bool = True
     constraint_warmup_epochs: int = 0
+    best_checkpoint_metric: str = "val_recon"
+    baseline_penalty_weight: float = 2.0
     count_loss_weight: float = 0.2
 
     # Runtime

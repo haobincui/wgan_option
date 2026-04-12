@@ -176,6 +176,41 @@ def resolve_checkpoint_path(
     )
 
 
+def resolve_metrics_artifact_path(
+    config: Any,
+    *,
+    filename: str,
+    checkpoint_path: str | Path | None = None,
+) -> Path:
+    """Resolve a metrics-side artifact, preferring the checkpoint's sibling run directory."""
+
+    candidates: List[Path] = []
+    seen: set[str] = set()
+
+    def add_candidate(path: Path) -> None:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            candidates.append(path)
+
+    if checkpoint_path is not None:
+        checkpoint = Path(checkpoint_path)
+        if checkpoint.parent.name == "checkpoints":
+            add_candidate(checkpoint.parent.parent / "metrics" / filename)
+        add_candidate(checkpoint.parent / filename)
+
+    for metrics_dir in _artifact_directory_candidates(str(config.metrics_path).strip(), leaf_name="metrics"):
+        add_candidate(metrics_dir / filename)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    raise FileNotFoundError(
+        f"Could not resolve metrics artifact '{filename}'. Tried: {[str(path) for path in candidates]}"
+    )
+
+
 def _artifact_directory_candidates(base_path: str, *, leaf_name: str) -> List[Path]:
     """Return direct and latest-run artifact directories for metrics/checkpoints lookup."""
 

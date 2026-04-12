@@ -1,0 +1,23 @@
+data_path: data/processed/svi-all/20260330-01/merged_vol.xlsx
+sheet_name: gan_input_ready
+text_embedding_mode: lp
+train_ratio: 0.8
+min_samples_for_training: 2
+
+noise_dim: 32
+hidden_dim: 128
+num_epochs: 100
+batch_size: 32
+learning_rate: 0.0001
+
+use_gradient_matching: true
+gradient_match_epochs: 5
+alpha_m: 1.0
+alpha_tau: 1.0
+
+seed: 42
+cuda: true
+num_workers: 0
+
+output_root: ""
+save_every: 10

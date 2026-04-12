@@ -25,6 +25,9 @@ class VolSurfaceXlsxBundle:
     timestamps: List[str]
     train_timestamps: List[str]
     val_timestamps: List[str]
+    all_items: List["VolSurfaceSample"]
+    train_items: List["VolSurfaceSample"]
+    val_items: List["VolSurfaceSample"]
 
 
 @dataclass

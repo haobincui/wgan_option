@@ -20,6 +20,7 @@ from wgan_option.surface_grid import (
 
 DEFAULT_VOL_RESULT_CONFIG_PATH = "configs/generate_result/vol.yaml"
 DEFAULT_SVI_RESULT_CONFIG_PATH = "configs/generate_result/svi.yaml"
+DEFAULT_VOL_REGRESSION_RESULT_CONFIG_PATH = "configs/generate_result/vol-regression.yaml"
 
 
 @dataclass
@@ -39,6 +40,9 @@ class GenerateResultConfig:
     checkpoint_path: str = ""
     models_path: str = ""
     metrics_path: str = ""
+    fallback_mode: str = "none"
+    mc_samples: int = 1
+    uncertainty_threshold: float = -1.0
 
     # Sample selection
     split: str = "val"
