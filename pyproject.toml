@@ -25,4 +25,4 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["wgan_option*", "quantlib*", "market_data*", "volgan*"]
+include = ["wgan_option*", "quantlib*", "market_data*", "volgan*", "cnn_wgan*", "transformer_wgan*"]

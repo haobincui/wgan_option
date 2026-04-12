@@ -1,0 +1,24 @@
+data_path: data/processed/svi-excel/20260410-174929/merged_vol.xlsx
+sheet_name: gan_input_ready
+text_embedding_mode: lp
+train_ratio: 0.8
+
+checkpoint_path: ""
+seed: 42
+cuda: true
+
+mc_samples: 64
+reweight_beta_mode: fixed
+reweight_beta: 25.0
+quantiles:
+  - 0.05
+  - 0.5
+  - 0.95
+
+split: val
+selection_mode: all
+selection_count: 0
+aggregation_mode: weighted_mean
+output_dir: ""
+save_json: true
+save_plots: true

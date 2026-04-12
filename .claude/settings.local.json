@@ -1,6 +1,9 @@
 {
   "permissions": {
     "allow": [
+      "Bash(npm run lint)",
+      "Bash(npm run test *)",
+      "Read(~/.zshrc)",
       "Bash(python -c \"import torch; import numpy; import pandas; import yaml; import openpyxl; print\\('All core dependencies OK'\\); print\\('torch:', torch.__version__\\); print\\('numpy:', numpy.__version__\\); print\\('pandas:', pandas.__version__\\)\")",
       "Bash(conda env:*)",
       "Bash(/Users/haobincui/miniconda3/envs/py312/bin/python -c \"import torch; import numpy; import pandas; import yaml; print\\('torch:', torch.__version__\\); print\\('numpy:', numpy.__version__\\); print\\('pandas:', pandas.__version__\\); print\\('OK'\\)\")",
@@ -44,7 +47,17 @@
       "Bash(python -m pytest tests/ -x -q --ignore=tests/test_argument_order_hygiene.py)",
       "Bash(python -m pytest tests/test_scripts/test_generate_result.py tests/test_scripts/test_train_xlsx.py -x -q)",
       "Bash(python -m pytest tests/ -q --ignore=tests/test_argument_order_hygiene.py --ignore=tests/test_scripts/test_build_ty_plus_trade_tables.py)",
-      "Bash(python -m pytest tests/test_scripts/test_merge_file.py tests/test_scripts/test_merge_vol.py -x -q)"
+      "Bash(python -m pytest tests/test_scripts/test_merge_file.py tests/test_scripts/test_merge_vol.py -x -q)",
+      "Bash(python3 -c ':*)",
+      "Bash(conda info:*)",
+      "Bash(conda run -n wgan python3 -c ':*)",
+      "Bash(conda run:*)",
+      "Bash(/home/haobin_cui/.conda/envs/wgan/bin/pip list:*)",
+      "Bash(awk -F, 'NR==1{for\\(i=1;i<=NF;i++\\){h[i]=$i; if\\($i==\"mae\"\\)mi=i; if\\($i==\"rmse\"\\)ri=i; if\\($i==\"max_abs\"\\)ai=i; if\\($i==\"generated_current_mae\"\\)gi=i}} NR>1{print $\\(mi\\), $\\(ri\\), $\\(ai\\), $\\(gi\\)}' outputs/generate_result/cnn_wgan/svi-excel/20260412_200837/summary.csv)",
+      "Bash(sort -t' ' -k1 -n -r)",
+      "Bash(awk -F, 'NR==1{for\\(i=1;i<=NF;i++\\){h[i]=$i; if\\($i==\"mae\"\\)mi=i; if\\($i==\"rmse\"\\)ri=i; if\\($i==\"max_abs\"\\)ai=i; if\\($i==\"generated_current_mae\"\\)gi=i}} NR>1{print $\\(mi\\), $\\(ri\\), $\\(ai\\), $\\(gi\\)}' outputs/generate_result/cnn_wgan/svi-excel/20260412_222701/summary.csv)",
+      "Bash(awk -F, 'NR==1{for\\(i=1;i<=NF;i++\\){if\\($i==\"mae\"\\)mi=i; if\\($i==\"max_abs\"\\)ai=i; if\\($i==\"current_mae\"\\)ci=i; if\\($i==\"generated_current_mae\"\\)gi=i}} NR>1{:*)",
+      "Bash(grep -E \"\\\\.sh$|run.*\")"
     ]
   }
 }

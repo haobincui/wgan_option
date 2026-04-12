@@ -1,0 +1,61 @@
+data_path: data/processed/svi-excel/20260410-174929/merged_vol.xlsx
+sheet_name: gan_input_ready
+text_embedding_mode: lp
+train_ratio: 0.8
+
+normalize_current_surface: true
+normalize_target_delta: true
+normalize_text_embedding: true
+
+noise_dim: 32
+model_dim: 128
+gen_layers: 4
+disc_layers: 3
+num_heads: 8
+ffn_dim: 512
+dropout: 0.1
+text_hidden_dim: 256
+text_token_dim: 128
+noise_hidden_dim: 128
+
+learning_rate: 1.0e-4
+generator_learning_rate: 1.0e-4
+discriminator_learning_rate: 1.0e-4
+use_reduce_lr_on_plateau: true
+reduce_lr_factor: 0.5
+reduce_lr_patience: 8
+reduce_lr_min_lr: 1.0e-5
+num_epochs: 120
+batch_size: 32
+beta_1: 0.5
+beta_2: 0.9
+critic_iter: 5
+lambda_gp: 10.0
+
+pure_adversarial: true
+lambda_recon: 10.0
+lambda_calendar: 2.0
+lambda_butterfly: 2.0
+lambda_smooth: 0.1
+lambda_delta_shrink: 0.1
+use_calendar_constraint: true
+use_butterfly_constraint: true
+use_smooth_constraint: true
+constraint_warmup_epochs: 0
+best_checkpoint_metric: val_recon
+baseline_penalty_weight: 2.0
+
+eval_mc_samples: 32
+eval_reweight_beta_mode: fixed
+eval_reweight_beta: 25.0
+eval_aggregation_mode: weighted_mean
+
+seed: 42
+cuda: true
+num_workers: 0
+save_every: 10
+use_early_stopping: true
+early_stopping_patience: 20
+early_stopping_min_delta: 0.0
+
+output_root: ""
