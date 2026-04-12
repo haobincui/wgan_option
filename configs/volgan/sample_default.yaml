@@ -18,6 +18,7 @@ quantiles:
 split: val
 selection_mode: all
 selection_count: 0
+aggregation_mode: weighted_mean
 output_dir: ""
 save_json: true
 save_plots: true

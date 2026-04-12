@@ -27,11 +27,32 @@ class VolGANTrainConfig:
     num_epochs: int = 100
     batch_size: int = 32
     learning_rate: float = 1e-4
+    generator_learning_rate: float = 1e-4
+    discriminator_learning_rate: float = 1e-4
+
+    disc_steps_per_batch: int = 2
+    gen_steps_per_batch: int = 1
+    real_label_value: float = 0.9
+    fake_label_value: float = 0.0
+    generator_grad_clip: float = 5.0
+    discriminator_grad_clip: float = 5.0
 
     use_gradient_matching: bool = True
     gradient_match_epochs: int = 5
     alpha_m: float = 1.0
     alpha_tau: float = 1.0
+    alpha_clip_min: float = 1e-3
+    alpha_clip_max: float = 10.0
+
+    normalize_current_surface: bool = True
+    normalize_target_delta: bool = True
+    normalize_text_embedding: bool = True
+
+    eval_mc_samples: int = 32
+    eval_reweight_beta_mode: str = "fixed"
+    eval_reweight_beta: float = 25.0
+    eval_aggregation_mode: str = "weighted_mean"
+    checkpoint_metric: str = "val_mae_gap_vs_current"
 
     seed: int = 42
     cuda: bool = torch.cuda.is_available()
@@ -62,6 +83,7 @@ class VolGANSampleConfig:
     split: str = "val"
     selection_mode: str = "all"
     selection_count: int = 0
+    aggregation_mode: str = "weighted_mean"
     output_dir: str = ""
     save_json: bool = True
     save_plots: bool = True
@@ -110,6 +132,10 @@ def _coerce_config(config_cls: Type[T], values: Dict[str, Any]) -> T:
 def load_train_config(config_path: str | Path) -> VolGANTrainConfig:
     values = _load_yaml_values(config_path)
     config = _coerce_config(VolGANTrainConfig, values)
+    if "generator_learning_rate" not in values:
+        config.generator_learning_rate = float(config.learning_rate)
+    if "discriminator_learning_rate" not in values:
+        config.discriminator_learning_rate = float(config.learning_rate)
     if not str(config.output_root).strip():
         config.output_root = default_train_output_root(config.data_path)
     return config

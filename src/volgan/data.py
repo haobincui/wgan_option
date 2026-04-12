@@ -85,16 +85,89 @@ class VolSurfaceDataBundle:
     strike_grid: np.ndarray
     maturity_days_grid: np.ndarray
     embedding_dim: int
+    normalization_stats: "VolGANNormalizationStats"
     train_items: list[VolSurfaceSample]
     val_items: list[VolSurfaceSample]
     all_items: list[VolSurfaceSample]
 
 
+@dataclass(frozen=True)
+class VolGANNormalizationStats:
+    """Feature statistics used to normalize standalone VolGAN inputs and outputs."""
+
+    current_log_mean: np.ndarray
+    current_log_std: np.ndarray
+    delta_mean: np.ndarray
+    delta_std: np.ndarray
+    text_mean: np.ndarray
+    text_std: np.ndarray
+
+
+def _safe_std(values: np.ndarray) -> np.ndarray:
+    std = np.std(values, axis=0).astype(np.float32)
+    std[std < 1e-6] = 1.0
+    return std
+
+
+def _compute_normalization_stats(samples: Sequence[VolSurfaceSample]) -> VolGANNormalizationStats:
+    current_logs: list[np.ndarray] = []
+    deltas: list[np.ndarray] = []
+    text_embeddings: list[np.ndarray] = []
+    for sample in samples:
+        current_flat = sample.current_surface.astype(np.float32).reshape(-1)
+        target_flat = sample.target_surface.astype(np.float32).reshape(-1)
+        current_log = np.log(np.clip(current_flat, _VOL_FLOOR, None))
+        target_log = np.log(np.clip(target_flat, _VOL_FLOOR, None))
+        current_logs.append(current_log.astype(np.float32))
+        deltas.append((target_log - current_log).astype(np.float32))
+        text_embeddings.append(sample.text_embedding.astype(np.float32))
+    current_logs_arr = np.stack(current_logs, axis=0)
+    deltas_arr = np.stack(deltas, axis=0)
+    text_arr = np.stack(text_embeddings, axis=0)
+    return VolGANNormalizationStats(
+        current_log_mean=np.mean(current_logs_arr, axis=0).astype(np.float32),
+        current_log_std=_safe_std(current_logs_arr),
+        delta_mean=np.mean(deltas_arr, axis=0).astype(np.float32),
+        delta_std=_safe_std(deltas_arr),
+        text_mean=np.mean(text_arr, axis=0).astype(np.float32),
+        text_std=_safe_std(text_arr),
+    )
+
+
+def normalize_tensor(values: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
+    return (values - mean) / torch.clamp(std, min=1e-6)
+
+
+def denormalize_tensor(values: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
+    return values * torch.clamp(std, min=1e-6) + mean
+
+
+def normalize_current_surface_tensor(
+    current_surface_flat: torch.Tensor,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+) -> torch.Tensor:
+    current_log = torch.log(torch.clamp(current_surface_flat, min=_VOL_FLOOR))
+    return normalize_tensor(current_log, mean, std)
+
+
 class VolSurfaceDataset(Dataset):
     """Torch dataset yielding the tensors needed by the standalone VolGAN trainer."""
 
-    def __init__(self, samples: Sequence[VolSurfaceSample]):
+    def __init__(
+        self,
+        samples: Sequence[VolSurfaceSample],
+        normalization_stats: VolGANNormalizationStats,
+        *,
+        normalize_current_surface: bool,
+        normalize_target_delta: bool,
+        normalize_text_embedding: bool,
+    ):
         self.samples = list(samples)
+        self.normalization_stats = normalization_stats
+        self.normalize_current_surface = bool(normalize_current_surface)
+        self.normalize_target_delta = bool(normalize_target_delta)
+        self.normalize_text_embedding = bool(normalize_text_embedding)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -106,10 +179,21 @@ class VolSurfaceDataset(Dataset):
         current_log = np.log(np.clip(current_flat, _VOL_FLOOR, None))
         target_log = np.log(np.clip(target_flat, _VOL_FLOOR, None))
         target_delta = (target_log - current_log).astype(np.float32)
+        current_features = current_log.astype(np.float32)
+        text_features = sample.text_embedding.astype(np.float32)
+        target_delta_features = target_delta.astype(np.float32)
+        stats = self.normalization_stats
+        if self.normalize_current_surface:
+            current_features = ((current_features - stats.current_log_mean) / stats.current_log_std).astype(np.float32)
+        if self.normalize_text_embedding:
+            text_features = ((text_features - stats.text_mean) / stats.text_std).astype(np.float32)
+        if self.normalize_target_delta:
+            target_delta_features = ((target_delta_features - stats.delta_mean) / stats.delta_std).astype(np.float32)
         return (
+            torch.from_numpy(current_features),
+            torch.from_numpy(text_features),
+            torch.from_numpy(target_delta_features),
             torch.from_numpy(current_flat),
-            torch.from_numpy(sample.text_embedding.astype(np.float32)),
-            torch.from_numpy(target_delta),
             torch.from_numpy(target_flat),
         )
 
@@ -212,8 +296,15 @@ def create_train_val_bundle(config: VolGANTrainConfig) -> VolSurfaceDataBundle:
     split_idx = _split_index(len(samples), config.train_ratio)
     train_items = list(samples[:split_idx])
     val_items = list(samples[split_idx:])
+    normalization_stats = _compute_normalization_stats(train_items)
     train_loader = DataLoader(
-        VolSurfaceDataset(train_items),
+        VolSurfaceDataset(
+            train_items,
+            normalization_stats,
+            normalize_current_surface=config.normalize_current_surface,
+            normalize_target_delta=config.normalize_target_delta,
+            normalize_text_embedding=config.normalize_text_embedding,
+        ),
         batch_size=int(config.batch_size),
         shuffle=True,
         num_workers=int(config.num_workers),
@@ -221,7 +312,13 @@ def create_train_val_bundle(config: VolGANTrainConfig) -> VolSurfaceDataBundle:
     val_loader = None
     if val_items:
         val_loader = DataLoader(
-            VolSurfaceDataset(val_items),
+            VolSurfaceDataset(
+                val_items,
+                normalization_stats,
+                normalize_current_surface=config.normalize_current_surface,
+                normalize_target_delta=config.normalize_target_delta,
+                normalize_text_embedding=config.normalize_text_embedding,
+            ),
             batch_size=int(config.batch_size),
             shuffle=False,
             num_workers=int(config.num_workers),
@@ -235,6 +332,7 @@ def create_train_val_bundle(config: VolGANTrainConfig) -> VolSurfaceDataBundle:
         strike_grid=strike_grid,
         maturity_days_grid=maturity_days_grid,
         embedding_dim=int(train_items[0].text_embedding.size),
+        normalization_stats=normalization_stats,
         train_items=train_items,
         val_items=val_items,
         all_items=list(samples),

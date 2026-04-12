@@ -23,9 +23,18 @@ from volgan.arbitrage import (  # noqa: E402
     reweight_scenarios,
 )
 from volgan.config import VolGANSampleConfig, VolGANTrainConfig, load_sample_config, load_train_config  # noqa: E402
-from volgan.data import create_train_val_bundle, load_vol_surface_samples  # noqa: E402
-from volgan.io import ensure_dir  # noqa: E402
-from volgan.losses import maturity_smoothness_penalty, strike_smoothness_penalty  # noqa: E402
+from volgan.data import (  # noqa: E402
+    create_train_val_bundle,
+    denormalize_tensor,
+    load_vol_surface_samples,
+    normalize_current_surface_tensor,
+)
+from volgan.io import ensure_dir, load_checkpoint  # noqa: E402
+from volgan.losses import (  # noqa: E402
+    estimate_gradient_matching,
+    maturity_smoothness_penalty,
+    strike_smoothness_penalty,
+)
 from volgan.models import VolGANDiscriminator, VolGANGenerator, reconstruct_future_surface  # noqa: E402
 from volgan.training_plots import plot_training_curves  # noqa: E402
 
@@ -169,6 +178,10 @@ class TestStandaloneVolgan(unittest.TestCase):
             self.assertEqual(bundle.train_samples, 2)
             self.assertEqual(bundle.val_samples, 1)
             self.assertEqual(bundle.surface_shape, (4, 4))
+            self.assertEqual(tuple(bundle.normalization_stats.current_log_mean.shape), (16,))
+            first_batch = next(iter(bundle.train_loader))
+            self.assertEqual(len(first_batch), 5)
+            self.assertEqual(tuple(first_batch[0].shape[1:]), (16,))
 
     def test_models_and_penalties_behave_as_expected(self):
         generator = VolGANGenerator(surface_dim=16, embedding_dim=2, noise_dim=4, hidden_dim=8)
@@ -221,6 +234,58 @@ class TestStandaloneVolgan(unittest.TestCase):
         self.assertAlmostEqual(float(np.sum(weights)), 1.0, places=6)
         self.assertGreater(weights[0], weights[-1])
         self.assertEqual(beta, 10.0)
+
+    def test_normalization_and_gradient_matching_helpers_behave_as_expected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = _write_vol_workbook(tmpdir)
+            config = VolGANTrainConfig(
+                data_path=str(workbook_path),
+                text_embedding_mode="hd",
+                train_ratio=0.67,
+                batch_size=2,
+                num_workers=0,
+                cuda=False,
+                use_gradient_matching=False,
+            )
+            bundle = create_train_val_bundle(config)
+            stats = bundle.normalization_stats
+            current_flat = torch.tensor(bundle.train_items[0].current_surface.reshape(1, -1), dtype=torch.float32)
+            current_norm = normalize_current_surface_tensor(
+                current_flat,
+                torch.tensor(stats.current_log_mean.reshape(1, -1), dtype=torch.float32),
+                torch.tensor(stats.current_log_std.reshape(1, -1), dtype=torch.float32),
+            )
+            delta_norm = torch.zeros_like(current_norm)
+            delta = denormalize_tensor(
+                delta_norm,
+                torch.tensor(stats.delta_mean.reshape(1, -1), dtype=torch.float32),
+                torch.tensor(stats.delta_std.reshape(1, -1), dtype=torch.float32),
+            )
+            self.assertEqual(tuple(current_norm.shape), (1, 16))
+            self.assertEqual(tuple(delta.shape), (1, 16))
+
+            generator = VolGANGenerator(surface_dim=16, embedding_dim=2, noise_dim=4, hidden_dim=8)
+            discriminator = VolGANDiscriminator(surface_dim=16, embedding_dim=2, hidden_dim=8)
+            alpha_m, alpha_tau = estimate_gradient_matching(
+                generator=generator,
+                discriminator=discriminator,
+                train_loader=bundle.train_loader,
+                device=torch.device("cpu"),
+                strike_grid=torch.tensor(bundle.strike_grid, dtype=torch.float32),
+                maturity_days_grid=torch.tensor(bundle.maturity_days_grid, dtype=torch.float32),
+                delta_mean=torch.tensor(stats.delta_mean.reshape(1, -1), dtype=torch.float32),
+                delta_std=torch.tensor(stats.delta_std.reshape(1, -1), dtype=torch.float32),
+                noise_dim=4,
+                epochs=1,
+                real_label_value=0.9,
+                alpha_clip_min=0.2,
+                alpha_clip_max=0.3,
+                normalize_target_delta=True,
+            )
+            self.assertGreaterEqual(alpha_m, 0.2)
+            self.assertLessEqual(alpha_m, 0.3)
+            self.assertGreaterEqual(alpha_tau, 0.2)
+            self.assertLessEqual(alpha_tau, 0.3)
 
     def test_training_plot_helper_writes_png(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -289,6 +354,9 @@ class TestStandaloneVolgan(unittest.TestCase):
                         "use_gradient_matching: false",
                         "alpha_m: 1.0",
                         "alpha_tau: 1.0",
+                        "eval_mc_samples: 4",
+                        "disc_steps_per_batch: 1",
+                        "gen_steps_per_batch: 1",
                         "seed: 7",
                         "cuda: false",
                         "num_workers: 0",
@@ -305,6 +373,8 @@ class TestStandaloneVolgan(unittest.TestCase):
             self.assertTrue(checkpoint_path.exists())
             self.assertTrue((train_run_dir / "metrics" / "training_metrics.json").exists())
             self.assertTrue((train_run_dir / "metrics" / "loss_curves.png").exists())
+            checkpoint = load_checkpoint(checkpoint_path, torch.device("cpu"))
+            self.assertIn("normalization_stats", checkpoint)
 
             sample_config_path.write_text(
                 "\n".join(
@@ -339,6 +409,25 @@ class TestStandaloneVolgan(unittest.TestCase):
             payload = json.loads(sample_jsons[0].read_text(encoding="utf-8"))
             self.assertIn("generated_surface", payload)
             self.assertIn("weights", payload)
+            self.assertIn("generated_current_metrics", payload)
+            self.assertIn("weight_entropy", payload)
+
+            metrics_rows = json.loads((train_run_dir / "metrics" / "training_metrics.json").read_text(encoding="utf-8"))
+            self.assertIn("val_mae_gap_vs_current", metrics_rows[-1])
+            self.assertIn("val_penalty_mean", metrics_rows[-1])
+            self.assertIn("val_weight_entropy", metrics_rows[-1])
+            self.assertAlmostEqual(float(metrics_rows[-1]["val_mae"]), float(payload["metrics"]["mae"]), places=6)
+            self.assertAlmostEqual(
+                float(metrics_rows[-1]["val_current_mae"]),
+                float(payload["current_metrics"]["mae"]),
+                places=6,
+            )
+            best_payload = json.loads((train_run_dir / "metrics" / "best_checkpoint.json").read_text(encoding="utf-8"))
+            self.assertAlmostEqual(
+                float(best_payload["best_metric"]),
+                float(metrics_rows[-1]["val_mae_gap_vs_current"]),
+                places=6,
+            )
 
 
 if __name__ == "__main__":
