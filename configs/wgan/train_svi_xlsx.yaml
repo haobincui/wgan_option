@@ -1,0 +1,35 @@
+# Data
+data_path: data/processed/svi-all/20260330-01/merged_svi.xlsx
+sheet_name: news_direction_audit
+text_embedding_mode: hd
+train_ratio: 0.8
+max_slices: 4
+
+# Model dimensions
+embedding_dim: 1024
+svi_hidden_dim: 256
+svi_dropout: 0.1
+
+# Optimization
+learning_rate: 0.0002
+use_reduce_lr_on_plateau: false
+reduce_lr_factor: 0.5
+reduce_lr_patience: 8
+reduce_lr_min_lr: 1.0e-5
+num_epochs: 100
+batch_size: 16
+beta_1: 0.5
+beta_2: 0.9
+count_loss_weight: 0.2
+
+# Runtime
+seed: 42
+cuda: true
+num_workers: 0
+save_every: 10
+use_early_stopping: false
+early_stopping_patience: 10
+early_stopping_min_delta: 0.0
+
+# Paths
+output_root: ""

@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pkl
+*.egg-info/
+
+# Project data: raw inputs, processed data, generated outputs
+/data/
+/outputs/
+/logs/
+/training_result_images/
+/validator_output/
+/merged_output/
+
+
+# Common generated surface artifacts
+**/daily_csv/
+*.npz
+*.csv.gz
+
+# Test / tool caches
+.pytest_cache/
+
+# Env / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Virtualenv
+.venv/
+venv/

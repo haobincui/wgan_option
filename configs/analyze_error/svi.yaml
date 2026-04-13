@@ -1,0 +1,42 @@
+# Data
+data_path: data/processed/svi-all/20260330-01/merged_svi.xlsx
+sheet_name: news_direction_audit
+text_embedding_mode: hd
+train_ratio: 0.8
+
+# Runtime
+cuda: true
+seed: 42
+num_workers: 0
+
+# Checkpoints
+checkpoint_path: ""
+models_path: outputs/training/svi-all
+metrics_path: outputs/training/svi-all
+
+# Sample selection
+split: all
+selection_mode: all
+sample_id: ""
+row_index: -1
+limit: 5
+
+# Outputs
+output_dir: outputs/analyze_error/svi
+histogram_bins: 30
+save_mse_histogram: true
+save_bootstrap_histogram: true
+
+# Bootstrap
+bootstrap_samples: 10000
+confidence_level: 0.95
+bootstrap_seed: 42
+save_bootstrap_distribution: true
+
+# Fixed-grid reconstruction
+strike_bins: 16
+maturity_bins: 16
+moneyness_min: 0.7
+moneyness_max: 1.3
+maturity_min_days: 7
+maturity_max_days: 365

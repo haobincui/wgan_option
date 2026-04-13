@@ -1,0 +1,55 @@
+# Data
+data_path: data/processed/svi-excel/20260410-174929/merged_vol.xlsx
+sheet_name: gan_input_ready
+text_embedding_mode: lp
+train_ratio: 0.8
+
+# Model dimensions (D1: gen scaled to 128, D2: disc kept at 96, D3: gen_res_blocks 6)
+channels: 1
+embedding_dim: 1024
+noise_dim: 128
+gen_base_channels: 128
+disc_base_channels: 96
+gen_res_blocks: 6
+disc_res_blocks: 2
+gen_text_hidden_dim: 768
+gen_text_out_dim: 384
+disc_text_hidden_dim: 384
+gen_hidden_dim: 6144
+disc_hidden_dim: 2048
+
+# Optimization (C2: asymmetric LR, C3: cosine annealing, C4: gradient accumulation)
+learning_rate: 5.0e-5
+generator_learning_rate: 4.0e-5
+discriminator_learning_rate: 8.0e-5
+lr_scheduler_type: cosine
+use_reduce_lr_on_plateau: false
+reduce_lr_min_lr: 1.0e-5
+gradient_accumulation_steps: 2
+num_epochs: 200
+batch_size: 128
+beta_1: 0.5
+beta_2: 0.9
+discriminator_iter: 5
+lambda_gp: 10.0
+
+# Modified loss weights (C1: lambda_smooth 0.1 -> 0.3)
+lambda_recon: 10.0
+lambda_calendar: 2.0
+lambda_butterfly: 2.0
+lambda_smooth: 0.3
+use_calendar_constraint: true
+use_butterfly_constraint: true
+use_smooth_constraint: true
+
+# Runtime (F3: save_every 10 -> 5)
+seed: 42
+cuda: true
+num_workers: 0
+save_every: 5
+use_early_stopping: true
+early_stopping_patience: 20
+early_stopping_min_delta: 0.0
+
+# Paths
+output_root: ""

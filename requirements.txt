@@ -1,0 +1,15 @@
+# Main runtime dependencies (installable package uses pyproject.toml).
+# Kept for convenience when using requirements-based environments.
+
+numpy>=1.23,<2.1
+pandas>=1.5,<2.3
+matplotlib>=3.6,<3.9
+PyYAML>=6.0,<7.0
+scipy>=1.10,<1.12
+python-dateutil>=2.8,<3.0
+scikit-learn>=1.2,<1.4
+
+# Install a CUDA-compatible PyTorch wheel separately on server.
+# This branch is currently aligned with CUDA 12.4 environments, e.g.:
+# pip install torch --index-url https://download.pytorch.org/whl/cu124
+torch>=2.0
