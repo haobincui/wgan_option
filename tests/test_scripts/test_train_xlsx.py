@@ -692,6 +692,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
             metrics_dir = run_dir / "metrics"
             models_dir = run_dir / "checkpoints"
             samples_dir = run_dir / "samples"
+            self.assertTrue((run_dir / "run.log").exists())
             self.assertTrue(samples_dir.exists())
             self.assertTrue((metrics_dir / "training_resolved_config.yaml").exists())
             plot_path = metrics_dir / "loss_curves.png"
@@ -797,6 +798,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
             run_dir = self._find_only_run_dir(output_root)
             metrics_dir = run_dir / "metrics"
             models_dir = run_dir / "checkpoints"
+            self.assertTrue((run_dir / "run.log").exists())
             self.assertTrue((metrics_dir / "loss_curves.png").exists())
             metrics_rows = json.loads((metrics_dir / "training_metrics.json").read_text(encoding="utf-8"))
             self.assertTrue(metrics_rows)
@@ -877,6 +879,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
             metrics_dir = run_dir / "metrics"
             models_dir = run_dir / "checkpoints"
             samples_dir = run_dir / "samples"
+            self.assertTrue((run_dir / "run.log").exists())
             self.assertTrue(samples_dir.exists())
             self.assertTrue((metrics_dir / "training_resolved_config.yaml").exists())
             plot_path = metrics_dir / "loss_curves.png"

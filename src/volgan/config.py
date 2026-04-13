@@ -14,7 +14,7 @@ from utils.output_paths import (
     infer_dataset_family as infer_output_dataset_family,
     resolve_output_root,
 )
-from utils.training_paths import generate_result_dir, infer_run_dir_from_checkpoint
+from utils.training_paths import checkpoint_named_dir, generate_result_dir, infer_run_dir_from_checkpoint
 from wgan_option.config_parsing import load_yaml_mapping
 
 T = TypeVar("T")
@@ -179,7 +179,7 @@ def _build_sample_defaults(
         selection_mode=str(sample_defaults.selection_mode),
         selection_count=int(sample_defaults.selection_count),
         aggregation_mode=str(train_config.eval_aggregation_mode),
-        output_dir=str(generate_result_dir(run_dir)),
+        output_dir=str(checkpoint_named_dir(generate_result_dir(run_dir), resolved_checkpoint_path)),
         save_json=bool(sample_defaults.save_json),
         save_plots=bool(sample_defaults.save_plots),
     )
@@ -211,12 +211,38 @@ def load_sample_config(
             config = replace(config, **_coerce_config(VolGANSampleConfig, {**_config_to_dict(config), **generate_values}).__dict__)
         if checkpoint_path is not None:
             config = replace(config, checkpoint_path=str(checkpoint_path))
-        config = replace(config, output_dir=str(generate_result_dir(resolved_run_dir, config.output_dir)))
+        resolved_checkpoint_path = (
+            Path(config.checkpoint_path)
+            if str(config.checkpoint_path).strip()
+            else find_best_checkpoint(resolved_run_dir, filename="volgan_best.pt")
+        )
+        if str(config.output_dir).strip():
+            resolved_output_dir = generate_result_dir(resolved_run_dir, config.output_dir)
+        else:
+            resolved_output_dir = checkpoint_named_dir(generate_result_dir(resolved_run_dir), resolved_checkpoint_path)
+        config = replace(
+            config,
+            checkpoint_path=str(resolved_checkpoint_path),
+            output_dir=str(resolved_output_dir),
+        )
         return config
 
     config = _coerce_config(VolGANSampleConfig, payload)
     if run_dir is not None:
-        config = replace(config, output_dir=str(generate_result_dir(run_dir, config.output_dir)))
+        resolved_checkpoint_path = (
+            Path(config.checkpoint_path)
+            if str(config.checkpoint_path).strip()
+            else find_best_checkpoint(run_dir, filename="volgan_best.pt")
+        )
+        if str(config.output_dir).strip():
+            resolved_output_dir = generate_result_dir(run_dir, config.output_dir)
+        else:
+            resolved_output_dir = checkpoint_named_dir(generate_result_dir(run_dir), resolved_checkpoint_path)
+        config = replace(
+            config,
+            checkpoint_path=str(resolved_checkpoint_path),
+            output_dir=str(resolved_output_dir),
+        )
     return config
 
 

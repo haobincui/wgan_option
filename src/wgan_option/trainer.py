@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import logging
-import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Mapping, Optional
 
 from trainer import BaseTrainer
 from utils.generate_result_runtime import generate_vol_result, validate_result_config
+from utils.postprocess_runtime import resolve_checkpoint_path
 from utils.result_config import GenerateResultConfig, build_generate_result_config
-from utils.training_paths import generate_result_dir, infer_training_output_root, resolve_existing_run_dir
+from utils.training_paths import checkpoint_named_dir, generate_result_dir, infer_training_output_root, resolve_existing_run_dir
 from wgan_option.config import Config, config_to_dict, default_config
 from wgan_option.config_parsing import load_yaml_mapping
 from wgan_option.models.gan_model import WGAN_GP
@@ -41,22 +41,8 @@ class WGANTrainer(BaseTrainer):
 
     @property
     def logger(self) -> logging.Logger:
-        """Lazily initialize a stdout logger with consistent format."""
-        if self._logger is None:
-            logger = logging.getLogger(self.logger_name)
-            logger.setLevel(logging.INFO)
-            logger.propagate = False
-            if not logger.handlers:
-                stream_handler = logging.StreamHandler(sys.stdout)
-                stream_handler.setFormatter(
-                    logging.Formatter(
-                        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-                        datefmt="%Y-%m-%d %H:%M:%S",
-                    )
-                )
-                logger.addHandler(stream_handler)
-            self._logger = logger
-        return self._logger
+        """Lazily initialize the shared trainer logger."""
+        return self._get_or_create_logger()
 
     def _log_device_info(self) -> None:
         """Log compute device information."""
@@ -145,11 +131,23 @@ class WGANTrainer(BaseTrainer):
             output_root=output_root,
             checkpoint_path=generate_config.checkpoint_path or None,
         )
-        resolved_generate_dir = generate_result_dir(run_dir, generate_config.output_dir)
-        resolved_config = replace(
+        runtime_config = replace(
             generate_config,
             models_path=str(run_dir),
             metrics_path=str(run_dir),
+        )
+        resolved_checkpoint_path = resolve_checkpoint_path(
+            runtime_config,
+            artifact_key="generator",
+            fallback_filenames=("generator_best.pt", "generator.pt"),
+        )
+        if str(generate_config.output_dir).strip():
+            resolved_generate_dir = generate_result_dir(run_dir, generate_config.output_dir)
+        else:
+            resolved_generate_dir = checkpoint_named_dir(generate_result_dir(run_dir), resolved_checkpoint_path)
+        resolved_config = replace(
+            runtime_config,
+            checkpoint_path=str(resolved_checkpoint_path),
             output_dir=str(resolved_generate_dir),
         )
         validate_result_config(resolved_config)

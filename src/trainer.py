@@ -11,7 +11,11 @@ from typing import Any, Mapping, Optional
 
 import yaml
 
-from utils.training_paths import generate_result_config_path, training_run_config_path
+from utils.training_paths import (
+    generate_result_config_path,
+    training_run_config_path,
+    training_run_log_path,
+)
 
 
 def _config_to_payload(config: Any) -> Any:
@@ -48,23 +52,57 @@ class BaseTrainer(ABC):
         self._logger: Optional[logging.Logger] = None
         self._runtime_prepared = False
 
+    @staticmethod
+    def _log_formatter() -> logging.Formatter:
+        return logging.Formatter(
+            fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+
+    def _configure_stream_handler(self, logger: logging.Logger) -> None:
+        if any(getattr(handler, "_trainer_stream_handler", False) for handler in logger.handlers):
+            return
+        handler = logging.StreamHandler(sys.stdout)
+        handler._trainer_stream_handler = True  # type: ignore[attr-defined]
+        handler.setFormatter(self._log_formatter())
+        logger.addHandler(handler)
+
+    def _configure_file_handler(self, logger: logging.Logger) -> None:
+        desired_path = None if self.run_dir is None else training_run_log_path(self.run_dir).resolve(strict=False)
+        has_desired_handler = False
+        for handler in list(logger.handlers):
+            if not getattr(handler, "_trainer_file_handler", False):
+                continue
+            current_path = Path(getattr(handler, "baseFilename", "")).resolve(strict=False)
+            if desired_path is not None and current_path == desired_path:
+                has_desired_handler = True
+                continue
+            logger.removeHandler(handler)
+            handler.close()
+        if desired_path is None or has_desired_handler:
+            return
+        desired_path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(desired_path, encoding="utf-8")
+        handler._trainer_file_handler = True  # type: ignore[attr-defined]
+        handler.setFormatter(self._log_formatter())
+        logger.addHandler(handler)
+
+    def _configure_logger(self, logger: logging.Logger) -> logging.Logger:
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        self._configure_stream_handler(logger)
+        self._configure_file_handler(logger)
+        return logger
+
+    def _get_or_create_logger(self, name: str | None = None) -> logging.Logger:
+        logger_name = name or self.logger_name
+        logger = self._logger if self._logger is not None and self._logger.name == logger_name else logging.getLogger(logger_name)
+        self._logger = self._configure_logger(logger)
+        return self._logger
+
     @property
     def logger(self) -> logging.Logger:
-        if self._logger is None:
-            logger = logging.getLogger(self.logger_name)
-            logger.setLevel(logging.INFO)
-            logger.propagate = False
-            if not logger.handlers:
-                handler = logging.StreamHandler(sys.stdout)
-                handler.setFormatter(
-                    logging.Formatter(
-                        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-                        datefmt="%Y-%m-%d %H:%M:%S",
-                    )
-                )
-                logger.addHandler(handler)
-            self._logger = logger
-        return self._logger
+        return self._get_or_create_logger()
 
     def _prepare_runtime_config(self, config: Any) -> Any:
         """Allow subclasses to rewrite config paths before training starts."""

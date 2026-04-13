@@ -11,6 +11,7 @@ from wgan_option.config import Config, derive_training_output_paths
 
 TRAINING_RESOLVED_CONFIG_NAME = "training_resolved_config.yaml"
 GENERATE_RESOLVED_CONFIG_NAME = "generate_resolved_config.yaml"
+TRAINING_RUN_LOG_NAME = "run.log"
 
 _DEFAULT_CONFIG = Config()
 _DIRECTORY_FIELDS = ("models_path", "outputs_path", "samples_path", "metrics_path")
@@ -116,8 +117,25 @@ def training_run_config_path(config: Config, run_dir: Path | None) -> Path:
     return Path(config.metrics_path) / TRAINING_RESOLVED_CONFIG_NAME
 
 
+def training_run_log_path(run_dir: str | Path) -> Path:
+    return Path(run_dir) / TRAINING_RUN_LOG_NAME
+
+
 def generate_result_config_path(generate_dir: str | Path) -> Path:
     return Path(generate_dir) / GENERATE_RESOLVED_CONFIG_NAME
+
+
+def checkpoint_filename(checkpoint_path: str | Path) -> str:
+    stem = Path(checkpoint_path).stem.strip()
+    if not stem:
+        raise ValueError(f"Could not derive checkpoint filename from path: {checkpoint_path}")
+    return stem
+
+
+def checkpoint_named_dir(base_dir: str | Path, checkpoint_path: str | Path) -> Path:
+    target = Path(base_dir) / checkpoint_filename(checkpoint_path)
+    target.mkdir(parents=True, exist_ok=True)
+    return target
 
 
 def generate_result_dir(run_dir: str | Path, output_dir: str | Path = "") -> Path:

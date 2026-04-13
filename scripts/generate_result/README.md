@@ -13,22 +13,22 @@ It supports three subcommands:
 Unified CLI:
 
 ```bash
-python scripts/generate_result/main.py vol --config configs/generate_result/vol.yaml
-python scripts/generate_result/main.py svi --config configs/generate_result/svi.yaml
+python scripts/generate_result/main.py vol --config configs/wgan/train_vol_xlsx.yaml
+python scripts/generate_result/main.py svi --config configs/wgan/train_svi_xlsx.yaml
 python scripts/generate_result/main.py plot --input-json path/to/sample.json
 ```
 
 ## Shared Runtime Logic
 
-Shared CLI and output helpers live in `scripts/generate_result/common.py`.
+Shared CLI and runtime helpers live in `src/generate_result/cli.py` and `src/utils/generate_result_runtime.py`.
 
 Common responsibilities:
 
-- parse config files and `--set` overrides
+- parse merged training YAML plus `--set` overrides
 - validate split and sample-selection choices
-- resolve checkpoint locations
-- create timestamped output directories
-- save resolved runtime config
+- resolve the effective checkpoint
+- derive the final output directory under the training run
+- save `generate_resolved_config.yaml`
 - write `summary.csv`
 - write per-sample payload JSON files
 
@@ -149,11 +149,11 @@ The sidecar line plots focus on:
 
 ## Output Layout
 
-Each run writes into a timestamped directory under the configured output root.
+Each run writes into a checkpoint-named directory under the training run's `generate_result/` root.
 
 Typical contents:
 
-- `resolved_config.yaml`
+- `generate_resolved_config.yaml`
 - `summary.csv`
 - `samples/*.json`
 - `plots/*.png`
@@ -170,7 +170,7 @@ Generate several validation-set vol examples:
 
 ```bash
 python scripts/generate_result/main.py vol \
-  --config configs/generate_result/vol.yaml \
+  --config configs/wgan/train_vol_xlsx.yaml \
   --set split=val \
   --set selection_mode=first_n \
   --set limit=5
@@ -180,7 +180,7 @@ Generate one SVI sample by row index:
 
 ```bash
 python scripts/generate_result/main.py svi \
-  --config configs/generate_result/svi.yaml \
+  --config configs/wgan/train_svi_xlsx.yaml \
   --set selection_mode=row_index \
   --set row_index=0
 ```
@@ -189,5 +189,5 @@ Render a saved payload JSON into a plot:
 
 ```bash
 python scripts/generate_result/main.py plot \
-  --input-json outputs/generate_result/vol/<run_ts>/samples/sample.json
+  --input-json outputs/training/<model>/<data_range>/<run_ts>/generate_result/<checkpoint_name>/samples/sample.json
 ```

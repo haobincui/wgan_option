@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import random
-import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Mapping, Optional
@@ -15,7 +14,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.optim import RMSprop
 from trainer import BaseTrainer
 from utils.output_paths import find_best_checkpoint, prepare_run_dir
-from utils.training_paths import generate_result_dir, resolve_existing_run_dir
+from utils.training_paths import checkpoint_named_dir, generate_result_dir, resolve_existing_run_dir
 
 from .arbitrage import butterfly_arbitrage_penalty, calendar_arbitrage_penalty
 from .config import (
@@ -78,21 +77,7 @@ class VolGANTrainer(BaseTrainer):
 
     @property
     def logger(self) -> logging.Logger:
-        if self._logger is None:
-            logger = logging.getLogger("volgan.trainer")
-            logger.setLevel(logging.INFO)
-            logger.propagate = False
-            if not logger.handlers:
-                handler = logging.StreamHandler(sys.stdout)
-                handler.setFormatter(
-                    logging.Formatter(
-                        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-                        datefmt="%Y-%m-%d %H:%M:%S",
-                    )
-                )
-                logger.addHandler(handler)
-            self._logger = logger
-        return self._logger
+        return self._get_or_create_logger()
 
     def _set_seed(self) -> None:
         random.seed(int(self.config.seed))
@@ -503,14 +488,22 @@ class VolGANTrainer(BaseTrainer):
                     reweight_beta_mode=str(self.raw_config.eval_reweight_beta_mode),
                     reweight_beta=float(self.raw_config.eval_reweight_beta),
                     aggregation_mode=str(self.raw_config.eval_aggregation_mode),
-                    output_dir=str(generate_result_dir(run_dir)),
+                    output_dir="",
                 )
         if overrides:
             generate_config = replace(generate_config, **dict(overrides))
-        resolved_generate_dir = generate_result_dir(run_dir, generate_config.output_dir)
+        resolved_checkpoint_path = (
+            Path(generate_config.checkpoint_path)
+            if str(generate_config.checkpoint_path).strip()
+            else find_best_checkpoint(run_dir, filename="volgan_best.pt")
+        )
+        if str(generate_config.output_dir).strip():
+            resolved_generate_dir = generate_result_dir(run_dir, generate_config.output_dir)
+        else:
+            resolved_generate_dir = checkpoint_named_dir(generate_result_dir(run_dir), resolved_checkpoint_path)
         resolved_config = replace(
             generate_config,
-            checkpoint_path=generate_config.checkpoint_path or str(find_best_checkpoint(run_dir, filename="volgan_best.pt")),
+            checkpoint_path=str(resolved_checkpoint_path),
             output_dir=str(resolved_generate_dir),
         )
         return resolved_config, resolved_generate_dir

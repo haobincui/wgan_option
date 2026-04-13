@@ -13,6 +13,9 @@ from .output_paths import (
 from .training_paths import (
     GENERATE_RESOLVED_CONFIG_NAME,
     TRAINING_RESOLVED_CONFIG_NAME,
+    TRAINING_RUN_LOG_NAME,
+    checkpoint_filename,
+    checkpoint_named_dir,
     generate_result_config_path,
     generate_result_dir,
     infer_run_dir_from_checkpoint,
@@ -20,6 +23,7 @@ from .training_paths import (
     prepare_timestamped_training_config,
     resolve_existing_run_dir,
     training_run_config_path,
+    training_run_log_path,
 )
 
 __all__ = [
@@ -33,9 +37,13 @@ __all__ = [
     "find_latest_run_dir",
     "TRAINING_RESOLVED_CONFIG_NAME",
     "GENERATE_RESOLVED_CONFIG_NAME",
+    "TRAINING_RUN_LOG_NAME",
+    "checkpoint_filename",
+    "checkpoint_named_dir",
     "infer_training_output_root",
     "prepare_timestamped_training_config",
     "training_run_config_path",
+    "training_run_log_path",
     "generate_result_dir",
     "generate_result_config_path",
     "infer_run_dir_from_checkpoint",

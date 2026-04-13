@@ -393,7 +393,7 @@ class TestStandaloneVolgan(unittest.TestCase):
                 sample_config.checkpoint_path,
                 str(newer_run_dir / "checkpoints" / "volgan_best.pt"),
             )
-            self.assertEqual(sample_config.output_dir, str(newer_run_dir / "generate_result"))
+            self.assertEqual(sample_config.output_dir, str(newer_run_dir / "generate_result" / "volgan_best"))
 
     def test_volgan_main_routes_pipeline_command(self):
         main_module = _load_script_module(ROOT_DIR / "scripts/volgan/main.py", "volgan_main_router")
@@ -442,13 +442,14 @@ class TestStandaloneVolgan(unittest.TestCase):
             train_run_dir = Path(main_module.main(["train", "--config", str(train_config_path)]))
             checkpoint_path = train_run_dir / "checkpoints" / "volgan_best.pt"
             self.assertTrue(checkpoint_path.exists())
+            self.assertTrue((train_run_dir / "run.log").exists())
             self.assertTrue((train_run_dir / "metrics" / "training_metrics.json").exists())
             self.assertTrue((train_run_dir / "metrics" / "loss_curves.png").exists())
             checkpoint = load_checkpoint(checkpoint_path, torch.device("cpu"))
             self.assertIn("normalization_stats", checkpoint)
 
             sample_run_dir = Path(main_module.main(["sample", "--config", str(train_config_path)]))
-            self.assertEqual(sample_run_dir, train_run_dir / "generate_result")
+            self.assertEqual(sample_run_dir, train_run_dir / "generate_result" / "volgan_best")
             self.assertTrue((sample_run_dir / "summary.csv").exists())
             sample_jsons = sorted((sample_run_dir / "samples").glob("*.json"))
             self.assertEqual(len(sample_jsons), 1)

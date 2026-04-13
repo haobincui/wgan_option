@@ -58,12 +58,49 @@ Market-data contracts and preprocessing helpers.
 
 This package is less central than `wgan_option` and `quantlib` for the current merged-workbook workflows, but it still documents important assumptions about the upstream data model.
 
+### `src/volgan`
+
+Standalone MLP-based conditional GAN for volatility surface generation.
+
+- MLP generator and discriminator with Softplus activations and Sigmoid output
+- BCE adversarial training with label smoothing (real=0.9, fake=0.0)
+- automatic gradient matching to balance smoothness penalties against adversarial loss
+- arbitrage constraints applied in post-processing only (not in training loss)
+- see [src/volgan/README.md](src/volgan/README.md) for architecture and implementation details
+
+### `src/cnn_wgan`
+
+Standalone CNN-based Wasserstein GAN for volatility surface generation.
+
+- convolutional surface encoder with residual blocks, text MLP encoder, and fusion MLP
+- WGAN-GP adversarial training with gradient penalty for Lipschitz constraint
+- calendar and butterfly arbitrage penalties applied during training
+- weighted smoothness regularization across maturity and strike dimensions
+- see [src/cnn_wgan/README.md](src/cnn_wgan/README.md) for architecture and implementation details
+
+### `src/transformer_wgan`
+
+Standalone Transformer-based Wasserstein GAN for volatility surface generation.
+
+- Transformer encoder with learnable 2D positional embeddings and CLS token aggregation
+- WGAN-GP adversarial training with Math SDPA backend for double-backward compatibility
+- configurable objective: pure adversarial or adversarial + L1 reconstruction loss
+- calendar/butterfly arbitrage penalties with optional constraint warmup
+- LR scheduling, early stopping, and baseline-aware evaluation metrics
+- see [src/transformer_wgan/README.md](src/transformer_wgan/README.md) for architecture and implementation details
+
 ### Shared Utilities
 
 - `src/logger.py`
   - shared logging setup helper for consistent runtime logs
 - `src/utils/draw.py`
   - local plotting helper for visualizing processed surface data
+- `src/utils/output_paths.py`
+  - dataset-aware output root resolution and checkpoint discovery
+- `src/utils/training_paths.py`
+  - run directory and generate-result directory layout helpers
+- `src/utils/standalone_cli.py`
+  - shared CLI entrypoint builder for standalone modules
 
 ## `scripts/` Jobs
 
@@ -90,6 +127,17 @@ The repo contains several script families. The preferred entrypoints are the uni
 | `analyze_error vol` | `python scripts/analyze_error/main.py vol ...` | Compute distributional error summaries for generated future vol surfaces | `merged_vol.xlsx` plus a saved generator checkpoint | `errors.csv`, bootstrap outputs, and histograms | Supporting research |
 | `analyze_error svi` | `python scripts/analyze_error/main.py svi ...` | Compute distributional error summaries after SVI prediction and surface reconstruction | `merged_svi.xlsx` plus a saved SVI regressor checkpoint | `errors.csv`, bootstrap outputs, and histograms | Supporting research |
 
+### Standalone Model Training Jobs
+
+| Job | Entrypoint | Task | Main input | Main output | Status |
+| --- | --- | --- | --- | --- | --- |
+| `train volgan` | `python scripts/volgan/main.py train --config ...` | Train the standalone MLP VolGAN on merged vol surfaces | `merged_vol.xlsx` plus a training config | timestamped artifacts under `outputs/training/volgan/` | Standalone pipeline |
+| `train cnn-wgan` | `python scripts/cnn_wgan/main.py train --config ...` | Train the standalone CNN WGAN-GP on merged vol surfaces | `merged_vol.xlsx` plus a training config | timestamped artifacts under `outputs/training/cnn_wgan/` | Standalone pipeline |
+| `train transformer-wgan` | `python scripts/transformer_wgan/main.py train --config ...` | Train the standalone Transformer WGAN-GP on merged vol surfaces | `merged_vol.xlsx` plus a training config | timestamped artifacts under `outputs/training/transformer_wgan/` | Standalone pipeline |
+| `generate-result volgan` | `python scripts/volgan/main.py sample --config ...` | Generate scenarios from a trained VolGAN checkpoint | `merged_vol.xlsx` plus a saved checkpoint | JSON payloads, plots, and `summary.csv` | Standalone pipeline |
+| `generate-result cnn-wgan` | `python scripts/cnn_wgan/main.py generate-result --config ...` | Generate scenarios from a trained CNN WGAN checkpoint | `merged_vol.xlsx` plus a saved checkpoint | JSON payloads, plots, and `summary.csv` | Standalone pipeline |
+| `generate-result transformer-wgan` | `python scripts/transformer_wgan/main.py generate-result --config ...` | Generate scenarios from a trained Transformer WGAN checkpoint | `merged_vol.xlsx` plus a saved checkpoint | JSON payloads, plots, and `summary.csv` | Standalone pipeline |
+
 ### Maintenance and Data Utility Jobs
 
 | Job | Entrypoint | Task | Main input | Main output | Status |
@@ -106,6 +154,9 @@ These are helpers for launching background jobs. They are not the primary APIs o
 | `run_train.sh` | `scripts/train/main.py` | background launcher for training jobs | Convenience wrapper |
 | `run_analyze_error.sh` | `scripts/analyze_error/main.py` | background launcher for error-analysis jobs | Convenience wrapper |
 | `run_minute_svi_excel_gpu.sh` | `scripts/generate_surface/main.py generate_surface ...` | background launcher for GPU `svi` + `excel` generation | Convenience wrapper |
+| `run_volgan_svi_excel.sh` | `scripts/volgan/main.py` | background launcher for VolGAN train + generate-result | Convenience wrapper |
+| `run_cnn_wgan_svi_excel.sh` | `scripts/cnn_wgan/main.py` | background launcher for CNN WGAN train + generate-result | Convenience wrapper |
+| `run_transformer_wgan_svi_excel.sh` | `scripts/transformer_wgan/main.py` | background launcher for Transformer WGAN train + generate-result | Convenience wrapper |
 
 ## Semantics That Matter
 
@@ -159,8 +210,24 @@ python scripts/train/main.py svi-xlsx --config configs/wgan/train_svi_xlsx.yaml
 Run post-training inspection:
 
 ```bash
-python scripts/generate_result/main.py vol --config configs/generate_result/vol-lp.yaml
+python scripts/generate_result/main.py vol --config configs/wgan/train_vol_xlsx.yaml
 python scripts/analyze_error/main.py vol --config configs/analyze_error/vol.yaml
+```
+
+Train the standalone model variants:
+
+```bash
+python scripts/volgan/main.py train --config configs/volgan/train_lp.yaml
+python scripts/cnn_wgan/main.py train --config configs/cnn_wgan/train_lp.yaml
+python scripts/transformer_wgan/main.py train --config configs/transformer_wgan/train_lp.yaml
+```
+
+Or use the convenience shell wrappers (background execution):
+
+```bash
+bash run_volgan_svi_excel.sh configs/volgan/train_lp.yaml
+bash run_cnn_wgan_svi_excel.sh configs/cnn_wgan/train_lp.yaml
+bash run_transformer_wgan_svi_excel.sh configs/transformer_wgan/train_lp.yaml
 ```
 
 For flags, advanced configuration, and workflow-specific details, read the script-level READMEs under `scripts/`.
@@ -173,7 +240,10 @@ wgan_option/
 │   ├── analyze_error/             # Error-analysis configs
 │   ├── generate_result/           # Post-training inference configs
 │   ├── surface_builder/           # Surface-generation configs by model
-│   └── wgan/                      # Merged-workbook training configs
+│   ├── wgan/                      # Merged-workbook training configs
+│   ├── volgan/                    # Standalone VolGAN training and sampling configs
+│   ├── cnn_wgan/                  # Standalone CNN WGAN training configs
+│   └── transformer_wgan/          # Standalone Transformer WGAN training configs
 ├── data/                          # Raw inputs and processed run directories
 ├── docs/                          # Thesis design notes and architecture writeups
 ├── scripts/
@@ -182,17 +252,27 @@ wgan_option/
 │   ├── generate_surface/          # Unified minute surface-generation CLI
 │   ├── merge_file/                # Workbook construction from generated runs
 │   ├── train/                     # Unified merged-xlsx training CLI
+│   ├── volgan/                    # Standalone VolGAN train and sample CLI
+│   ├── cnn_wgan/                  # Standalone CNN WGAN train and generate-result CLI
+│   ├── transformer_wgan/          # Standalone Transformer WGAN train and generate-result CLI
 │   └── merge_raw_option_data.py   # Raw-data inspection utility
 ├── src/
 │   ├── market_data/               # Contract parsing and raw-data DTO helpers
 │   ├── quantlib/                  # Numerical and calendar core
-│   ├── utils/                     # Local plotting utilities
+│   ├── utils/                     # Shared utilities (output paths, training paths, CLI helpers)
 │   ├── wgan_option/               # Training, inference, configs, and loaders
+│   ├── volgan/                    # Standalone MLP VolGAN module (BCE adversarial)
+│   ├── cnn_wgan/                  # Standalone CNN WGAN-GP module
+│   ├── transformer_wgan/          # Standalone Transformer WGAN-GP module
 │   └── logger.py                  # Shared logging helper
 ├── tests/                         # Script, quantlib, and workflow tests
+│   └── test_standalone_wgan/      # Tests for standalone WGAN modules
 ├── run_train.sh                   # Training launcher helper
 ├── run_analyze_error.sh           # Analyze-error launcher helper
 ├── run_minute_svi_excel_gpu.sh    # Generate-surface launcher helper
+├── run_volgan_svi_excel.sh        # VolGAN launcher helper
+├── run_cnn_wgan_svi_excel.sh      # CNN WGAN launcher helper
+├── run_transformer_wgan_svi_excel.sh  # Transformer WGAN launcher helper
 └── README.md
 ```
 
@@ -221,12 +301,19 @@ Training diagnostics and model notes:
 - [docs/training_loss_curves.md](docs/training_loss_curves.md)
 - [docs/reduce_lr_on_plateau.md](docs/reduce_lr_on_plateau.md)
 
+Standalone module architecture:
+
+- [src/volgan/README.md](src/volgan/README.md)
+- [src/cnn_wgan/README.md](src/cnn_wgan/README.md)
+- [src/transformer_wgan/README.md](src/transformer_wgan/README.md)
+
 ## Notes
 
 - The preferred merged-workbook training entrypoint is `scripts/train/main.py`; older daily-surface training logic still lives under `src/wgan_option`.
 - The merged vol workflow is currently the closest executable path to the thesis-facing current-surface -> future-surface forecasting setup.
 - The merged SVI workflow is a paired forecasting implementation, even though the source workbook remains direction-oriented.
 - The script families under `scripts/` are intentionally thin wrappers around reusable logic in `src/`.
+- The standalone modules (`volgan`, `cnn_wgan`, `transformer_wgan`) are fully independent of `src/wgan_option` and share only the `merged_vol.xlsx` workbook format and utilities under `src/utils/`.
 
 
 # Pipelines
@@ -254,5 +341,5 @@ python scripts/train/main.py vol-xlsx \
 
 
 python scripts/generate_result/main.py vol \
-  --config configs/generate_result/vol-raw-lp.yaml
+  --config configs/wgan/train_vol_xlsx.yaml
 ```

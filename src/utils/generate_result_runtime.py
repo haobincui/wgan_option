@@ -4,15 +4,11 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Iterable, Optional
-
-import yaml
 
 from utils.postprocess_runtime import (
     VALID_SELECTION_MODES,
     VALID_SPLITS,
     add_shared_sample_selection_args,
-    apply_shared_overrides,
     build_surface_grids,
     compute_surface_metrics,
     resolve_checkpoint_path,
@@ -24,13 +20,7 @@ from utils.postprocess_runtime import (
     write_summary_csv,
 )
 from utils.result_config import (
-    DEFAULT_SVI_RESULT_CONFIG_PATH,
-    DEFAULT_VOL_RESULT_CONFIG_PATH,
-    DEFAULT_VOL_REGRESSION_RESULT_CONFIG_PATH,
     GenerateResultConfig,
-    generate_result_config_to_dict,
-    load_generate_result_config,
-    parse_generate_result_overrides,
     save_generate_result_config_yaml,
 )
 from utils.training_paths import generate_result_config_path
@@ -46,33 +36,6 @@ def build_result_arg_parser(*, description: str, default_config_path: str) -> ar
     parser.add_argument("--no-plot", action="store_true", help="Disable PNG plot generation.")
     parser.add_argument("--no-json", action="store_true", help="Disable per-sample JSON payload output.")
     return parser
-
-
-def resolve_result_config(
-    *,
-    argv: Optional[Iterable[str]],
-    description: str,
-    default_config_path: str,
-) -> GenerateResultConfig:
-    """Parse CLI flags and return a validated result-generation config."""
-
-    parser = build_result_arg_parser(description=description, default_config_path=default_config_path)
-    args = parser.parse_args(list(argv) if argv is not None else None)
-
-    overrides = parse_generate_result_overrides(args.set)
-    apply_shared_overrides(args, overrides)
-    if args.no_plot:
-        overrides["save_plots"] = False
-    if args.no_json:
-        overrides["save_json"] = False
-
-    config = load_generate_result_config(config_path=args.config, overrides=overrides)
-    validate_result_config(config)
-
-    if args.print_config:
-        print(yaml.safe_dump(generate_result_config_to_dict(config), sort_keys=False, allow_unicode=False))
-
-    return config
 
 
 def validate_result_config(config: GenerateResultConfig) -> None:
@@ -108,15 +71,8 @@ def write_resolved_config(config: GenerateResultConfig, run_dir: str | Path) -> 
     return save_generate_result_config_yaml(config, generate_result_config_path(run_dir))
 
 
-DEFAULT_RESULT_CONFIG_PATHS = {
-    "vol": DEFAULT_VOL_RESULT_CONFIG_PATH,
-    "vol-regression": DEFAULT_VOL_REGRESSION_RESULT_CONFIG_PATH,
-    "svi": DEFAULT_SVI_RESULT_CONFIG_PATH,
-}
-
-
 # ---------------------------------------------------------------------------
-# High-level generation runners (business logic extracted from scripts/)
+# High-level generation runners used by trainer-led generate_result flows.
 # ---------------------------------------------------------------------------
 
 
@@ -277,18 +233,6 @@ def generate_vol_result(config: GenerateResultConfig) -> Path:
     write_summary_csv(summary_rows, run_dir / "summary.csv")
     return run_dir
 
-
-def run_vol_generation(argv=None) -> "Path":
-    """CLI wrapper for future vol-surface generation."""
-
-    config = resolve_result_config(
-        argv=argv,
-        description="Generate future vol surfaces from a trained WGAN checkpoint.",
-        default_config_path="configs/generate_result/vol.yaml",
-    )
-    return generate_vol_result(config)
-
-
 def generate_svi_result(config: GenerateResultConfig) -> Path:
     """Generate future SVI params, reconstruct surfaces, and compare them."""
 
@@ -385,18 +329,6 @@ def generate_svi_result(config: GenerateResultConfig) -> Path:
     write_summary_csv(summary_rows, run_dir / "summary.csv")
     return run_dir
 
-
-def run_svi_generation(argv=None) -> "Path":
-    """CLI wrapper for SVI generate-result runs."""
-
-    config = resolve_result_config(
-        argv=argv,
-        description="Generate future SVI params, reconstruct surfaces, and compare them.",
-        default_config_path="configs/generate_result/svi.yaml",
-    )
-    return generate_svi_result(config)
-
-
 def generate_vol_regression_result(config: GenerateResultConfig) -> Path:
     """Generate future vol surfaces from a deterministic regression checkpoint."""
 
@@ -482,14 +414,3 @@ def generate_vol_regression_result(config: GenerateResultConfig) -> Path:
 
     write_summary_csv(summary_rows, run_dir / "summary.csv")
     return run_dir
-
-
-def run_vol_regression_generation(argv=None) -> "Path":
-    """CLI wrapper for deterministic vol-regression generate-result runs."""
-
-    config = resolve_result_config(
-        argv=argv,
-        description="Generate future vol surfaces from a deterministic regression checkpoint.",
-        default_config_path="configs/generate_result/vol-regression.yaml",
-    )
-    return generate_vol_regression_result(config)

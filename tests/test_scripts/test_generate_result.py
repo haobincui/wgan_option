@@ -30,7 +30,7 @@ from wgan_option.models.svi_regressor import SviRegressor  # noqa: E402
 from wgan_option.models.vol_regressor import VolSurfaceRegressor  # noqa: E402
 from wgan_option.result_config import (  # noqa: E402
     GenerateResultConfig,
-    load_generate_result_config,
+    build_generate_result_config,
     parse_generate_result_overrides,
 )
 from wgan_option.utils.merged_xlsx import load_vol_surface_samples, select_ordered_split  # noqa: E402
@@ -436,48 +436,55 @@ class TestGenerateResultScripts(unittest.TestCase):
         )
         return run_root, run_dir
 
-    def test_generate_result_config_loads_yaml_and_cli_overrides(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = Path(tmpdir) / "vol.yaml"
-            _write_yaml(
-                config_path,
-                {
-                    "data_path": "data/example.xlsx",
-                    "sheet_name": "gan_input_ready",
-                    "text_embedding_mode": "hd",
-                    "train_ratio": 0.8,
-                    "split": "val",
-                    "selection_mode": "first_n",
-                    "limit": 3,
-                    "save_plots": True,
-                    "save_json": True,
-                    "output_dir": "outputs/generate_result/vol",
-                },
-            )
+    def test_generate_result_config_builds_from_training_values_and_cli_overrides(self):
+        training_values = {
+            "data_path": "data/example.xlsx",
+            "sheet_name": "gan_input_ready",
+            "text_embedding_mode": "hd",
+            "train_ratio": 0.8,
+            "seed": 123,
+        }
+        generate_values = {
+            "split": "val",
+            "selection_mode": "first_n",
+            "limit": 3,
+            "save_plots": True,
+            "save_json": True,
+            "output_dir": "generate_result",
+        }
 
-            overrides = parse_generate_result_overrides(["selection_mode=row_index", "row_index=2", "save_json=false"])
-            config = load_generate_result_config(str(config_path), overrides=overrides)
+        overrides = parse_generate_result_overrides(["selection_mode=row_index", "row_index=2", "save_json=false"])
+        config = build_generate_result_config(
+            training_values=training_values,
+            generate_values=generate_values,
+            overrides=overrides,
+        )
 
-            self.assertEqual(config.selection_mode, "row_index")
-            self.assertEqual(config.row_index, 2)
-            self.assertFalse(config.save_json)
+        self.assertEqual(config.data_path, "data/example.xlsx")
+        self.assertEqual(config.selection_mode, "row_index")
+        self.assertEqual(config.row_index, 2)
+        self.assertFalse(config.save_json)
 
-            overrides = parse_generate_result_overrides(
-                [
-                    "fallback_mode=mc_uncertainty_to_current",
-                    "mc_samples=5",
-                    "uncertainty_threshold=0.2",
-                ]
-            )
-            config = load_generate_result_config(str(config_path), overrides=overrides)
-            self.assertEqual(config.fallback_mode, "mc_uncertainty_to_current")
-            self.assertEqual(config.mc_samples, 5)
-            self.assertAlmostEqual(config.uncertainty_threshold, 0.2, places=6)
+        overrides = parse_generate_result_overrides(
+            [
+                "fallback_mode=mc_uncertainty_to_current",
+                "mc_samples=5",
+                "uncertainty_threshold=0.2",
+            ]
+        )
+        config = build_generate_result_config(
+            training_values=training_values,
+            generate_values=generate_values,
+            overrides=overrides,
+        )
+        self.assertEqual(config.fallback_mode, "mc_uncertainty_to_current")
+        self.assertEqual(config.mc_samples, 5)
+        self.assertAlmostEqual(config.uncertainty_threshold, 0.2, places=6)
 
-            for invalid_bool in ["save_json=off", "save_json=yes", "save_json=1"]:
-                with self.subTest(invalid_bool=invalid_bool):
-                    with self.assertRaises(ValueError):
-                        parse_generate_result_overrides([invalid_bool])
+        for invalid_bool in ["save_json=off", "save_json=yes", "save_json=1"]:
+            with self.subTest(invalid_bool=invalid_bool):
+                with self.assertRaises(ValueError):
+                    parse_generate_result_overrides([invalid_bool])
 
     def test_vol_split_and_selection_helpers_follow_chronological_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -593,9 +600,15 @@ class TestGenerateResultScripts(unittest.TestCase):
             module = _load_script_module(ROOT_DIR / "scripts/generate_result/main.py", "generate_vol_script")
             run_dir = module.main(["vol", "--config", str(config_path)])
 
-            self.assertEqual(run_dir, training_run_dir / "generate_result")
+            self.assertEqual(run_dir, training_run_dir / "generate_result" / "generator_best")
             self.assertTrue((run_dir / "generate_resolved_config.yaml").exists())
             self.assertTrue((run_dir / "summary.csv").exists())
+            resolved_config = yaml.safe_load((run_dir / "generate_resolved_config.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(resolved_config["output_dir"], str(run_dir))
+            self.assertEqual(
+                resolved_config["checkpoint_path"],
+                str(training_run_dir / "checkpoints" / "generator_best.pt"),
+            )
             json_files = sorted((run_dir / "samples").glob("*.json"))
             png_files = sorted((run_dir / "plots").glob("*.png"))
             self.assertEqual(len(json_files), 1)
@@ -703,7 +716,13 @@ class TestGenerateResultScripts(unittest.TestCase):
             module = _load_script_module(ROOT_DIR / "scripts/generate_result/main.py", "generate_vol_regression_script")
             run_dir = module.main(["vol-regression", "--config", str(config_path)])
 
-            self.assertEqual(run_dir, training_run_dir / "generate_result")
+            self.assertEqual(run_dir, training_run_dir / "generate_result" / "vol_regressor_best")
+            resolved_config = yaml.safe_load((run_dir / "generate_resolved_config.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(resolved_config["output_dir"], str(run_dir))
+            self.assertEqual(
+                resolved_config["checkpoint_path"],
+                str(training_run_dir / "checkpoints" / "vol_regressor_best.pt"),
+            )
             json_files = sorted((run_dir / "samples").glob("*.json"))
             self.assertEqual(len(json_files), 1)
             payload = json.loads(json_files[0].read_text(encoding="utf-8"))
@@ -753,7 +772,7 @@ class TestGenerateResultScripts(unittest.TestCase):
             module = _load_script_module(ROOT_DIR / "scripts/generate_result/main.py", "generate_vol_none_script")
             run_dir = module.main(["vol", "--config", str(config_path)])
 
-            self.assertEqual(run_dir, training_run_dir / "generate_result")
+            self.assertEqual(run_dir, training_run_dir / "generate_result" / "generator_best")
             self.assertTrue((run_dir / "summary.csv").exists())
             json_files = sorted((run_dir / "samples").glob("*.json"))
             self.assertEqual(len(json_files), 1)
@@ -799,7 +818,13 @@ class TestGenerateResultScripts(unittest.TestCase):
             module = _load_script_module(ROOT_DIR / "scripts/generate_result/main.py", "generate_svi_script")
             run_dir = module.main(["svi", "--config", str(config_path)])
 
-            self.assertEqual(run_dir, training_run_dir / "generate_result")
+            self.assertEqual(run_dir, training_run_dir / "generate_result" / "svi_regressor_best")
+            resolved_config = yaml.safe_load((run_dir / "generate_resolved_config.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(resolved_config["output_dir"], str(run_dir))
+            self.assertEqual(
+                resolved_config["checkpoint_path"],
+                str(training_run_dir / "checkpoints" / "svi_regressor_best.pt"),
+            )
             json_files = sorted((run_dir / "samples").glob("*.json"))
             png_files = sorted((run_dir / "plots").glob("*.png"))
             self.assertEqual(len(json_files), 1)
@@ -876,6 +901,31 @@ class TestGenerateResultScripts(unittest.TestCase):
             [
                 ["--config", "configs/wgan/train_vol_xlsx.yaml"],
                 ["--config", "configs/wgan/train_vol_regression_xlsx.yaml"],
+            ],
+        )
+
+    def test_generate_result_main_dispatches_model_flag(self):
+        module = _load_script_module(ROOT_DIR / "scripts/generate_result/main.py", "generate_result_model_switch_script")
+        calls = []
+
+        def _record(argv):
+            calls.append(list(argv))
+
+        with patch.dict(
+            module.MODEL_COMMANDS,
+            {"cnn-wgan": _record, "transformer-wgan": _record},
+            clear=False,
+        ):
+            module.main(["--model", "cnn-wgan", "--config", "configs/cnn_wgan/train_default.yaml"])
+            module.main(
+                ["--model=transformer-wgan", "--config", "configs/transformer_wgan/train_default.yaml"]
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ["--config", "configs/cnn_wgan/train_default.yaml"],
+                ["--config", "configs/transformer_wgan/train_default.yaml"],
             ],
         )
 

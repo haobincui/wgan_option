@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any, Dict, Iterable, Mapping
 
 import torch
 import yaml
-from wgan_option.config_parsing import load_yaml_mapping, load_yaml_config_values, parse_typed_overrides
+from wgan_option.config_parsing import parse_typed_overrides
 from wgan_option.surface_grid import (
     DEFAULT_MATURITY_BINS,
     DEFAULT_MATURITY_MAX_DAYS,
@@ -17,10 +17,6 @@ from wgan_option.surface_grid import (
     DEFAULT_MONEYNESS_MIN,
     DEFAULT_STRIKE_BINS,
 )
-
-DEFAULT_VOL_RESULT_CONFIG_PATH = "configs/generate_result/vol.yaml"
-DEFAULT_SVI_RESULT_CONFIG_PATH = "configs/generate_result/svi.yaml"
-DEFAULT_VOL_REGRESSION_RESULT_CONFIG_PATH = "configs/generate_result/vol-regression.yaml"
 
 _CONFIG_FIELD_NAMES = {
     "data_path",
@@ -134,37 +130,6 @@ def build_generate_result_config(
         loaded_values.update(dict(overrides))
 
     return GenerateResultConfig(**loaded_values)
-
-
-def load_generate_result_config(
-    config_path: Optional[str],
-    overrides: Optional[Dict[str, Any]] = None,
-) -> GenerateResultConfig:
-    """Load YAML config and apply validated CLI overrides."""
-
-    resolved_path = config_path or DEFAULT_VOL_RESULT_CONFIG_PATH
-    path, payload = load_yaml_mapping(resolved_path)
-
-    if "training" in payload or "generate_result" in payload:
-        training_values = payload.get("training") or {}
-        if training_values and not isinstance(training_values, dict):
-            raise ValueError(f"Config section 'training' in {path} must contain a YAML mapping.")
-        generate_values = payload.get("generate_result") or {}
-        if generate_values and not isinstance(generate_values, dict):
-            raise ValueError(f"Config section 'generate_result' in {path} must contain a YAML mapping.")
-        return build_generate_result_config(
-            training_values=training_values,
-            generate_values=generate_values,
-            overrides=overrides,
-        )
-
-    _, _, loaded_values = load_yaml_config_values(
-        resolved_path,
-        defaults=generate_result_config_to_dict(GenerateResultConfig()),
-        overrides=overrides,
-    )
-    return GenerateResultConfig(**loaded_values)
-
 
 def save_generate_result_config_yaml(config: GenerateResultConfig, output_path: str | Path) -> Path:
     """Persist resolved runtime config for reproducible result-generation runs."""
