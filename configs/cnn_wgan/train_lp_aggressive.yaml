@@ -40,6 +40,7 @@ training:
   eval_reweight_beta: 25.0
   eval_aggregation_mode: weighted_mean
   checkpoint_metric: val_mae_gap_vs_current
+  checkpoint_warmup_epochs: 10
 
   seed: 42
   cuda: true

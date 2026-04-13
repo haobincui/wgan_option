@@ -61,6 +61,7 @@ class CnnWGANTrainConfig:
     eval_reweight_beta: float = 25.0
     eval_aggregation_mode: str = "weighted_mean"
     checkpoint_metric: str = "val_mae_gap_vs_current"
+    checkpoint_warmup_epochs: int = 10
 
     seed: int = 42
     cuda: bool = torch.cuda.is_available()

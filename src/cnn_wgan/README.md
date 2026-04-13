@@ -154,6 +154,7 @@ Per epoch:
 | `num_epochs` | 100 | Training epochs |
 | `learning_rate` | 1e-4 | Learning rate (Adam, β₁=0.5, β₂=0.9) |
 | `checkpoint_metric` | `val_mae_gap_vs_current` | Best checkpoint selection metric |
+| `checkpoint_warmup_epochs` | 10 | Skip the first N epochs when selecting `cnn_wgan_best.pt` |
 
 ### CLI
 

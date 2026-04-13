@@ -367,6 +367,19 @@ class CnnWGANTrainer(BaseTrainer):
         metrics_rows: list[dict[str, float]] = []
         best_metric = float("inf")
         best_epoch = 0
+        fallback_metric = float("inf")
+        fallback_epoch = 0
+        checkpoint_warmup_epochs = max(0, int(getattr(self.config, "checkpoint_warmup_epochs", 0)))
+        selection_start_epoch = checkpoint_warmup_epochs + 1
+        fallback_checkpoint_path = self.checkpoints_dir / "cnn_wgan_best_warmup_fallback.pt"
+        fallback_used = False
+
+        if checkpoint_warmup_epochs > 0:
+            self.logger.info(
+                "Best checkpoint selection warmup enabled: skipping epochs <= %s; selection begins at epoch %s.",
+                checkpoint_warmup_epochs,
+                selection_start_epoch,
+            )
 
         for epoch in range(1, int(self.config.num_epochs) + 1):
             running: dict[str, list[float]] = {
@@ -415,7 +428,11 @@ class CnnWGANTrainer(BaseTrainer):
 
             monitor_name = str(self.config.checkpoint_metric).strip() or "val_mae_gap_vs_current"
             monitor_value = float(row.get(monitor_name, row.get("val_mae", row["g_total"])))
-            if monitor_value < best_metric:
+            if monitor_value < fallback_metric:
+                fallback_metric = monitor_value
+                fallback_epoch = epoch
+                save_checkpoint(fallback_checkpoint_path, self._checkpoint_payload())
+            if epoch > checkpoint_warmup_epochs and monitor_value < best_metric:
                 best_metric = monitor_value
                 best_epoch = epoch
                 save_checkpoint(self.checkpoints_dir / "cnn_wgan_best.pt", self._checkpoint_payload())
@@ -433,6 +450,19 @@ class CnnWGANTrainer(BaseTrainer):
                 row.get("val_win_rate_vs_current", 0.0),
             )
 
+        if best_epoch == 0 and fallback_epoch > 0:
+            fallback_used = True
+            best_metric = fallback_metric
+            best_epoch = fallback_epoch
+            fallback_checkpoint_path.replace(self.checkpoints_dir / "cnn_wgan_best.pt")
+            self.logger.warning(
+                "No epoch exceeded checkpoint_warmup_epochs=%s during training; falling back to overall best epoch=%s.",
+                checkpoint_warmup_epochs,
+                best_epoch,
+            )
+        elif fallback_checkpoint_path.exists():
+            fallback_checkpoint_path.unlink()
+
         save_checkpoint(self.checkpoints_dir / "cnn_wgan_final.pt", self._checkpoint_payload())
         write_json(
             self.metrics_dir / "best_checkpoint.json",
@@ -440,6 +470,9 @@ class CnnWGANTrainer(BaseTrainer):
                 "best_epoch": int(best_epoch),
                 "best_metric": float(best_metric),
                 "checkpoint_metric": str(self.config.checkpoint_metric),
+                "checkpoint_warmup_epochs": int(checkpoint_warmup_epochs),
+                "selection_start_epoch": int(selection_start_epoch),
+                "fallback_used": bool(fallback_used),
                 "checkpoint_path": str(self.checkpoints_dir / "cnn_wgan_best.pt"),
             },
         )

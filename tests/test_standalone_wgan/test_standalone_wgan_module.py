@@ -5,9 +5,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
+import torch
 import yaml
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -115,6 +117,7 @@ class TestStandaloneWGAN(unittest.TestCase):
         cnn_config = load_cnn_train_config(ROOT_DIR / "configs/cnn_wgan/train_lp_gen128_disc128.yaml")
         transformer_config = load_transformer_train_config(ROOT_DIR / "configs/transformer_wgan/train_lp.yaml")
         self.assertEqual(cnn_config.text_embedding_mode, "lp")
+        self.assertEqual(cnn_config.checkpoint_warmup_epochs, 10)
         self.assertEqual(transformer_config.text_embedding_mode, "lp")
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -240,6 +243,178 @@ class TestStandaloneWGAN(unittest.TestCase):
             self.assertTrue((generate_dir / "generate_resolved_config.yaml").exists())
             self.assertTrue((training_run_dir / "checkpoints" / "cnn_wgan_best.pt").exists())
             self.assertTrue((generate_dir / "summary.csv").exists())
+
+    def test_cnn_best_checkpoint_skips_first_ten_epochs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = _write_vol_workbook(tmpdir)
+            output_root = Path(tmpdir) / "training" / "cnn_wgan"
+            config_path = _write_yaml(
+                Path(tmpdir) / "cnn_warmup.yaml",
+                {
+                    "training": {
+                        "data_path": str(workbook_path),
+                        "sheet_name": "gan_input_ready",
+                        "text_embedding_mode": "lp",
+                        "train_ratio": 0.67,
+                        "min_samples_for_training": 2,
+                        "noise_dim": 4,
+                        "gen_base_channels": 8,
+                        "disc_base_channels": 8,
+                        "gen_res_blocks": 1,
+                        "disc_res_blocks": 1,
+                        "text_hidden_dim": 16,
+                        "text_out_dim": 8,
+                        "fusion_hidden_dim": 32,
+                        "num_epochs": 12,
+                        "batch_size": 1,
+                        "eval_mc_samples": 2,
+                        "checkpoint_warmup_epochs": 10,
+                        "cuda": False,
+                        "num_workers": 0,
+                        "output_root": str(output_root),
+                        "save_every": 20,
+                    }
+                },
+            )
+
+            trainer = CnnWGANTrainer(load_cnn_train_config(config_path), config_path=str(config_path))
+            eval_rows = [
+                {"val_mae_gap_vs_current": -10.0 + float(epoch), "val_mae": 0.0, "val_current_mae": 0.0}
+                for epoch in range(1, 11)
+            ] + [
+                {"val_mae_gap_vs_current": -0.5, "val_mae": 0.0, "val_current_mae": 0.0},
+                {"val_mae_gap_vs_current": -0.25, "val_mae": 0.0, "val_current_mae": 0.0},
+            ]
+
+            def fake_setup():
+                trainer.checkpoints_dir.mkdir(parents=True, exist_ok=True)
+                trainer.metrics_dir.mkdir(parents=True, exist_ok=True)
+                trainer.bundle = SimpleNamespace(
+                    train_loader=[
+                        (
+                            torch.zeros((1, 1, 4, 4), dtype=torch.float32),
+                            torch.zeros((1, 3), dtype=torch.float32),
+                            torch.zeros((1, 16), dtype=torch.float32),
+                            torch.ones((1, 16), dtype=torch.float32),
+                            torch.ones((1, 16), dtype=torch.float32),
+                        )
+                    ]
+                )
+
+            with patch.object(trainer, "setup", side_effect=fake_setup), \
+                patch.object(
+                    trainer,
+                    "_discriminator_step",
+                    return_value={"d_total": 0.0, "d_real": 0.0, "d_fake": 0.0, "gp": 0.0},
+                ), \
+                patch.object(
+                    trainer,
+                    "_generator_step",
+                    return_value={
+                        "g_total": 0.0,
+                        "g_adv": 0.0,
+                        "g_calendar": 0.0,
+                        "g_butterfly": 0.0,
+                        "g_smooth": 0.0,
+                    },
+                ), \
+                patch.object(trainer, "_evaluate", side_effect=eval_rows), \
+                patch.object(trainer, "_save_loss_curves", return_value=None), \
+                patch.object(trainer, "_checkpoint_payload", return_value={"state": "ok"}):
+                trainer.train()
+
+            run_dir = next(path for path in output_root.iterdir() if path.is_dir())
+            best_payload = json.loads((run_dir / "metrics" / "best_checkpoint.json").read_text(encoding="utf-8"))
+            self.assertEqual(best_payload["best_epoch"], 11)
+            self.assertEqual(best_payload["checkpoint_warmup_epochs"], 10)
+            self.assertEqual(best_payload["selection_start_epoch"], 11)
+            self.assertFalse(best_payload["fallback_used"])
+            self.assertTrue((run_dir / "checkpoints" / "cnn_wgan_best.pt").exists())
+
+    def test_cnn_best_checkpoint_falls_back_when_warmup_covers_all_epochs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = _write_vol_workbook(tmpdir)
+            output_root = Path(tmpdir) / "training" / "cnn_wgan"
+            config_path = _write_yaml(
+                Path(tmpdir) / "cnn_warmup_fallback.yaml",
+                {
+                    "training": {
+                        "data_path": str(workbook_path),
+                        "sheet_name": "gan_input_ready",
+                        "text_embedding_mode": "lp",
+                        "train_ratio": 0.67,
+                        "min_samples_for_training": 2,
+                        "noise_dim": 4,
+                        "gen_base_channels": 8,
+                        "disc_base_channels": 8,
+                        "gen_res_blocks": 1,
+                        "disc_res_blocks": 1,
+                        "text_hidden_dim": 16,
+                        "text_out_dim": 8,
+                        "fusion_hidden_dim": 32,
+                        "num_epochs": 3,
+                        "batch_size": 1,
+                        "eval_mc_samples": 2,
+                        "checkpoint_warmup_epochs": 10,
+                        "cuda": False,
+                        "num_workers": 0,
+                        "output_root": str(output_root),
+                        "save_every": 20,
+                    }
+                },
+            )
+
+            trainer = CnnWGANTrainer(load_cnn_train_config(config_path), config_path=str(config_path))
+            eval_rows = [
+                {"val_mae_gap_vs_current": 0.3, "val_mae": 0.0, "val_current_mae": 0.0},
+                {"val_mae_gap_vs_current": 0.2, "val_mae": 0.0, "val_current_mae": 0.0},
+                {"val_mae_gap_vs_current": 0.1, "val_mae": 0.0, "val_current_mae": 0.0},
+            ]
+
+            def fake_setup():
+                trainer.checkpoints_dir.mkdir(parents=True, exist_ok=True)
+                trainer.metrics_dir.mkdir(parents=True, exist_ok=True)
+                trainer.bundle = SimpleNamespace(
+                    train_loader=[
+                        (
+                            torch.zeros((1, 1, 4, 4), dtype=torch.float32),
+                            torch.zeros((1, 3), dtype=torch.float32),
+                            torch.zeros((1, 16), dtype=torch.float32),
+                            torch.ones((1, 16), dtype=torch.float32),
+                            torch.ones((1, 16), dtype=torch.float32),
+                        )
+                    ]
+                )
+
+            with patch.object(trainer, "setup", side_effect=fake_setup), \
+                patch.object(
+                    trainer,
+                    "_discriminator_step",
+                    return_value={"d_total": 0.0, "d_real": 0.0, "d_fake": 0.0, "gp": 0.0},
+                ), \
+                patch.object(
+                    trainer,
+                    "_generator_step",
+                    return_value={
+                        "g_total": 0.0,
+                        "g_adv": 0.0,
+                        "g_calendar": 0.0,
+                        "g_butterfly": 0.0,
+                        "g_smooth": 0.0,
+                    },
+                ), \
+                patch.object(trainer, "_evaluate", side_effect=eval_rows), \
+                patch.object(trainer, "_save_loss_curves", return_value=None), \
+                patch.object(trainer, "_checkpoint_payload", return_value={"state": "ok"}):
+                trainer.train()
+
+            run_dir = next(path for path in output_root.iterdir() if path.is_dir())
+            best_payload = json.loads((run_dir / "metrics" / "best_checkpoint.json").read_text(encoding="utf-8"))
+            self.assertEqual(best_payload["best_epoch"], 3)
+            self.assertEqual(best_payload["checkpoint_warmup_epochs"], 10)
+            self.assertEqual(best_payload["selection_start_epoch"], 11)
+            self.assertTrue(best_payload["fallback_used"])
+            self.assertTrue((run_dir / "checkpoints" / "cnn_wgan_best.pt").exists())
 
     def test_transformer_pipeline_writes_generate_result_under_training_run(self):
         with tempfile.TemporaryDirectory() as tmpdir:
