@@ -39,6 +39,16 @@ def build_train_arg_parser(*, description: str, default_config_path: str) -> arg
         help="Load config, build dataloader/model, and exit without training.",
     )
     parser.add_argument(
+        "--train-only",
+        action="store_true",
+        help="Run training only and skip generate_result.",
+    )
+    parser.add_argument(
+        "--generate-only",
+        action="store_true",
+        help="Skip training and run generate_result from the latest/existing training run.",
+    )
+    parser.add_argument(
         "--print-config",
         action="store_true",
         help="Print resolved config before run.",
@@ -63,8 +73,15 @@ def run_training_cli(
     if args.print_config:
         print(yaml.safe_dump(config_to_dict(config), sort_keys=False, allow_unicode=False))
 
-    trainer = trainer_cls(config)
+    if args.train_only and args.generate_only:
+        raise ValueError("--train-only and --generate-only cannot be used together.")
+
+    trainer = trainer_cls(config, config_path=args.config)
     if args.dry_run:
         trainer.dry_run()
+    elif args.generate_only:
+        trainer.generate_result(config_path=args.config)
+    elif args.train_only:
+        trainer.train()
     else:
-        trainer.start_train()
+        trainer.run_pipeline(config_path=args.config)

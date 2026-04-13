@@ -70,21 +70,17 @@ def load_yaml_config_values(
     *,
     defaults: Mapping[str, Any],
     overrides: Mapping[str, Any] | None = None,
+    section: str | None = None,
 ) -> tuple[Path, Dict[str, Any], Dict[str, Any]]:
     """Load one YAML config file and merge validated overrides onto defaults."""
 
-    path = Path(config_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Config file does not exist: {config_path}")
-
-    loaded_values = dict(defaults)
-    with path.open("r", encoding="utf-8") as handle:
-        yaml_values = yaml.safe_load(handle) or {}
-    if not isinstance(yaml_values, dict):
-        raise ValueError(f"Config file must contain a YAML mapping: {path}")
+    path, yaml_payload = load_yaml_mapping(config_path)
+    yaml_values = select_config_section(yaml_payload, section=section, path=path)
 
     valid_keys = set(defaults.keys())
     validate_config_keys(yaml_values, valid_keys=valid_keys, source=str(path))
+
+    loaded_values = dict(defaults)
     loaded_values.update(yaml_values)
 
     if overrides:
@@ -92,3 +88,34 @@ def load_yaml_config_values(
         loaded_values.update(overrides)
 
     return path, yaml_values, loaded_values
+
+
+def load_yaml_mapping(config_path: str | Path) -> tuple[Path, Dict[str, Any]]:
+    """Load a YAML mapping from disk."""
+
+    path = Path(config_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Config file does not exist: {config_path}")
+
+    with path.open("r", encoding="utf-8") as handle:
+        payload = yaml.safe_load(handle) or {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"Config file must contain a YAML mapping: {path}")
+    return path, dict(payload)
+
+
+def select_config_section(
+    yaml_payload: Mapping[str, Any],
+    *,
+    section: str | None,
+    path: str | Path,
+) -> Dict[str, Any]:
+    """Select one nested config section, falling back to the full payload when absent."""
+
+    if section is None or section not in yaml_payload:
+        return dict(yaml_payload)
+
+    section_payload = yaml_payload.get(section) or {}
+    if not isinstance(section_payload, dict):
+        raise ValueError(f"Config section '{section}' in {path} must contain a YAML mapping.")
+    return dict(section_payload)

@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import autograd
 from torch.optim import Adam
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 
 from wgan_option.config import Config
 from wgan_option.models.discriminator import Discriminator
@@ -69,8 +69,10 @@ class WGAN_GP:
             hidden_dim=config.disc_hidden_dim,
         ).to(self.device)
 
-        self.g_optimizer = Adam(self.G.parameters(), lr=config.learning_rate, betas=(config.beta_1, config.beta_2))
-        self.d_optimizer = Adam(self.D.parameters(), lr=config.learning_rate, betas=(config.beta_1, config.beta_2))
+        g_lr = config.generator_learning_rate if config.generator_learning_rate > 0 else config.learning_rate
+        d_lr = config.discriminator_learning_rate if config.discriminator_learning_rate > 0 else config.learning_rate
+        self.g_optimizer = Adam(self.G.parameters(), lr=g_lr, betas=(config.beta_1, config.beta_2))
+        self.d_optimizer = Adam(self.D.parameters(), lr=d_lr, betas=(config.beta_1, config.beta_2))
 
         self.critic_iter = config.discriminator_iter
         self.lambda_gp = config.lambda_gp
@@ -241,8 +243,11 @@ class WGAN_GP:
         real_future: torch.Tensor,
         *,
         epoch: int = 1,
+        loss_scale: float = 1.0,
+        skip_optimizer_step: bool = False,
     ):
-        self.g_optimizer.zero_grad(set_to_none=True)
+        if not skip_optimizer_step and loss_scale == 1.0:
+            self.g_optimizer.zero_grad(set_to_none=True)
         fake_future = self.G(current_surface, text_embedding)
         adv_loss = -self.D(fake_future, current_surface, text_embedding).mean()
         recon_loss = F.l1_loss(fake_future, real_future)
@@ -261,8 +266,9 @@ class WGAN_GP:
             g_loss = g_loss + self.lambda_smooth * smooth_penalty
         if self.lambda_delta_shrink > 0.0:
             g_loss = g_loss + self.lambda_delta_shrink * delta_shrink
-        g_loss.backward()
-        self.g_optimizer.step()
+        (g_loss * loss_scale).backward()
+        if not skip_optimizer_step:
+            self.g_optimizer.step()
 
         return {
             "g_total": float(g_loss.detach().cpu()),
@@ -521,24 +527,39 @@ class WGAN_GP:
         min_delta = float(self.config.early_stopping_min_delta)
         best_tracking_enabled = val_loader is not None
         early_stopping_enabled = bool(self.config.use_early_stopping and best_tracking_enabled)
-        g_scheduler: Optional[ReduceLROnPlateau] = None
-        d_scheduler: Optional[ReduceLROnPlateau] = None
+        g_scheduler = None
+        d_scheduler = None
         epochs_without_improvement = 0
 
-        if not self.config.use_reduce_lr_on_plateau:
-            logger.info("ReduceLROnPlateau is disabled.")
-        elif not best_tracking_enabled:
-            logger.info("ReduceLROnPlateau requested but disabled because no validation split is available.")
-        else:
-            g_scheduler = self._create_plateau_scheduler(self.g_optimizer)
-            d_scheduler = self._create_plateau_scheduler(self.d_optimizer)
+        scheduler_type = str(getattr(self.config, "lr_scheduler_type", "none")).strip().lower()
+        if scheduler_type == "none" and self.config.use_reduce_lr_on_plateau:
+            scheduler_type = "plateau"
+
+        if scheduler_type == "plateau":
+            if not best_tracking_enabled:
+                logger.info("ReduceLROnPlateau requested but disabled because no validation split is available.")
+                scheduler_type = "none"
+            else:
+                g_scheduler = self._create_plateau_scheduler(self.g_optimizer)
+                d_scheduler = self._create_plateau_scheduler(self.d_optimizer)
+                logger.info(
+                    "ReduceLROnPlateau enabled for generator and discriminator using %s (factor=%.3f, patience=%d, min_lr=%.6g).",
+                    monitor_metric,
+                    float(self.config.reduce_lr_factor),
+                    int(self.config.reduce_lr_patience),
+                    float(self.config.reduce_lr_min_lr),
+                )
+        elif scheduler_type == "cosine":
+            eta_min = float(self.config.reduce_lr_min_lr)
+            g_scheduler = CosineAnnealingLR(self.g_optimizer, T_max=self.num_epochs, eta_min=eta_min)
+            d_scheduler = CosineAnnealingLR(self.d_optimizer, T_max=self.num_epochs, eta_min=eta_min)
             logger.info(
-                "ReduceLROnPlateau enabled for generator and discriminator using %s (factor=%.3f, patience=%d, min_lr=%.6g).",
-                monitor_metric,
-                float(self.config.reduce_lr_factor),
-                int(self.config.reduce_lr_patience),
-                float(self.config.reduce_lr_min_lr),
+                "CosineAnnealingLR enabled for generator and discriminator (T_max=%d, eta_min=%.6g).",
+                self.num_epochs,
+                eta_min,
             )
+        else:
+            logger.info("LR scheduler is disabled.")
 
         if not best_tracking_enabled:
             logger.info("Validation unavailable; best-checkpoint tracking disabled.")
@@ -565,6 +586,10 @@ class WGAN_GP:
                 warmup_epochs + 1,
             )
 
+        accum_steps = max(1, int(getattr(self.config, "gradient_accumulation_steps", 1)))
+        if accum_steps > 1:
+            logger.info("Gradient accumulation enabled: %d steps (effective batch = %d).", accum_steps, self.config.batch_size * accum_steps)
+
         for epoch in range(1, self.num_epochs + 1):
             running: Dict[str, list] = {}
             for batch_idx, (current_surface, text_embedding, real_future) in enumerate(train_loader, 1):
@@ -578,11 +603,17 @@ class WGAN_GP:
                     for key, value in d_stats.items():
                         running.setdefault(key, []).append(value)
 
+                is_accum_boundary = (batch_idx % accum_steps == 0) or (batch_idx == num_batches)
+                if accum_steps > 1 and (batch_idx - 1) % accum_steps == 0:
+                    self.g_optimizer.zero_grad(set_to_none=True)
+
                 g_stats = self._generator_step(
                     current_surface,
                     text_embedding,
                     real_future,
                     epoch=epoch,
+                    loss_scale=1.0 / accum_steps if accum_steps > 1 else 1.0,
+                    skip_optimizer_step=not is_accum_boundary if accum_steps > 1 else False,
                 )
                 for key, value in g_stats.items():
                     running.setdefault(key, []).append(value)
@@ -666,22 +697,27 @@ class WGAN_GP:
                         best_epoch,
                     )
 
-                self._step_plateau_scheduler(
-                    scheduler=g_scheduler,
-                    optimizer=self.g_optimizer,
-                    metric_name=monitor_metric,
-                    metric_value=current_metric,
-                    logger=logger,
-                    label="Generator",
-                )
-                self._step_plateau_scheduler(
-                    scheduler=d_scheduler,
-                    optimizer=self.d_optimizer,
-                    metric_name=monitor_metric,
-                    metric_value=current_metric,
-                    logger=logger,
-                    label="Discriminator",
-                )
+                if scheduler_type == "plateau":
+                    self._step_plateau_scheduler(
+                        scheduler=g_scheduler,
+                        optimizer=self.g_optimizer,
+                        metric_name=monitor_metric,
+                        metric_value=current_metric,
+                        logger=logger,
+                        label="Generator",
+                    )
+                    self._step_plateau_scheduler(
+                        scheduler=d_scheduler,
+                        optimizer=self.d_optimizer,
+                        metric_name=monitor_metric,
+                        metric_value=current_metric,
+                        logger=logger,
+                        label="Discriminator",
+                    )
+
+            if scheduler_type == "cosine" and g_scheduler is not None:
+                g_scheduler.step()
+                d_scheduler.step()
 
             if epoch % self.config.save_every == 0:
                 self.save_model(epoch)

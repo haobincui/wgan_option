@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Dict, Type, TypeVar
 
 import torch
 import yaml
+from utils.output_paths import (
+    find_best_checkpoint,
+    find_latest_run_dir,
+    infer_dataset_family as infer_output_dataset_family,
+    resolve_output_root,
+)
+from utils.training_paths import generate_result_dir, infer_run_dir_from_checkpoint
+from wgan_option.config_parsing import load_yaml_mapping
 
 T = TypeVar("T")
 
@@ -59,6 +67,9 @@ class VolGANTrainConfig:
     num_workers: int = 0
 
     output_root: str = ""
+    models_path: str = ""
+    metrics_path: str = ""
+    samples_path: str = ""
     save_every: int = 10
 
 
@@ -90,21 +101,17 @@ class VolGANSampleConfig:
 
 
 def infer_dataset_family(data_path: str | Path) -> str:
-    path = Path(data_path)
-    if path.parent.name and path.parent.name not in {"", "."}:
-        grandparent = path.parent.parent.name
-        if grandparent:
-            return grandparent
-        return path.parent.name
-    return "default"
+    return infer_output_dataset_family(data_path)
 
 
 def default_train_output_root(data_path: str | Path) -> str:
-    return str(Path("outputs/training/volgan") / infer_dataset_family(data_path))
-
-
-def default_generate_result_output_dir(data_path: str | Path) -> str:
-    return str(Path("outputs/generate_result/volgan") / infer_dataset_family(data_path))
+    return str(
+        resolve_output_root(
+            "",
+            base_root="outputs/training/volgan",
+            data_path=data_path,
+        )
+    )
 
 
 def _config_to_dict(config: Any) -> Dict[str, Any]:
@@ -112,10 +119,7 @@ def _config_to_dict(config: Any) -> Dict[str, Any]:
 
 
 def _load_yaml_values(config_path: str | Path) -> Dict[str, Any]:
-    with open(config_path, "r", encoding="utf-8") as handle:
-        payload = yaml.safe_load(handle) or {}
-    if not isinstance(payload, dict):
-        raise ValueError(f"Config at {config_path} must define a YAML mapping.")
+    _, payload = load_yaml_mapping(config_path)
     return payload
 
 
@@ -129,8 +133,15 @@ def _coerce_config(config_cls: Type[T], values: Dict[str, Any]) -> T:
     return config_cls(**values)
 
 
+def _field_names(config_cls: Type[Any]) -> set[str]:
+    return {field.name for field in fields(config_cls)}
+
+
 def load_train_config(config_path: str | Path) -> VolGANTrainConfig:
-    values = _load_yaml_values(config_path)
+    payload = _load_yaml_values(config_path)
+    values = payload.get("training", payload)
+    if not isinstance(values, dict):
+        raise ValueError(f"Config section 'training' in {config_path} must define a YAML mapping.")
     config = _coerce_config(VolGANTrainConfig, values)
     if "generator_learning_rate" not in values:
         config.generator_learning_rate = float(config.learning_rate)
@@ -141,12 +152,93 @@ def load_train_config(config_path: str | Path) -> VolGANTrainConfig:
     return config
 
 
-def load_sample_config(config_path: str | Path) -> VolGANSampleConfig:
-    values = _load_yaml_values(config_path)
-    config = _coerce_config(VolGANSampleConfig, values)
-    if not str(config.output_dir).strip():
-        config.output_dir = default_generate_result_output_dir(config.data_path)
+def _build_sample_defaults(
+    *,
+    train_config: VolGANTrainConfig,
+    run_dir: Path,
+    checkpoint_path: str | Path | None = None,
+) -> VolGANSampleConfig:
+    sample_defaults = VolGANSampleConfig()
+    resolved_checkpoint_path = Path(checkpoint_path) if checkpoint_path is not None else find_best_checkpoint(
+        run_dir,
+        filename="volgan_best.pt",
+    )
+    return VolGANSampleConfig(
+        data_path=train_config.data_path,
+        sheet_name=train_config.sheet_name,
+        text_embedding_mode=train_config.text_embedding_mode,
+        train_ratio=train_config.train_ratio,
+        checkpoint_path=str(resolved_checkpoint_path),
+        seed=int(train_config.seed),
+        cuda=bool(train_config.cuda),
+        mc_samples=int(train_config.eval_mc_samples),
+        reweight_beta_mode=str(train_config.eval_reweight_beta_mode),
+        reweight_beta=float(train_config.eval_reweight_beta),
+        quantiles=list(sample_defaults.quantiles),
+        split=str(sample_defaults.split),
+        selection_mode=str(sample_defaults.selection_mode),
+        selection_count=int(sample_defaults.selection_count),
+        aggregation_mode=str(train_config.eval_aggregation_mode),
+        output_dir=str(generate_result_dir(run_dir)),
+        save_json=bool(sample_defaults.save_json),
+        save_plots=bool(sample_defaults.save_plots),
+    )
+
+
+def load_sample_config(
+    config_path: str | Path,
+    *,
+    run_dir: str | Path | None = None,
+    checkpoint_path: str | Path | None = None,
+) -> VolGANSampleConfig:
+    payload = _load_yaml_values(config_path)
+    if "training" in payload or "generate_result" in payload or set(payload).issubset(_field_names(VolGANTrainConfig)):
+        train_config = load_train_config(config_path)
+        resolved_run_dir = (
+            Path(run_dir)
+            if run_dir is not None
+            else infer_run_dir_from_checkpoint(checkpoint_path) or find_latest_run_dir(train_config.output_root)
+        )
+        config = _build_sample_defaults(
+            train_config=train_config,
+            run_dir=resolved_run_dir,
+            checkpoint_path=checkpoint_path,
+        )
+        generate_values = payload.get("generate_result") or {}
+        if generate_values and not isinstance(generate_values, dict):
+            raise ValueError(f"Config section 'generate_result' in {config_path} must define a YAML mapping.")
+        if generate_values:
+            config = replace(config, **_coerce_config(VolGANSampleConfig, {**_config_to_dict(config), **generate_values}).__dict__)
+        if checkpoint_path is not None:
+            config = replace(config, checkpoint_path=str(checkpoint_path))
+        config = replace(config, output_dir=str(generate_result_dir(resolved_run_dir, config.output_dir)))
+        return config
+
+    config = _coerce_config(VolGANSampleConfig, payload)
+    if run_dir is not None:
+        config = replace(config, output_dir=str(generate_result_dir(run_dir, config.output_dir)))
     return config
+
+
+def build_sample_config_from_train_config(
+    train_config_path: str | Path,
+    *,
+    checkpoint_path: str | Path | None = None,
+    run_dir: str | Path | None = None,
+) -> VolGANSampleConfig:
+    """Derive generate-result settings directly from one training config."""
+
+    train_config = load_train_config(train_config_path)
+    resolved_run_dir = (
+        Path(run_dir)
+        if run_dir is not None
+        else infer_run_dir_from_checkpoint(checkpoint_path) or find_latest_run_dir(train_config.output_root)
+    )
+    return _build_sample_defaults(
+        train_config=train_config,
+        run_dir=resolved_run_dir,
+        checkpoint_path=checkpoint_path,
+    )
 
 
 def save_config_yaml(config: Any, output_path: str | Path) -> None:

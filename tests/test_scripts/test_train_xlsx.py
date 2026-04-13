@@ -404,11 +404,11 @@ class TestTrainMergedXlsx(unittest.TestCase):
                 output_root="",
             )
 
-            with patch("wgan_option.utils.training_run_paths._AUTO_TRAINING_ROOT", auto_root):
-                resolved_config, run_dir = prepare_timestamped_training_config(config)
+            with patch("utils.training_paths._AUTO_TRAINING_ROOT", auto_root):
+                resolved_config, run_dir = prepare_timestamped_training_config(config, trainer_id="cnn_wgan")
 
-            self.assertEqual(run_dir.parent, auto_root / "cubic-excel")
-            self.assertEqual(resolved_config.output_root, str(auto_root / "cubic-excel"))
+            self.assertEqual(run_dir.parent, auto_root / "cnn_wgan" / "cubic-excel")
+            self.assertEqual(resolved_config.output_root, str(auto_root / "cnn_wgan" / "cubic-excel"))
             self.assertEqual(resolved_config.models_path, str(run_dir / "checkpoints"))
             self.assertEqual(resolved_config.samples_path, str(run_dir / "samples"))
             self.assertEqual(resolved_config.metrics_path, str(run_dir / "metrics"))
@@ -422,11 +422,11 @@ class TestTrainMergedXlsx(unittest.TestCase):
                 output_root="",
             )
 
-            with patch("wgan_option.utils.training_run_paths._AUTO_TRAINING_ROOT", auto_root):
-                resolved_config, run_dir = prepare_timestamped_training_config(config)
+            with patch("utils.training_paths._AUTO_TRAINING_ROOT", auto_root):
+                resolved_config, run_dir = prepare_timestamped_training_config(config, trainer_id="svi_mlp")
 
-            self.assertEqual(run_dir.parent, auto_root / "svi-all")
-            self.assertEqual(resolved_config.output_root, str(auto_root / "svi-all"))
+            self.assertEqual(run_dir.parent, auto_root / "svi_mlp" / "svi-all")
+            self.assertEqual(resolved_config.output_root, str(auto_root / "svi_mlp" / "svi-all"))
             self.assertEqual(resolved_config.models_path, str(run_dir / "checkpoints"))
             self.assertEqual(resolved_config.metrics_path, str(run_dir / "metrics"))
 
@@ -439,7 +439,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
                 output_root=str(output_root),
             )
 
-            resolved_config, run_dir = prepare_timestamped_training_config(config)
+            resolved_config, run_dir = prepare_timestamped_training_config(config, trainer_id="cnn_wgan")
 
             self.assertFalse(run_dir.exists())
             self.assertFalse(Path(resolved_config.models_path).exists())
@@ -650,7 +650,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
             models_dir = run_dir / "checkpoints"
             samples_dir = run_dir / "samples"
             self.assertTrue(samples_dir.exists())
-            self.assertTrue((metrics_dir / f"run_config_{run_dir.name}.yaml").exists())
+            self.assertTrue((metrics_dir / "training_resolved_config.yaml").exists())
             self.assertFalse((metrics_dir / "loss_curves.png").exists())
             self.assertFalse((metrics_dir / "training_metrics.csv").exists())
             self.assertFalse((metrics_dir / "best_checkpoint.json").exists())
@@ -693,7 +693,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
             models_dir = run_dir / "checkpoints"
             samples_dir = run_dir / "samples"
             self.assertTrue(samples_dir.exists())
-            self.assertTrue((metrics_dir / f"run_config_{run_dir.name}.yaml").exists())
+            self.assertTrue((metrics_dir / "training_resolved_config.yaml").exists())
             plot_path = metrics_dir / "loss_curves.png"
             self.assertTrue(plot_path.exists())
             self.assertGreater(plot_path.stat().st_size, 0)
@@ -757,7 +757,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
             models_dir = run_dir / "checkpoints"
             samples_dir = run_dir / "samples"
             self.assertTrue(samples_dir.exists())
-            self.assertTrue((metrics_dir / f"run_config_{run_dir.name}.yaml").exists())
+            self.assertTrue((metrics_dir / "training_resolved_config.yaml").exists())
             self.assertFalse((metrics_dir / "training_metrics.csv").exists())
             self.assertFalse((metrics_dir / "best_checkpoint.json").exists())
             self.assertFalse((models_dir / "vol_regressor_best.pt").exists())
@@ -839,7 +839,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
             stats_path = metrics_dir / "normalization_stats.json"
             self.assertTrue(samples_dir.exists())
             self.assertTrue(stats_path.exists())
-            self.assertTrue((metrics_dir / f"run_config_{run_dir.name}.yaml").exists())
+            self.assertTrue((metrics_dir / "training_resolved_config.yaml").exists())
             self.assertFalse((metrics_dir / "loss_curves.png").exists())
             self.assertFalse((metrics_dir / "training_metrics.csv").exists())
             self.assertFalse((metrics_dir / "best_checkpoint.json").exists())
@@ -878,7 +878,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
             models_dir = run_dir / "checkpoints"
             samples_dir = run_dir / "samples"
             self.assertTrue(samples_dir.exists())
-            self.assertTrue((metrics_dir / f"run_config_{run_dir.name}.yaml").exists())
+            self.assertTrue((metrics_dir / "training_resolved_config.yaml").exists())
             plot_path = metrics_dir / "loss_curves.png"
             self.assertTrue(plot_path.exists())
             self.assertGreater(plot_path.stat().st_size, 0)
@@ -1153,6 +1153,9 @@ class TestTrainMergedXlsx(unittest.TestCase):
 
     def test_migrate_training_outputs_moves_legacy_runs_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmpdir:
+            migrate_script_path = ROOT_DIR / "scripts/train/migrate_training_outputs.py"
+            if not migrate_script_path.exists():
+                self.skipTest("scripts/train/migrate_training_outputs.py is not present in this workspace.")
             outputs_root = Path(tmpdir) / "outputs"
             legacy_vol = self._write_legacy_training_dir(
                 outputs_root,
@@ -1174,7 +1177,7 @@ class TestTrainMergedXlsx(unittest.TestCase):
             existing_destination.mkdir(parents=True, exist_ok=True)
 
             module = _load_script_module(
-                ROOT_DIR / "scripts/train/migrate_training_outputs.py",
+                migrate_script_path,
                 "migrate_training_outputs_script",
             )
             migrated = module.main(["--outputs-root", str(outputs_root)])

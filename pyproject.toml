@@ -22,7 +22,8 @@ dependencies = [
 
 [tool.setuptools]
 package-dir = { "" = "src" }
+py-modules = ["trainer"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["wgan_option*", "quantlib*", "market_data*", "volgan*"]
+include = ["wgan_option*", "quantlib*", "market_data*", "volgan*", "utils*", "generate_result*"]

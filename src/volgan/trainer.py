@@ -5,19 +5,29 @@ from __future__ import annotations
 import logging
 import random
 import sys
+from dataclasses import replace
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 import numpy as np
 import torch
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import RMSprop
+from trainer import BaseTrainer
+from utils.output_paths import find_best_checkpoint, prepare_run_dir
+from utils.training_paths import generate_result_dir, resolve_existing_run_dir
 
 from .arbitrage import butterfly_arbitrage_penalty, calendar_arbitrage_penalty
-from .config import VolGANTrainConfig, save_config_yaml
+from .config import (
+    VolGANSampleConfig,
+    VolGANTrainConfig,
+    build_sample_config_from_train_config,
+    default_train_output_root,
+    load_sample_config,
+)
 from .data import VolSurfaceDataBundle, create_train_val_bundle, denormalize_tensor
-from .inference import build_sample_payload, normalization_stats_to_tensors
-from .io import config_payload, prepare_run_dir, save_checkpoint, write_csv, write_json
+from .inference import VolGANSampler, build_sample_payload, normalization_stats_to_tensors
+from .io import config_payload, save_checkpoint, write_csv, write_json
 from .losses import (
     discriminator_bce_loss,
     estimate_gradient_matching,
@@ -29,17 +39,18 @@ from .models import VolGANDiscriminator, VolGANGenerator, reconstruct_future_sur
 from .training_plots import plot_training_curves
 
 
-class VolGANTrainer:
+class VolGANTrainer(BaseTrainer):
     """Train the standalone VolGAN model on `merged_vol.xlsx` rows."""
 
-    def __init__(self, config: VolGANTrainConfig):
-        self.config = config
-        self.run_dir = prepare_run_dir(config.output_root)
-        self.checkpoints_dir = self.run_dir / "checkpoints"
-        self.metrics_dir = self.run_dir / "metrics"
-        self.samples_dir = self.run_dir / "samples"
+    trainer_id = "volgan"
+    logger_name = "volgan.trainer"
+
+    def __init__(self, config: VolGANTrainConfig, *, config_path: str | None = None):
+        super().__init__(config, config_path=config_path)
+        self.checkpoints_dir = Path(".")
+        self.metrics_dir = Path(".")
+        self.samples_dir = Path(".")
         self.device = torch.device("cuda:0" if (config.cuda and torch.cuda.is_available()) else "cpu")
-        self._logger: Optional[logging.Logger] = None
 
         self.bundle: Optional[VolSurfaceDataBundle] = None
         self.generator: Optional[VolGANGenerator] = None
@@ -49,6 +60,21 @@ class VolGANTrainer:
         self.alpha_m = float(config.alpha_m)
         self.alpha_tau = float(config.alpha_tau)
         self.normalization = None
+
+    def _prepare_runtime_config(self, config: VolGANTrainConfig) -> tuple[VolGANTrainConfig, Path]:
+        output_root = str(config.output_root).strip() or default_train_output_root(config.data_path)
+        run_dir = prepare_run_dir(output_root, create=False)
+        resolved_config = replace(
+            config,
+            output_root=str(output_root),
+            models_path=str(run_dir / "checkpoints"),
+            metrics_path=str(run_dir / "metrics"),
+            samples_path=str(run_dir / "samples"),
+        )
+        self.checkpoints_dir = run_dir / "checkpoints"
+        self.metrics_dir = run_dir / "metrics"
+        self.samples_dir = run_dir / "samples"
+        return resolved_config, run_dir
 
     @property
     def logger(self) -> logging.Logger:
@@ -75,11 +101,11 @@ class VolGANTrainer:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(int(self.config.seed))
 
-    def _save_resolved_config(self) -> None:
-        save_config_yaml(self.config, self.metrics_dir / "resolved_config.yaml")
-
     def setup(self) -> None:
         self._set_seed()
+        self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        self.metrics_dir.mkdir(parents=True, exist_ok=True)
+        self.samples_dir.mkdir(parents=True, exist_ok=True)
         self.logger.info("Standalone VolGAN outputs: %s", self.run_dir)
         self.logger.info("Loading merged-vol workbook from %s (%s)", self.config.data_path, self.config.sheet_name)
         self.bundle = create_train_val_bundle(self.config)
@@ -105,7 +131,6 @@ class VolGANTrainer:
             self.discriminator.parameters(),
             lr=float(self.config.discriminator_learning_rate),
         )
-        self._save_resolved_config()
 
         self.logger.info(
             "Dataset ready: train_samples=%s, val_samples=%s, surface_shape=%s, embedding_dim=%s",
@@ -344,8 +369,7 @@ class VolGANTrainer:
         output_path = self.metrics_dir / "loss_curves.png"
         plot_training_curves(metrics_rows, output_path=output_path, title="Standalone VolGAN Training Curves")
 
-    def train(self) -> Path:
-        self.setup()
+    def _train_impl(self) -> Path:
         assert self.bundle is not None
 
         metrics_rows: list[dict[str, float]] = []
@@ -437,3 +461,61 @@ class VolGANTrainer:
         )
         self.logger.info("Standalone VolGAN training complete. Best epoch=%s best_metric=%.6f", best_epoch, best_metric)
         return self.run_dir
+
+    def _prepare_generate_result(
+        self,
+        generate_config: VolGANSampleConfig | None = None,
+        *,
+        overrides: Mapping[str, object] | None = None,
+        config_path: str | None = None,
+    ) -> tuple[VolGANSampleConfig, Path]:
+        output_root = str(getattr(self.raw_config, "output_root", "")).strip() or default_train_output_root(
+            self.raw_config.data_path
+        )
+        checkpoint_override = None if not overrides else overrides.get("checkpoint_path")
+        run_dir = self.run_dir or resolve_existing_run_dir(
+            output_root=output_root,
+            checkpoint_path=None if checkpoint_override in {None, ""} else str(checkpoint_override),
+        )
+        if generate_config is None:
+            if config_path:
+                generate_config = load_sample_config(
+                    config_path,
+                    run_dir=run_dir,
+                    checkpoint_path=None if checkpoint_override in {None, ""} else str(checkpoint_override),
+                )
+            elif self.config_path:
+                generate_config = build_sample_config_from_train_config(
+                    self.config_path,
+                    checkpoint_path=None if checkpoint_override in {None, ""} else str(checkpoint_override),
+                    run_dir=run_dir,
+                )
+            else:
+                generate_config = VolGANSampleConfig(
+                    data_path=self.raw_config.data_path,
+                    sheet_name=self.raw_config.sheet_name,
+                    text_embedding_mode=self.raw_config.text_embedding_mode,
+                    train_ratio=self.raw_config.train_ratio,
+                    checkpoint_path="",
+                    seed=int(self.raw_config.seed),
+                    cuda=bool(self.raw_config.cuda),
+                    mc_samples=int(self.raw_config.eval_mc_samples),
+                    reweight_beta_mode=str(self.raw_config.eval_reweight_beta_mode),
+                    reweight_beta=float(self.raw_config.eval_reweight_beta),
+                    aggregation_mode=str(self.raw_config.eval_aggregation_mode),
+                    output_dir=str(generate_result_dir(run_dir)),
+                )
+        if overrides:
+            generate_config = replace(generate_config, **dict(overrides))
+        resolved_generate_dir = generate_result_dir(run_dir, generate_config.output_dir)
+        resolved_config = replace(
+            generate_config,
+            checkpoint_path=generate_config.checkpoint_path or str(find_best_checkpoint(run_dir, filename="volgan_best.pt")),
+            output_dir=str(resolved_generate_dir),
+        )
+        return resolved_config, resolved_generate_dir
+
+    def _generate_result_impl(self, generate_config: VolGANSampleConfig, generate_dir: Path) -> Path:
+        del generate_dir
+        sampler = VolGANSampler(generate_config)
+        return sampler.sample()

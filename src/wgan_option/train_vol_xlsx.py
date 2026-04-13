@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 from wgan_option.config import Config, default_config
 from wgan_option.models.gan_model import WGAN_GP
-from wgan_option.train import WGANTrainer
+from wgan_option.trainer import WGANTrainer
 from wgan_option.utils.merged_xlsx import create_vol_surface_xlsx_dataloaders
 from wgan_option.utils.training_run_paths import prepare_timestamped_training_config
 
@@ -14,10 +15,10 @@ from wgan_option.utils.training_run_paths import prepare_timestamped_training_co
 class VolSurfaceXlsxTrainer(WGANTrainer):
     """Run the existing WGAN-GP on merged vol-surface workbook rows."""
 
-    def _prepare_runtime_config(self, config: Config) -> Config:
-        resolved_config, run_dir = prepare_timestamped_training_config(config)
-        self.run_dir = run_dir
-        return resolved_config
+    trainer_id = "cnn_wgan"
+
+    def _prepare_runtime_config(self, config: Config) -> tuple[Config, Path]:
+        return prepare_timestamped_training_config(config, trainer_id=self.trainer_id)
 
     def setup(self):
         self._log_device_info()
@@ -50,7 +51,7 @@ class VolSurfaceXlsxTrainer(WGANTrainer):
 
 def main(config: Optional[Config] = None):
     trainer = VolSurfaceXlsxTrainer(config or default_config)
-    trainer.start_train()
+    trainer.train()
 
 
 if __name__ == "__main__":

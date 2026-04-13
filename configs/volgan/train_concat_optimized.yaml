@@ -1,0 +1,45 @@
+data_path: data/processed/svi-all/20260330-01/merged_vol.xlsx
+sheet_name: gan_input_ready
+text_embedding_mode: concat
+train_ratio: 0.8
+min_samples_for_training: 2
+
+noise_dim: 32
+hidden_dim: 128
+num_epochs: 100
+batch_size: 32
+learning_rate: 0.0001
+generator_learning_rate: 0.0001
+discriminator_learning_rate: 0.0001
+
+disc_steps_per_batch: 2
+gen_steps_per_batch: 1
+real_label_value: 0.9
+fake_label_value: 0.0
+generator_grad_clip: 5.0
+discriminator_grad_clip: 5.0
+
+use_gradient_matching: true
+gradient_match_epochs: 5
+alpha_m: 1.0
+alpha_tau: 1.0
+alpha_clip_min: 0.001
+alpha_clip_max: 10.0
+
+normalize_current_surface: true
+normalize_target_delta: true
+normalize_text_embedding: true
+
+# A: adaptive reweighting, F2: eval_mc_samples 32 -> 64
+eval_mc_samples: 64
+eval_reweight_beta_mode: adaptive
+eval_reweight_beta: 25.0
+eval_aggregation_mode: weighted_mean
+checkpoint_metric: val_mae_gap_vs_current
+
+seed: 42
+cuda: true
+num_workers: 0
+
+output_root: ""
+save_every: 10

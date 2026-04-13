@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
+
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$ROOT_DIR"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
 
 RUN_TS="${RUN_TS:-$(date -u +%Y%m%d-%H%M%S)}"
 CONFIG_PATH="${CONFIG_PATH:-configs/surface_builder/svi/generate_surface-svi-excel.yaml}"
@@ -14,20 +15,23 @@ SAVE_PRECALIB_CSV="${SAVE_PRECALIB_CSV:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 
 OUTPUT_DIR="${OUTPUT_DIR:-data/processed/svi-excel/${RUN_TS}}"
-SURFACE_LOG="${OUTPUT_DIR}/surface-svi-excel.log"
+LOG_FILE="${OUTPUT_DIR}/surface-svi-excel.log"
 PID_FILE="${PID_FILE:-${OUTPUT_DIR}/launcher.pid}"
 
-mkdir -p "$OUTPUT_DIR"
+mkdir -p "${OUTPUT_DIR}"
 
-if [[ -f "$PID_FILE" ]]; then
-  existing_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
-  if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
-    echo "A launcher process is already recorded in $PID_FILE (pid=$existing_pid)." >&2
+if [[ -f "${PID_FILE}" ]]; then
+  existing_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
+  if [[ -n "${existing_pid}" ]] && kill -0 "${existing_pid}" 2>/dev/null; then
+    echo "A launcher process is already recorded in ${PID_FILE} (pid=${existing_pid})." >&2
     exit 1
   fi
 fi
 
-if ! [[ "$CALIBRATION_WORKERS" =~ ^[0-9]+$ ]] || ! [[ "$MAX_TARGET_DATETIMES" =~ ^[0-9]+$ ]] || ! [[ "$MAX_FILES" =~ ^[0-9]+$ ]] || ! [[ "$CHUNK_SIZE" =~ ^[0-9]+$ ]]; then
+if ! [[ "${CALIBRATION_WORKERS}" =~ ^[0-9]+$ ]] \
+  || ! [[ "${MAX_TARGET_DATETIMES}" =~ ^[0-9]+$ ]] \
+  || ! [[ "${MAX_FILES}" =~ ^[0-9]+$ ]] \
+  || ! [[ "${CHUNK_SIZE}" =~ ^[0-9]+$ ]]; then
   echo "CALIBRATION_WORKERS, MAX_TARGET_DATETIMES, MAX_FILES, and CHUNK_SIZE must be non-negative integers." >&2
   exit 1
 fi
@@ -43,24 +47,24 @@ cmd=(
   --device cpu
   --model svi
   --data_range excel
-  --config "$CONFIG_PATH"
-  --run-ts "$RUN_TS"
-  --calibration-workers "$CALIBRATION_WORKERS"
+  --config "${CONFIG_PATH}"
+  --run-ts "${RUN_TS}"
+  --calibration-workers "${CALIBRATION_WORKERS}"
 )
 
 if (( MAX_TARGET_DATETIMES > 0 )); then
-  cmd+=(--max-target-datetimes "$MAX_TARGET_DATETIMES")
+  cmd+=(--max-target-datetimes "${MAX_TARGET_DATETIMES}")
 fi
 
 if (( MAX_FILES > 0 )); then
-  cmd+=(--max-files "$MAX_FILES")
+  cmd+=(--max-files "${MAX_FILES}")
 fi
 
 if (( CHUNK_SIZE > 0 )); then
-  cmd+=(--chunk-size "$CHUNK_SIZE")
+  cmd+=(--chunk-size "${CHUNK_SIZE}")
 fi
 
-if [[ "$SAVE_PRECALIB_CSV" == "1" ]]; then
+if [[ "${SAVE_PRECALIB_CSV}" == "1" ]]; then
   cmd+=(--save-precalib-csv)
 else
   cmd+=(--no-save-precalib-csv)
@@ -71,27 +75,39 @@ if (( $# > 0 )); then
 fi
 
 {
-  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Launch directory: $ROOT_DIR"
-  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Run timestamp: $RUN_TS"
-  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Output directory: $OUTPUT_DIR"
-  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Calibration workers: $CALIBRATION_WORKERS"
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Launch directory: ${SCRIPT_DIR}"
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Run timestamp: ${RUN_TS}"
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Output directory: ${OUTPUT_DIR}"
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Calibration workers: ${CALIBRATION_WORKERS}"
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Command: ${cmd[*]}"
-} >>"$LAUNCH_LOG"
+} >>"${LOG_FILE}"
 
-if [[ "$DRY_RUN" == "1" ]]; then
+if [[ "${DRY_RUN}" == "1" ]]; then
   echo "DRY_RUN=1, command not started."
   echo "Command: ${cmd[*]}"
   exit 0
 fi
 
-nohup "${cmd[@]}" >>"$LAUNCH_LOG" 2>&1 &
-launcher_pid=$!
-echo "$launcher_pid" >"$PID_FILE"
+nohup "${cmd[@]}" >>"${LOG_FILE}" 2>&1 &
 
-echo "Started background job."
-echo "PID: $launcher_pid"
-echo "Run dir: $OUTPUT_DIR"
-echo "Launcher log: $LAUNCH_LOG"
-echo "PID file: $PID_FILE"
-echo "Surface log: ${OUTPUT_DIR}/surface-svi-excel.log"
-echo "Tail command: tail -f ${OUTPUT_DIR}/surface-svi-excel.log"
+PID=$!
+echo "${PID}" >"${PID_FILE}"
+
+echo "=========================================="
+echo "  generate-surface job launched"
+echo "=========================================="
+echo "  Run TS     : ${RUN_TS}"
+echo "  Output dir : ${OUTPUT_DIR}"
+echo "  PID        : ${PID}"
+echo "  PID file   : ${PID_FILE}"
+echo "  Log file   : ${LOG_FILE}"
+echo "=========================================="
+echo ""
+echo "Follow logs:"
+echo "  tail -f ${LOG_FILE}"
+echo ""
+echo "Check status:"
+echo "  kill -0 ${PID} 2>/dev/null && echo running || echo stopped"
+echo ""
+echo "Stop job:"
+echo "  kill ${PID}"

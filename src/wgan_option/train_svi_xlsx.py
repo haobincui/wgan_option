@@ -6,9 +6,9 @@ import json
 import logging
 import os
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Mapping, Optional
 
 import numpy as np
 import torch
@@ -16,28 +16,48 @@ import torch.nn.functional as F
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from wgan_option.config import Config, default_config, save_config_yaml
+from trainer import BaseTrainer
+from utils.generate_result_runtime import generate_svi_result, validate_result_config
+from utils.result_config import GenerateResultConfig, build_generate_result_config
+from utils.training_paths import generate_result_dir, infer_training_output_root, resolve_existing_run_dir
+from wgan_option.config import Config, config_to_dict, default_config
+from wgan_option.config_parsing import load_yaml_mapping
 from wgan_option.models.svi_regressor import SviRegressor
 from wgan_option.utils.merged_xlsx import SVI_FEATURE_ORDER, SviXlsxBundle, create_svi_xlsx_dataloaders
 from wgan_option.utils.training_artifacts import write_best_checkpoint, write_metrics_csv, write_metrics_json
-from wgan_option.utils.training_run_paths import prepare_timestamped_training_config, training_run_config_path
+from wgan_option.utils.training_run_paths import prepare_timestamped_training_config
 from wgan_option.utils.visualization import plot_training_curves
 
 
-class SviXlsxTrainer:
+def _load_generate_result_section(config_path: str | None) -> dict:
+    if not config_path:
+        return {}
+    _, payload = load_yaml_mapping(config_path)
+    section = payload.get("generate_result") or {}
+    if section and not isinstance(section, dict):
+        raise ValueError(f"Config section 'generate_result' in {config_path} must contain a YAML mapping.")
+    return dict(section)
+
+
+class SviXlsxTrainer(BaseTrainer):
     """Train a supervised MLP regressor on paired SVI samples."""
 
-    def __init__(self, config: Config):
-        self.run_dir: Optional[Path] = None
-        self.config, self.run_dir = prepare_timestamped_training_config(
-            config,
-            include_normalization_stats=True,
-        )
-        self._logger: Optional[logging.Logger] = None
+    trainer_id = "svi_mlp"
+    logger_name = "wgan_option.svi_trainer"
+
+    def __init__(self, config: Config, *, config_path: str | None = None):
+        super().__init__(config, config_path=config_path)
         self.bundle: Optional[SviXlsxBundle] = None
         self.model: Optional[SviRegressor] = None
         self.optimizer: Optional[Adam] = None
-        self.device = torch.device("cuda:0" if (self.config.cuda and torch.cuda.is_available()) else "cpu")
+        self.device = torch.device("cuda:0" if (config.cuda and torch.cuda.is_available()) else "cpu")
+
+    def _prepare_runtime_config(self, config: Config) -> tuple[Config, Path]:
+        return prepare_timestamped_training_config(
+            config,
+            trainer_id=self.trainer_id,
+            include_normalization_stats=True,
+        )
 
     @property
     def logger(self) -> logging.Logger:
@@ -56,11 +76,6 @@ class SviXlsxTrainer:
                 logger.addHandler(stream_handler)
             self._logger = logger
         return self._logger
-
-    def _save_run_config(self):
-        output_path = training_run_config_path(self.config, self.run_dir)
-        save_config_yaml(self.config, str(output_path))
-        self.logger.info("Resolved config saved to: %s", output_path)
 
     def _ensure_samples_dir(self):
         if self.run_dir is None:
@@ -280,12 +295,7 @@ class SviXlsxTrainer:
         )
         self.logger.info("Loss curve plot saved to: %s", output_path)
 
-    def start_train(self):
-        if self.run_dir is not None:
-            self.logger.info("Training artifacts will be written under: %s", self.run_dir)
-        self._ensure_samples_dir()
-        self.setup()
-        self._save_run_config()
+    def _train_impl(self) -> Path | None:
         assert self.bundle is not None
         metrics_rows = []
         self._init_metrics_file()
@@ -419,19 +429,49 @@ class SviXlsxTrainer:
         except Exception as exc:
             self.logger.warning("Failed to save loss curve plot: %s", exc)
         self.logger.info("*** SVI training complete ***")
+        return self.run_dir
 
-    def dry_run(self):
-        if self.run_dir is not None:
-            self.logger.info("Training artifacts will be written under: %s", self.run_dir)
-        self._ensure_samples_dir()
-        self.setup()
-        self._save_run_config()
-        self.logger.info("Dry run finished. Training was not started.")
+    def _prepare_generate_result(
+        self,
+        generate_config: GenerateResultConfig | None = None,
+        *,
+        overrides: Mapping[str, object] | None = None,
+        config_path: str | None = None,
+    ) -> tuple[GenerateResultConfig, Path]:
+        if generate_config is None:
+            base_config = self.config if self._runtime_prepared else self.raw_config
+            generate_config = build_generate_result_config(
+                training_values=config_to_dict(base_config),
+                generate_values=_load_generate_result_section(config_path),
+                overrides=overrides,
+            )
+        elif overrides:
+            generate_config = replace(generate_config, **dict(overrides))
+
+        base_training_config = self.config if self._runtime_prepared else self.raw_config
+        output_root = infer_training_output_root(base_training_config, trainer_id=self.trainer_id)
+        run_dir = self.run_dir or resolve_existing_run_dir(
+            output_root=output_root,
+            checkpoint_path=generate_config.checkpoint_path or None,
+        )
+        resolved_generate_dir = generate_result_dir(run_dir, generate_config.output_dir)
+        resolved_config = replace(
+            generate_config,
+            models_path=str(run_dir),
+            metrics_path=str(run_dir),
+            output_dir=str(resolved_generate_dir),
+        )
+        validate_result_config(resolved_config)
+        return resolved_config, resolved_generate_dir
+
+    def _generate_result_impl(self, generate_config: GenerateResultConfig, generate_dir: Path) -> Path:
+        del generate_dir
+        return generate_svi_result(generate_config)
 
 
 def main(config: Optional[Config] = None):
     trainer = SviXlsxTrainer(config or default_config)
-    trainer.start_train()
+    trainer.train()
 
 
 if __name__ == "__main__":

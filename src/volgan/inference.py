@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from .arbitrage import reweight_scenarios, total_arbitrage_penalty
-from .config import VolGANSampleConfig, VolGANTrainConfig, save_config_yaml
+from .config import VolGANSampleConfig, VolGANTrainConfig
 from .data import (
     VolGANNormalizationStats,
     VolSurfaceSample,
@@ -21,7 +21,7 @@ from .data import (
     normalize_tensor,
     split_samples,
 )
-from .io import load_checkpoint, prepare_run_dir, write_csv, write_json
+from .io import load_checkpoint, write_csv, write_json
 from .models import VolGANGenerator, reconstruct_future_surface
 from .plotting import plot_volgan_payload
 
@@ -318,7 +318,8 @@ class VolGANSampler:
 
     def __init__(self, config: VolGANSampleConfig):
         self.config = config
-        self.run_dir = prepare_run_dir(config.output_dir)
+        self.run_dir = Path(config.output_dir)
+        self.run_dir.mkdir(parents=True, exist_ok=True)
         self.samples_dir = self.run_dir / "samples"
         self.plots_dir = self.run_dir / "plots"
         self.device = torch.device("cuda:0" if (config.cuda and torch.cuda.is_available()) else "cpu")
@@ -343,7 +344,6 @@ class VolGANSampler:
 
     def sample(self) -> Path:
         generator, checkpoint, train_config, normalization = self._load_generator()
-        save_config_yaml(self.config, self.run_dir / "resolved_config.yaml")
 
         all_samples = load_vol_surface_samples(self.config)
         selected_samples = split_samples(self.config, all_samples)

@@ -57,6 +57,13 @@ def _write_yaml(path: Path, payload: dict):
     return path
 
 
+def _write_pipeline_yaml(path: Path, *, training: dict, generate_result: dict | None = None):
+    payload = {"training": dict(training)}
+    if generate_result is not None:
+        payload["generate_result"] = dict(generate_result)
+    return _write_yaml(path, payload)
+
+
 class TestGenerateResultScripts(unittest.TestCase):
     def _write_vol_workbook(self, tmpdir: str) -> Path:
         path = Path(tmpdir) / "merged_vol.xlsx"
@@ -556,18 +563,20 @@ class TestGenerateResultScripts(unittest.TestCase):
     def test_generate_vol_script_outputs_json_png_and_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_vol_workbook(tmpdir)
-            run_root, _ = self._write_generator_checkpoint_run_root(tmpdir, run_ts="20260407_121212")
-            output_dir = Path(tmpdir) / "generate_vol"
+            run_root, training_run_dir = self._write_generator_checkpoint_run_root(tmpdir, run_ts="20260407_121212")
             config_path = Path(tmpdir) / "generate_vol.yaml"
-            _write_yaml(
+            _write_pipeline_yaml(
                 config_path,
-                {
+                training={
                     "data_path": str(workbook_path),
                     "sheet_name": "gan_input_ready",
                     "text_embedding_mode": "hd",
                     "train_ratio": 2 / 3,
                     "cuda": False,
                     "seed": 123,
+                    "output_root": str(run_root),
+                },
+                generate_result={
                     "checkpoint_path": "",
                     "models_path": str(run_root),
                     "metrics_path": str(run_root),
@@ -575,17 +584,17 @@ class TestGenerateResultScripts(unittest.TestCase):
                     "selection_mode": "row_index",
                     "row_index": 0,
                     "limit": 5,
-                    "output_dir": str(output_dir),
                     "save_plots": True,
                     "save_json": True,
                     "plot_style": "heatmap_diff",
                 },
             )
 
-            module = _load_script_module(ROOT_DIR / "scripts/generate_result/generate_vol.py", "generate_vol_script")
-            run_dir = module.main(["--config", str(config_path)])
+            module = _load_script_module(ROOT_DIR / "scripts/generate_result/main.py", "generate_vol_script")
+            run_dir = module.main(["vol", "--config", str(config_path)])
 
-            self.assertTrue((run_dir / "resolved_config.yaml").exists())
+            self.assertEqual(run_dir, training_run_dir / "generate_result")
+            self.assertTrue((run_dir / "generate_resolved_config.yaml").exists())
             self.assertTrue((run_dir / "summary.csv").exists())
             json_files = sorted((run_dir / "samples").glob("*.json"))
             png_files = sorted((run_dir / "plots").glob("*.png"))
@@ -618,17 +627,19 @@ class TestGenerateResultScripts(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            output_dir = Path(tmpdir) / "generate_vol_fallback"
             config_path = Path(tmpdir) / "generate_vol_fallback.yaml"
-            _write_yaml(
+            _write_pipeline_yaml(
                 config_path,
-                {
+                training={
                     "data_path": str(workbook_path),
                     "sheet_name": "gan_input_ready",
                     "text_embedding_mode": "hd",
                     "train_ratio": 2 / 3,
                     "cuda": False,
                     "seed": 123,
+                    "output_root": str(run_root),
+                },
+                generate_result={
                     "checkpoint_path": "",
                     "models_path": str(run_root),
                     "metrics_path": str(run_root),
@@ -638,19 +649,18 @@ class TestGenerateResultScripts(unittest.TestCase):
                     "split": "val",
                     "selection_mode": "row_index",
                     "row_index": 0,
-                    "output_dir": str(output_dir),
                     "save_plots": False,
                     "save_json": True,
                     "plot_style": "heatmap_diff",
                 },
             )
 
-            module = _load_script_module(ROOT_DIR / "scripts/generate_result/generate_vol.py", "generate_vol_fallback_script")
+            module = _load_script_module(ROOT_DIR / "scripts/generate_result/main.py", "generate_vol_fallback_script")
             with patch(
                 "wgan_option.utils.inference_helpers.infer_vol_surface_mc",
                 return_value=(np.full((16, 16), 0.5, dtype=np.float32), 0.25, []),
             ):
-                run_dir = module.main(["--config", str(config_path)])
+                run_dir = module.main(["vol", "--config", str(config_path)])
 
             payload = json.loads(next((run_dir / "samples").glob("*.json")).read_text(encoding="utf-8"))
             self.assertTrue(payload["metadata"]["used_fallback"])
@@ -664,37 +674,36 @@ class TestGenerateResultScripts(unittest.TestCase):
     def test_generate_vol_regression_script_outputs_json_png_and_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_vol_workbook(tmpdir)
-            run_root, _ = self._write_vol_regression_checkpoint_run_root(tmpdir, run_ts="20260407_151515")
-            output_dir = Path(tmpdir) / "generate_vol_regression"
+            run_root, training_run_dir = self._write_vol_regression_checkpoint_run_root(tmpdir, run_ts="20260407_151515")
             config_path = Path(tmpdir) / "generate_vol_regression.yaml"
-            _write_yaml(
+            _write_pipeline_yaml(
                 config_path,
-                {
+                training={
                     "data_path": str(workbook_path),
                     "sheet_name": "gan_input_ready",
                     "text_embedding_mode": "hd",
                     "train_ratio": 2 / 3,
                     "cuda": False,
                     "seed": 123,
+                    "output_root": str(run_root),
+                },
+                generate_result={
                     "checkpoint_path": "",
                     "models_path": str(run_root),
                     "metrics_path": str(run_root),
                     "split": "val",
                     "selection_mode": "row_index",
                     "row_index": 0,
-                    "output_dir": str(output_dir),
                     "save_plots": False,
                     "save_json": True,
                     "plot_style": "heatmap_diff",
                 },
             )
 
-            module = _load_script_module(
-                ROOT_DIR / "scripts/generate_result/generate_vol_regression.py",
-                "generate_vol_regression_script",
-            )
-            run_dir = module.main(["--config", str(config_path)])
+            module = _load_script_module(ROOT_DIR / "scripts/generate_result/main.py", "generate_vol_regression_script")
+            run_dir = module.main(["vol-regression", "--config", str(config_path)])
 
+            self.assertEqual(run_dir, training_run_dir / "generate_result")
             json_files = sorted((run_dir / "samples").glob("*.json"))
             self.assertEqual(len(json_files), 1)
             payload = json.loads(json_files[0].read_text(encoding="utf-8"))
@@ -709,23 +718,25 @@ class TestGenerateResultScripts(unittest.TestCase):
     def test_generate_vol_script_supports_none_text_mode_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_vol_workbook(tmpdir)
-            run_root, _ = self._write_generator_checkpoint_run_root(
+            run_root, training_run_dir = self._write_generator_checkpoint_run_root(
                 tmpdir,
                 run_ts="20260407_141414",
                 embedding_dim=1,
                 text_embedding_mode="none",
             )
-            output_dir = Path(tmpdir) / "generate_vol_none"
             config_path = Path(tmpdir) / "generate_vol_none.yaml"
-            _write_yaml(
+            _write_pipeline_yaml(
                 config_path,
-                {
+                training={
                     "data_path": str(workbook_path),
                     "sheet_name": "gan_input_ready",
                     "text_embedding_mode": "none",
                     "train_ratio": 2 / 3,
                     "cuda": False,
                     "seed": 123,
+                    "output_root": str(run_root),
+                },
+                generate_result={
                     "checkpoint_path": "",
                     "models_path": str(run_root),
                     "metrics_path": str(run_root),
@@ -733,16 +744,16 @@ class TestGenerateResultScripts(unittest.TestCase):
                     "selection_mode": "row_index",
                     "row_index": 0,
                     "limit": 5,
-                    "output_dir": str(output_dir),
                     "save_plots": False,
                     "save_json": True,
                     "plot_style": "heatmap_diff",
                 },
             )
 
-            module = _load_script_module(ROOT_DIR / "scripts/generate_result/generate_vol.py", "generate_vol_none_script")
-            run_dir = module.main(["--config", str(config_path)])
+            module = _load_script_module(ROOT_DIR / "scripts/generate_result/main.py", "generate_vol_none_script")
+            run_dir = module.main(["vol", "--config", str(config_path)])
 
+            self.assertEqual(run_dir, training_run_dir / "generate_result")
             self.assertTrue((run_dir / "summary.csv").exists())
             json_files = sorted((run_dir / "samples").glob("*.json"))
             self.assertEqual(len(json_files), 1)
@@ -752,18 +763,20 @@ class TestGenerateResultScripts(unittest.TestCase):
     def test_generate_svi_script_outputs_predicted_and_real_surfaces(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = self._write_svi_workbook(tmpdir)
-            run_root, _ = self._write_svi_checkpoint_run_root(tmpdir, run_ts="20260407_131313")
-            output_dir = Path(tmpdir) / "generate_svi"
+            run_root, training_run_dir = self._write_svi_checkpoint_run_root(tmpdir, run_ts="20260407_131313")
             config_path = Path(tmpdir) / "generate_svi.yaml"
-            _write_yaml(
+            _write_pipeline_yaml(
                 config_path,
-                {
+                training={
                     "data_path": str(workbook_path),
                     "sheet_name": "news_direction_audit",
                     "text_embedding_mode": "hd",
                     "train_ratio": 2 / 3,
                     "cuda": False,
                     "seed": 123,
+                    "output_root": str(run_root),
+                },
+                generate_result={
                     "checkpoint_path": "",
                     "models_path": str(run_root),
                     "metrics_path": str(run_root),
@@ -771,7 +784,6 @@ class TestGenerateResultScripts(unittest.TestCase):
                     "selection_mode": "row_index",
                     "row_index": 0,
                     "limit": 5,
-                    "output_dir": str(output_dir),
                     "save_plots": True,
                     "save_json": True,
                     "plot_style": "heatmap_diff",
@@ -784,9 +796,10 @@ class TestGenerateResultScripts(unittest.TestCase):
                 },
             )
 
-            module = _load_script_module(ROOT_DIR / "scripts/generate_result/generate_svi.py", "generate_svi_script")
-            run_dir = module.main(["--config", str(config_path)])
+            module = _load_script_module(ROOT_DIR / "scripts/generate_result/main.py", "generate_svi_script")
+            run_dir = module.main(["svi", "--config", str(config_path)])
 
+            self.assertEqual(run_dir, training_run_dir / "generate_result")
             json_files = sorted((run_dir / "samples").glob("*.json"))
             png_files = sorted((run_dir / "plots").glob("*.png"))
             self.assertEqual(len(json_files), 1)
@@ -821,8 +834,8 @@ class TestGenerateResultScripts(unittest.TestCase):
             input_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             output_path = Path(tmpdir) / "plot.png"
 
-            module = _load_script_module(ROOT_DIR / "scripts/generate_result/plot_surface.py", "plot_surface_script")
-            returned_path = module.main(["--input-json", str(input_path), "--output", str(output_path)])
+            module = _load_script_module(ROOT_DIR / "scripts/generate_result/main.py", "plot_surface_script")
+            returned_path = module.main(["plot", "--input-json", str(input_path), "--output", str(output_path)])
 
             self.assertEqual(returned_path, output_path)
             self.assertTrue(output_path.exists())
@@ -855,14 +868,14 @@ class TestGenerateResultScripts(unittest.TestCase):
             {"vol": _record, "vol-regression": _record, "svi": _record, "plot": _record},
             clear=False,
         ):
-            module.main(["vol", "--config", "configs/generate_result/vol.yaml"])
-            module.main(["vol-regression", "--config", "configs/generate_result/vol-regression.yaml"])
+            module.main(["vol", "--config", "configs/wgan/train_vol_xlsx.yaml"])
+            module.main(["vol-regression", "--config", "configs/wgan/train_vol_regression_xlsx.yaml"])
 
         self.assertEqual(
             calls,
             [
-                ["--config", "configs/generate_result/vol.yaml"],
-                ["--config", "configs/generate_result/vol-regression.yaml"],
+                ["--config", "configs/wgan/train_vol_xlsx.yaml"],
+                ["--config", "configs/wgan/train_vol_regression_xlsx.yaml"],
             ],
         )
 

@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -17,12 +18,19 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 import volgan  # noqa: E402
+from utils.output_paths import default_output_root, find_best_checkpoint, find_latest_run_dir  # noqa: E402
 from volgan.arbitrage import (  # noqa: E402
     butterfly_arbitrage_penalty,
     calendar_arbitrage_penalty,
     reweight_scenarios,
 )
-from volgan.config import VolGANSampleConfig, VolGANTrainConfig, load_sample_config, load_train_config  # noqa: E402
+from volgan.config import (  # noqa: E402
+    VolGANSampleConfig,
+    VolGANTrainConfig,
+    build_sample_config_from_train_config,
+    load_sample_config,
+    load_train_config,
+)
 from volgan.data import (  # noqa: E402
     create_train_val_bundle,
     denormalize_tensor,
@@ -129,6 +137,7 @@ class TestStandaloneVolgan(unittest.TestCase):
         self.assertTrue(hasattr(volgan, "VolGANTrainer"))
         pyproject_text = (ROOT_DIR / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn("volgan*", pyproject_text)
+        self.assertIn("utils*", pyproject_text)
 
     def test_config_loading_from_default_yaml(self):
         train_config = load_train_config(ROOT_DIR / "configs/volgan/train_default.yaml")
@@ -329,16 +338,78 @@ class TestStandaloneVolgan(unittest.TestCase):
             )
             self.assertTrue(output_path.exists())
 
+    def test_output_helpers_and_sample_config_can_reuse_train_config(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_dir = Path(tmpdir) / "data" / "processed" / "svi-excel" / "20260410-174929"
+            workbook_dir.mkdir(parents=True, exist_ok=True)
+            workbook_path = _write_vol_workbook(str(workbook_dir))
+            train_output_root = Path(tmpdir) / "train_outputs"
+
+            older_run_dir = train_output_root / "20260410_120000"
+            newer_run_dir = train_output_root / "20260410_130000"
+            older_run_dir.mkdir(parents=True, exist_ok=True)
+            newer_run_dir.mkdir(parents=True, exist_ok=True)
+            (older_run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+            (newer_run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+            (older_run_dir / "checkpoints" / "volgan_best.pt").write_bytes(b"older")
+            (newer_run_dir / "checkpoints" / "volgan_best.pt").write_bytes(b"newer")
+
+            train_config_path = Path(tmpdir) / "train.yaml"
+            train_config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_path: {workbook_path}",
+                        "sheet_name: gan_input_ready",
+                        "text_embedding_mode: lp",
+                        "train_ratio: 0.67",
+                        "eval_mc_samples: 9",
+                        "eval_reweight_beta_mode: adaptive",
+                        "eval_reweight_beta: 12.5",
+                        "eval_aggregation_mode: weighted_mean",
+                        "seed: 11",
+                        "cuda: false",
+                        f"output_root: {train_output_root}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(find_latest_run_dir(train_output_root), newer_run_dir)
+            self.assertEqual(find_best_checkpoint(newer_run_dir), newer_run_dir / "checkpoints" / "volgan_best.pt")
+            self.assertEqual(
+                default_output_root("outputs/training/volgan", workbook_path),
+                Path("outputs/training/volgan/svi-excel"),
+            )
+
+            sample_config = build_sample_config_from_train_config(train_config_path)
+            self.assertEqual(sample_config.data_path, str(workbook_path))
+            self.assertEqual(sample_config.text_embedding_mode, "lp")
+            self.assertEqual(sample_config.seed, 11)
+            self.assertFalse(sample_config.cuda)
+            self.assertEqual(sample_config.mc_samples, 9)
+            self.assertEqual(sample_config.reweight_beta_mode, "adaptive")
+            self.assertEqual(sample_config.reweight_beta, 12.5)
+            self.assertEqual(
+                sample_config.checkpoint_path,
+                str(newer_run_dir / "checkpoints" / "volgan_best.pt"),
+            )
+            self.assertEqual(sample_config.output_dir, str(newer_run_dir / "generate_result"))
+
+    def test_volgan_main_routes_pipeline_command(self):
+        main_module = _load_script_module(ROOT_DIR / "scripts/volgan/main.py", "volgan_main_router")
+        with patch.object(main_module, "pipeline_main", return_value=Path("/tmp/pipeline")) as mock_pipeline:
+            result = main_module.main(["pipeline", "--config", "demo.yaml"])
+
+        mock_pipeline.assert_called_once_with(["--config", "demo.yaml"])
+        self.assertEqual(result, Path("/tmp/pipeline"))
+
     def test_train_and_sample_smoke_via_cli(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = _write_vol_workbook(tmpdir)
             train_output_root = Path(tmpdir) / "train_outputs"
-            sample_output_root = Path(tmpdir) / "sample_outputs"
             ensure_dir(train_output_root)
-            ensure_dir(sample_output_root)
 
             train_config_path = Path(tmpdir) / "train.yaml"
-            sample_config_path = Path(tmpdir) / "sample.yaml"
             train_config_path.write_text(
                 "\n".join(
                     [
@@ -376,31 +447,8 @@ class TestStandaloneVolgan(unittest.TestCase):
             checkpoint = load_checkpoint(checkpoint_path, torch.device("cpu"))
             self.assertIn("normalization_stats", checkpoint)
 
-            sample_config_path.write_text(
-                "\n".join(
-                    [
-                        f"data_path: {workbook_path}",
-                        "sheet_name: gan_input_ready",
-                        "text_embedding_mode: hd",
-                        "train_ratio: 0.67",
-                        f"checkpoint_path: {checkpoint_path}",
-                        "seed: 7",
-                        "cuda: false",
-                        "mc_samples: 4",
-                        "reweight_beta_mode: fixed",
-                        "reweight_beta: 10.0",
-                        "quantiles:",
-                        "  - 0.5",
-                        "split: val",
-                        "selection_mode: all",
-                        "selection_count: 0",
-                        f"output_dir: {sample_output_root}",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-
-            sample_run_dir = Path(main_module.main(["sample", "--config", str(sample_config_path)]))
+            sample_run_dir = Path(main_module.main(["sample", "--config", str(train_config_path)]))
+            self.assertEqual(sample_run_dir, train_run_dir / "generate_result")
             self.assertTrue((sample_run_dir / "summary.csv").exists())
             sample_jsons = sorted((sample_run_dir / "samples").glob("*.json"))
             self.assertEqual(len(sample_jsons), 1)

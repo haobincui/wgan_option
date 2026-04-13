@@ -61,6 +61,10 @@ class Config:
 
     # Optimization
     learning_rate: float = 0.0002
+    generator_learning_rate: float = 0.0
+    discriminator_learning_rate: float = 0.0
+    lr_scheduler_type: str = "none"
+    gradient_accumulation_steps: int = 1
     use_reduce_lr_on_plateau: bool = False
     reduce_lr_factor: float = 0.5
     reduce_lr_patience: int = 8
@@ -176,6 +180,7 @@ def load_config(config_path: Optional[str] = None, overrides: Optional[Dict[str,
         resolved_path,
         defaults=config_to_dict(Config()),
         overrides=overrides,
+        section="training",
     )
 
     loaded_values = _apply_output_root(

@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> Path:
     args = build_parser().parse_args(argv)
     config = load_train_config(args.config)
-    trainer = VolGANTrainer(config)
+    trainer = VolGANTrainer(config, config_path=args.config)
     return trainer.train()
 
 
