@@ -1,4 +1,4 @@
-"""Training-curve plotting helpers for standalone CNN WGAN."""
+"""Training-curve plotting helpers for standalone Cross-Attention WGAN."""
 
 from __future__ import annotations
 
@@ -18,9 +18,9 @@ def plot_training_curves(
     metrics_rows: Sequence[MetricRow],
     *,
     output_path: str | Path,
-    title: str = "CNN WGAN Training Curves",
+    title: str = "Cross-Attention WGAN Training Curves",
 ) -> Path:
-    """Render a multi-panel loss-curve figure from standalone CNN WGAN metrics."""
+    """Render a multi-panel loss-curve figure from standalone Cross-Attention WGAN metrics."""
 
     if not metrics_rows:
         raise ValueError("metrics_rows must not be empty.")

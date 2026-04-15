@@ -9,56 +9,64 @@ training:
   normalize_target_delta: true
   normalize_text_embedding: true
 
+  # 瘦身: 减小模型容量以缓解过拟合 (上次 gen_base=112 / res_blocks=4 明显过参数化)
   noise_dim: 128
   gen_base_channels: 112
-  disc_base_channels: 128
-  gen_res_blocks: 4
+  disc_base_channels: 112
+  gen_res_blocks: 2
   disc_res_blocks: 2
   text_hidden_dim: 768
   text_out_dim: 384
-  fusion_hidden_dim: 2048
-  # text_hidden_dim: 768
-  # text_out_dim: 384
-  # fusion_hidden_dim: 2048
+  fusion_hidden_dim: 1024
+  style_dim: 384
+  # 降低 style 噪声 (上次 0.15 导致 val_generated_current_mae 从 0.003 漂到 0.023)
+  style_noise_scale: 0.05
+  style_demodulate: true
 
-# lr=1e-4, G lr=2e-5
   learning_rate: 1e-5
   generator_learning_rate: 2e-5
   discriminator_learning_rate: 1e-5
   beta_1: 0.5
   beta_2: 0.9
-  critic_iter: 5
+  # 降低 critic_iter 避免 G 被双重压制 (recon + 5x D)
+  critic_iter: 3
   lambda_gp: 10.0
-  num_epochs: 220
-  batch_size: 256
+  # 总 epoch 大幅缩减: 上次 best=12/220, 之后全是漂移
+  num_epochs: 120
+  batch_size: 128
 
   lambda_calendar: 1.0
   lambda_butterfly: 1.0
-  lambda_smooth: 0.1
-  lambda_recon: 2.0
+  # smooth 原始值 ~120, 乘 0.1 后支配 g_total -> 再压一个数量级
+  lambda_smooth: 0.02
+  # recon 过拟合: 训练 g_recon 0.03->0.013 但 val_mae 反向上升
+  lambda_recon: 0.5
   use_calendar_constraint: true
   use_butterfly_constraint: true
   use_smooth_constraint: true
   use_recon_constraint: true
 
-  eval_mc_samples: 32
+  eval_mc_samples: 64
   eval_reweight_beta_mode: fixed
-  eval_reweight_beta: 25.0
+  # 上次 weight_entropy≈1 说明 beta=25 下重加权接近均匀, 退化成普通平均
+  eval_reweight_beta: 5.0
   eval_aggregation_mode: weighted_mean
   checkpoint_metric: val_mae_gap_vs_current
-  checkpoint_warmup_epochs: 10
+  # 总 epoch 缩到 60 -> warmup 同比缩减
+  checkpoint_warmup_epochs: 15
 
   seed: 42
   cuda: true
   num_workers: 0
 
   output_root: ""
-  save_every: 5
+  # 减少 ckpt 磁盘占用 (上次 42 份 x 242MB = 10GB)
+  save_every: 20
 
 generate_result:
   mc_samples: 64
   reweight_beta_mode: fixed
-  reweight_beta: 25.0
+  reweight_beta: 5.0
   quantiles:
     - 0.05
     - 0.5

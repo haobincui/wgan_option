@@ -1,4 +1,4 @@
-"""Typed configuration loaders for the standalone CNN WGAN module."""
+"""Typed configuration loaders for the standalone FiLM WGAN module."""
 
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ T = TypeVar("T")
 
 
 @dataclass
-class CnnWGANTrainConfig:
-    """Training configuration for the standalone CNN WGAN module."""
+class FilmWGANTrainConfig:
+    """Training configuration for the standalone FiLM WGAN module."""
 
     data_path: str = "data/processed/svi-excel/20260410-174929/merged_vol.xlsx"
     sheet_name: str = "gan_input_ready"
@@ -76,8 +76,8 @@ class CnnWGANTrainConfig:
 
 
 @dataclass
-class CnnWGANSampleConfig:
-    """Generate-result configuration for the standalone CNN WGAN module."""
+class FilmWGANSampleConfig:
+    """Generate-result configuration for the standalone FiLM WGAN module."""
 
     data_path: str = "data/processed/svi-excel/20260410-174929/merged_vol.xlsx"
     sheet_name: str = "gan_input_ready"
@@ -102,10 +102,10 @@ class CnnWGANSampleConfig:
     save_plots: bool = True
 
 
-_TRAIN_DEFAULTS = CnnWGANTrainConfig()
-_SAMPLE_DEFAULTS = CnnWGANSampleConfig()
-_TRAIN_FIELD_NAMES = {field.name for field in fields(CnnWGANTrainConfig)}
-_SAMPLE_FIELD_NAMES = {field.name for field in fields(CnnWGANSampleConfig)}
+_TRAIN_DEFAULTS = FilmWGANTrainConfig()
+_SAMPLE_DEFAULTS = FilmWGANSampleConfig()
+_TRAIN_FIELD_NAMES = {field.name for field in fields(FilmWGANTrainConfig)}
+_SAMPLE_FIELD_NAMES = {field.name for field in fields(FilmWGANSampleConfig)}
 _SHARED_GENERATE_FIELDS = {
     "data_path",
     "sheet_name",
@@ -156,7 +156,7 @@ def parse_sample_overrides(override_items: Iterable[str]) -> Dict[str, Any]:
 def default_train_output_root(data_path: str | Path) -> str:
     """Return the dataset-aware default training root."""
 
-    return str(default_output_root("outputs/training/cnn_wgan", data_path))
+    return str(default_output_root("outputs/training/film_wgan", data_path))
 
 
 def _load_generate_sections(config_path: str | Path) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -181,7 +181,7 @@ def build_sample_config(
     overrides: Mapping[str, Any] | None = None,
     run_dir: str | Path | None = None,
     checkpoint_path: str | Path | None = None,
-) -> CnnWGANSampleConfig:
+) -> FilmWGANSampleConfig:
     """Merge shared training fields with one generate-result section."""
 
     loaded_values = config_to_dict(_SAMPLE_DEFAULTS)
@@ -190,7 +190,7 @@ def build_sample_config(
         unknown_training = sorted(set(training_values) - _TRAIN_FIELD_NAMES)
         if unknown_training:
             raise ValueError(
-                f"Unknown training config keys for CNN WGAN: {unknown_training}. "
+                f"Unknown training config keys for FiLM WGAN: {unknown_training}. "
                 f"Allowed keys: {sorted(_TRAIN_FIELD_NAMES)}"
             )
         for key in _SHARED_GENERATE_FIELDS:
@@ -201,7 +201,7 @@ def build_sample_config(
         unknown_generate = sorted(set(generate_values) - _SAMPLE_FIELD_NAMES)
         if unknown_generate:
             raise ValueError(
-                f"Unknown generate_result config keys for CNN WGAN: {unknown_generate}. "
+                f"Unknown generate_result config keys for FiLM WGAN: {unknown_generate}. "
                 f"Allowed keys: {sorted(_SAMPLE_FIELD_NAMES)}"
             )
         loaded_values.update(dict(generate_values))
@@ -210,19 +210,19 @@ def build_sample_config(
         unknown_overrides = sorted(set(overrides) - _SAMPLE_FIELD_NAMES)
         if unknown_overrides:
             raise ValueError(
-                f"Unknown generate_result overrides for CNN WGAN: {unknown_overrides}. "
+                f"Unknown generate_result overrides for FiLM WGAN: {unknown_overrides}. "
                 f"Allowed keys: {sorted(_SAMPLE_FIELD_NAMES)}"
             )
         loaded_values.update(dict(overrides))
 
-    config = CnnWGANSampleConfig(**loaded_values)
+    config = FilmWGANSampleConfig(**loaded_values)
     if checkpoint_path not in {None, ""}:
         config = replace(config, checkpoint_path=str(checkpoint_path))
     if run_dir is not None:
         resolved_checkpoint_path = (
             Path(config.checkpoint_path)
             if str(config.checkpoint_path).strip()
-            else find_best_checkpoint(run_dir, filename="cnn_wgan_best.pt")
+            else find_best_checkpoint(run_dir, filename="film_wgan_best.pt")
         )
         if str(config.output_dir).strip():
             resolved_output_dir = generate_result_dir(run_dir, config.output_dir)
@@ -242,7 +242,7 @@ def build_sample_config_from_train_config(
     run_dir: str | Path | None = None,
     checkpoint_path: str | Path | None = None,
     overrides: Mapping[str, Any] | None = None,
-) -> CnnWGANSampleConfig:
+) -> FilmWGANSampleConfig:
     """Build a generate-result config from the merged training YAML."""
 
     training_values, generate_values = _load_generate_sections(config_path)
@@ -258,7 +258,7 @@ def build_sample_config_from_train_config(
 def load_train_config(
     config_path: str | Path,
     overrides: Mapping[str, Any] | None = None,
-) -> CnnWGANTrainConfig:
+) -> FilmWGANTrainConfig:
     """Load a training config from a flat or merged YAML."""
 
     _, yaml_values, loaded_values = load_yaml_config_values(
@@ -267,7 +267,7 @@ def load_train_config(
         overrides=overrides,
         section="training",
     )
-    config = _coerce_config(CnnWGANTrainConfig, loaded_values, source=str(config_path))
+    config = _coerce_config(FilmWGANTrainConfig, loaded_values, source=str(config_path))
     if "generator_learning_rate" not in yaml_values and not (overrides and "generator_learning_rate" in overrides):
         config.generator_learning_rate = float(config.learning_rate)
     if "discriminator_learning_rate" not in yaml_values and not (
@@ -285,7 +285,7 @@ def load_sample_config(
     *,
     run_dir: str | Path | None = None,
     checkpoint_path: str | Path | None = None,
-) -> CnnWGANSampleConfig:
+) -> FilmWGANSampleConfig:
     """Load one generate-result config from either merged or legacy YAML."""
 
     return build_sample_config_from_train_config(

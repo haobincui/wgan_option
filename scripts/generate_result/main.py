@@ -15,6 +15,7 @@ import scripts._path_setup  # noqa: F401
 
 from generate_result.cli import COMMANDS, main as generate_result_main  # noqa: E402
 from scripts.cnn_wgan.sample import main as cnn_wgan_generate_main  # noqa: E402
+from scripts.stylemod_wgan.sample import main as stylemod_wgan_generate_main  # noqa: E402
 from scripts.transformer_wgan.sample import main as transformer_wgan_generate_main  # noqa: E402
 
 HELP_TEXT = dedent(
@@ -24,12 +25,13 @@ HELP_TEXT = dedent(
       python scripts/generate_result/main.py vol-regression --config configs/wgan/train_vol_regression_xlsx.yaml
       python scripts/generate_result/main.py svi --config configs/wgan/train_svi_xlsx.yaml
       python scripts/generate_result/main.py --model cnn-wgan --config configs/generate_result/cnn_wgan_epoch0130.yaml
+      python scripts/generate_result/main.py --model stylemod-wgan --config configs/stylemod_wgan/train_default.yaml
       python scripts/generate_result/main.py --model transformer-wgan --config configs/transformer_wgan/train_default.yaml
       python scripts/generate_result/main.py plot --input-json <payload.json> [--output <file.png>]
 
     Notes:
       `--model` only adds script-layer dispatch and keeps src-side trainer logic unchanged.
-      CNN/Transformer routes can consume merged YAML configs such as files under configs/generate_result/.
+      CNN/StyleMod/Transformer routes can consume merged YAML configs such as files under configs/generate_result/.
     """
 ).strip()
 
@@ -40,6 +42,8 @@ MODEL_COMMANDS = {
     "svi": lambda argv: COMMANDS["svi"](argv),
     "cnn-wgan": cnn_wgan_generate_main,
     "cnn_wgan": cnn_wgan_generate_main,
+    "stylemod-wgan": stylemod_wgan_generate_main,
+    "stylemod_wgan": stylemod_wgan_generate_main,
     "transformer-wgan": transformer_wgan_generate_main,
     "transformer_wgan": transformer_wgan_generate_main,
 }

@@ -1,4 +1,4 @@
-"""Standalone CNN WGAN training loop and checkpoint management."""
+"""Standalone FiLM WGAN training loop and checkpoint management."""
 
 from __future__ import annotations
 
@@ -10,20 +10,21 @@ from typing import Mapping, Optional
 import numpy as np
 import torch
 from torch.optim import Adam
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from trainer import BaseTrainer
 from utils.output_paths import find_best_checkpoint, prepare_run_dir
 from utils.training_paths import checkpoint_named_dir, generate_result_dir, infer_training_output_root, resolve_existing_run_dir
 from .arbitrage import butterfly_arbitrage_penalty, calendar_arbitrage_penalty
 from .config import (
-    CnnWGANSampleConfig,
-    CnnWGANTrainConfig,
+    FilmWGANSampleConfig,
+    FilmWGANTrainConfig,
     build_sample_config,
     build_sample_config_from_train_config,
     config_to_dict,
 )
-from .data import CnnWGANDataBundle, create_train_val_bundle, denormalize_tensor, normalize_surface_tensor
-from .inference import CnnWGANSampler, build_sample_payload, normalization_stats_to_tensors
+from .data import FilmWGANDataBundle, create_train_val_bundle, denormalize_tensor, normalize_surface_tensor
+from .inference import FilmWGANSampler, build_sample_payload, normalization_stats_to_tensors
 from .io import config_payload, save_checkpoint, write_csv, write_json
 from .losses import (
     critic_wgan_loss,
@@ -34,7 +35,7 @@ from .losses import (
     reconstruction_loss,
     strike_smoothness_penalty,
 )
-from .models import CnnWGANCritic, CnnWGANGenerator, reconstruct_future_surface
+from .models import FilmWGANCritic, FilmWGANGenerator, reconstruct_future_surface
 from .training_plots import plot_training_curves
 from wgan_option.config_parsing import load_yaml_mapping
 
@@ -49,24 +50,30 @@ def _load_generate_result_section(config_path: str | None) -> dict[str, object]:
     return dict(section)
 
 
-class CnnWGANTrainer(BaseTrainer):
-    """Train the standalone CNN WGAN model on `merged_vol.xlsx` rows."""
+class FilmWGANTrainer(BaseTrainer):
+    """Train the standalone FiLM WGAN model on `merged_vol.xlsx` rows."""
 
-    trainer_id = "cnn_wgan"
-    logger_name = "cnn_wgan.trainer"
+    trainer_id = "film_wgan"
+    logger_name = "film_wgan.trainer"
 
-    def __init__(self, config: CnnWGANTrainConfig, *, config_path: str | None = None):
+    def __init__(self, config: FilmWGANTrainConfig, *, config_path: str | None = None):
         super().__init__(config, config_path=config_path)
         self.checkpoints_dir: Optional[Path] = None
         self.metrics_dir: Optional[Path] = None
         self.device = torch.device("cuda:0" if (config.cuda and torch.cuda.is_available()) else "cpu")
 
-        self.bundle: Optional[CnnWGANDataBundle] = None
-        self.generator: Optional[CnnWGANGenerator] = None
-        self.critic: Optional[CnnWGANCritic] = None
+        self.bundle: Optional[FilmWGANDataBundle] = None
+        self.generator: Optional[FilmWGANGenerator] = None
+        self.critic: Optional[FilmWGANCritic] = None
         self.generator_optimizer: Optional[Adam] = None
         self.critic_optimizer: Optional[Adam] = None
+        self.generator_scheduler: Optional[CosineAnnealingLR] = None
+        self.critic_scheduler: Optional[CosineAnnealingLR] = None
         self.normalization = None
+        self._disc_step_count: int = 0
+        self._gp_warmup_steps: int = 200
+        self._grad_clip: float = 5.0
+        self._lr_min_ratio: float = 0.1
 
     def _set_seed(self) -> None:
         random.seed(int(self.config.seed))
@@ -75,7 +82,7 @@ class CnnWGANTrainer(BaseTrainer):
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(int(self.config.seed))
 
-    def _prepare_runtime_config(self, config: CnnWGANTrainConfig) -> tuple[CnnWGANTrainConfig, Path]:
+    def _prepare_runtime_config(self, config: FilmWGANTrainConfig) -> tuple[FilmWGANTrainConfig, Path]:
         output_root = infer_training_output_root(config, trainer_id=self.trainer_id)
         run_dir = prepare_run_dir(output_root, create=False)
         resolved_config = replace(
@@ -104,12 +111,12 @@ class CnnWGANTrainer(BaseTrainer):
         assert self.metrics_dir is not None
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
         self.metrics_dir.mkdir(parents=True, exist_ok=True)
-        self.logger.info("Standalone CNN WGAN outputs: %s", self.run_dir)
+        self.logger.info("Standalone FiLM WGAN outputs: %s", self.run_dir)
         self.logger.info("Loading merged-vol workbook from %s (%s)", self.config.data_path, self.config.sheet_name)
         self.bundle = create_train_val_bundle(self.config)
         self.normalization = normalization_stats_to_tensors(self.bundle.normalization_stats, self.device)
         surface_height, surface_width = self.bundle.surface_shape
-        self.generator = CnnWGANGenerator(
+        self.generator = FilmWGANGenerator(
             surface_height=surface_height,
             surface_width=surface_width,
             embedding_dim=self.bundle.embedding_dim,
@@ -120,7 +127,7 @@ class CnnWGANTrainer(BaseTrainer):
             text_out_dim=self.config.text_out_dim,
             fusion_hidden_dim=self.config.fusion_hidden_dim,
         ).to(self.device)
-        self.critic = CnnWGANCritic(
+        self.critic = FilmWGANCritic(
             surface_height=surface_height,
             surface_width=surface_width,
             embedding_dim=self.bundle.embedding_dim,
@@ -139,6 +146,17 @@ class CnnWGANTrainer(BaseTrainer):
             self.critic.parameters(),
             lr=float(self.config.discriminator_learning_rate),
             betas=(float(self.config.beta_1), float(self.config.beta_2)),
+        )
+        total_epochs = max(1, int(self.config.num_epochs))
+        self.generator_scheduler = CosineAnnealingLR(
+            self.generator_optimizer,
+            T_max=total_epochs,
+            eta_min=float(self.config.generator_learning_rate) * self._lr_min_ratio,
+        )
+        self.critic_scheduler = CosineAnnealingLR(
+            self.critic_optimizer,
+            T_max=total_epochs,
+            eta_min=float(self.config.discriminator_learning_rate) * self._lr_min_ratio,
         )
         self.logger.info(
             "Dataset ready: train_samples=%s, val_samples=%s, surface_shape=%s, embedding_dim=%s",
@@ -180,17 +198,25 @@ class CnnWGANTrainer(BaseTrainer):
 
         fake_scores = self.critic(fake_future_surface, current_features, text_features)
         real_scores = self.critic(real_future_surface, current_features, text_features)
+        self._disc_step_count += 1
+        warmup_factor = min(1.0, self._disc_step_count / max(1, self._gp_warmup_steps))
+        effective_lambda_gp = float(self.config.lambda_gp) * warmup_factor
         gp = gradient_penalty(
             critic=self.critic,
             real_future_surface=real_future_surface,
             fake_future_surface=fake_future_surface,
             current_surface=current_features,
             text_embedding=text_features,
-            lambda_gp=float(self.config.lambda_gp),
+            lambda_gp=effective_lambda_gp,
         )
         disc_loss = critic_wgan_loss(real_scores, fake_scores) + gp
         disc_loss.backward()
-        self.critic_optimizer.step()
+        if torch.isfinite(disc_loss):
+            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=self._grad_clip)
+            self.critic_optimizer.step()
+        else:
+            self.critic_optimizer.zero_grad(set_to_none=True)
+            self.logger.warning("Non-finite disc_loss detected at step %s; skipping critic update.", self._disc_step_count)
         return {
             "d_total": float(disc_loss.detach().cpu()),
             "d_real": float(real_scores.mean().detach().cpu()),
@@ -247,7 +273,12 @@ class CnnWGANTrainer(BaseTrainer):
         if self.config.use_recon_constraint:
             total_loss = total_loss + float(self.config.lambda_recon) * recon_penalty
         total_loss.backward()
-        self.generator_optimizer.step()
+        if torch.isfinite(total_loss):
+            torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=self._grad_clip)
+            self.generator_optimizer.step()
+        else:
+            self.generator_optimizer.zero_grad(set_to_none=True)
+            self.logger.warning("Non-finite generator total_loss detected; skipping generator update.")
         return {
             "g_total": float(total_loss.detach().cpu()),
             "g_adv": float(adv_loss.detach().cpu()),
@@ -362,7 +393,7 @@ class CnnWGANTrainer(BaseTrainer):
         plot_training_curves(
             metrics_rows,
             output_path=self.metrics_dir / "loss_curves.png",
-            title="Standalone CNN WGAN Training Curves",
+            title="Standalone FiLM WGAN Training Curves",
         )
 
     def _train_impl(self) -> Path:
@@ -377,7 +408,7 @@ class CnnWGANTrainer(BaseTrainer):
         fallback_epoch = 0
         checkpoint_warmup_epochs = max(0, int(getattr(self.config, "checkpoint_warmup_epochs", 0)))
         selection_start_epoch = checkpoint_warmup_epochs + 1
-        fallback_checkpoint_path = self.checkpoints_dir / "cnn_wgan_best_warmup_fallback.pt"
+        fallback_checkpoint_path = self.checkpoints_dir / "film_wgan_best_warmup_fallback.pt"
         fallback_used = False
 
         if checkpoint_warmup_epochs > 0:
@@ -429,6 +460,12 @@ class CnnWGANTrainer(BaseTrainer):
                 "g_recon": float(np.mean(running["g_recon"])) if running["g_recon"] else 0.0,
             }
             row.update(self._evaluate())
+            if self.generator_scheduler is not None:
+                self.generator_scheduler.step()
+            if self.critic_scheduler is not None:
+                self.critic_scheduler.step()
+            row["lr_generator"] = float(self.generator_optimizer.param_groups[0]["lr"]) if self.generator_optimizer else 0.0
+            row["lr_critic"] = float(self.critic_optimizer.param_groups[0]["lr"]) if self.critic_optimizer else 0.0
             metrics_rows.append(row)
             write_json(self.metrics_dir / "training_metrics.json", metrics_rows)
             write_csv(self.metrics_dir / "training_metrics.csv", metrics_rows)
@@ -443,9 +480,9 @@ class CnnWGANTrainer(BaseTrainer):
             if epoch > checkpoint_warmup_epochs and monitor_value < best_metric:
                 best_metric = monitor_value
                 best_epoch = epoch
-                save_checkpoint(self.checkpoints_dir / "cnn_wgan_best.pt", self._checkpoint_payload())
+                save_checkpoint(self.checkpoints_dir / "film_wgan_best.pt", self._checkpoint_payload())
             if epoch % int(self.config.save_every) == 0:
-                save_checkpoint(self.checkpoints_dir / f"cnn_wgan_epoch_{epoch:04d}.pt", self._checkpoint_payload())
+                save_checkpoint(self.checkpoints_dir / f"film_wgan_epoch_{epoch:04d}.pt", self._checkpoint_payload())
 
             self.logger.info(
                 "epoch=%s g_total=%.6f d_total=%.6f val_mae=%.6f val_current_mae=%.6f gap=%.6f win_rate=%.3f",
@@ -462,7 +499,7 @@ class CnnWGANTrainer(BaseTrainer):
             fallback_used = True
             best_metric = fallback_metric
             best_epoch = fallback_epoch
-            fallback_checkpoint_path.replace(self.checkpoints_dir / "cnn_wgan_best.pt")
+            fallback_checkpoint_path.replace(self.checkpoints_dir / "film_wgan_best.pt")
             self.logger.warning(
                 "No epoch exceeded checkpoint_warmup_epochs=%s during training; falling back to overall best epoch=%s.",
                 checkpoint_warmup_epochs,
@@ -471,7 +508,7 @@ class CnnWGANTrainer(BaseTrainer):
         elif fallback_checkpoint_path.exists():
             fallback_checkpoint_path.unlink()
 
-        save_checkpoint(self.checkpoints_dir / "cnn_wgan_final.pt", self._checkpoint_payload())
+        save_checkpoint(self.checkpoints_dir / "film_wgan_final.pt", self._checkpoint_payload())
         write_json(
             self.metrics_dir / "best_checkpoint.json",
             {
@@ -481,19 +518,19 @@ class CnnWGANTrainer(BaseTrainer):
                 "checkpoint_warmup_epochs": int(checkpoint_warmup_epochs),
                 "selection_start_epoch": int(selection_start_epoch),
                 "fallback_used": bool(fallback_used),
-                "checkpoint_path": str(self.checkpoints_dir / "cnn_wgan_best.pt"),
+                "checkpoint_path": str(self.checkpoints_dir / "film_wgan_best.pt"),
             },
         )
-        self.logger.info("Standalone CNN WGAN training complete. Best epoch=%s best_metric=%.6f", best_epoch, best_metric)
+        self.logger.info("Standalone FiLM WGAN training complete. Best epoch=%s best_metric=%.6f", best_epoch, best_metric)
         return self.run_dir
 
     def _prepare_generate_result(
         self,
-        generate_config: CnnWGANSampleConfig | None = None,
+        generate_config: FilmWGANSampleConfig | None = None,
         *,
         overrides: Mapping[str, object] | None = None,
         config_path: str | None = None,
-    ) -> tuple[CnnWGANSampleConfig, Path]:
+    ) -> tuple[FilmWGANSampleConfig, Path]:
         base_training_config = self.config if self._runtime_prepared else self.raw_config
         output_root = infer_training_output_root(base_training_config, trainer_id=self.trainer_id)
         checkpoint_override = None if not overrides else overrides.get("checkpoint_path")
@@ -528,7 +565,7 @@ class CnnWGANTrainer(BaseTrainer):
         resolved_checkpoint_path = (
             Path(generate_config.checkpoint_path)
             if str(generate_config.checkpoint_path).strip()
-            else find_best_checkpoint(run_dir, filename="cnn_wgan_best.pt")
+            else find_best_checkpoint(run_dir, filename="film_wgan_best.pt")
         )
         if str(generate_config.output_dir).strip():
             resolved_generate_dir = generate_result_dir(run_dir, generate_config.output_dir)
@@ -541,7 +578,7 @@ class CnnWGANTrainer(BaseTrainer):
         )
         return resolved_config, resolved_generate_dir
 
-    def _generate_result_impl(self, generate_config: CnnWGANSampleConfig, generate_dir: Path) -> Path:
+    def _generate_result_impl(self, generate_config: FilmWGANSampleConfig, generate_dir: Path) -> Path:
         del generate_dir
-        sampler = CnnWGANSampler(generate_config)
+        sampler = FilmWGANSampler(generate_config)
         return sampler.sample()

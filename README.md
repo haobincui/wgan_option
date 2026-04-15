@@ -89,6 +89,32 @@ Standalone Transformer-based Wasserstein GAN for volatility surface generation.
 - LR scheduling, early stopping, and baseline-aware evaluation metrics
 - see [src/transformer_wgan/README.md](src/transformer_wgan/README.md) for architecture and implementation details
 
+### `src/film_wgan`
+
+Standalone CNN WGAN-GP whose generator and critic are conditioned on the news embedding via FiLM (Feature-wise Linear Modulation).
+
+- text encoder produces per-channel `(gamma, beta)` that modulate every convolution over the current surface
+- single CNN pass per forward (no dual-branch surface encoder), so "text → current → future" is the dominant causal path
+- WGAN-GP training with calendar / butterfly arbitrage penalties, smoothness regularization, and optional reconstruction loss
+- used as an architectural baseline against `stylemod_wgan`
+
+### `src/stylemod_wgan`
+
+Standalone StyleGAN-style WGAN-GP that injects a global style vector into a CNN generator.
+
+- style vector built from concatenated `(surface_summary, text_features)` plus noise; style demodulation on weights
+- ModulatedConv2d stack + StyledResidualConvBlocks generate a log-IV delta added back to the current surface
+- FiLM-conditioned critic reused from `film_wgan` for fair adversarial comparison
+- same WGAN-GP + arbitrage / smoothness / reconstruction constraint set as the other CNN variants
+
+### `src/crossattn_wgan`
+
+Standalone WGAN-GP that uses cross-attention between the surface tokens and the text embedding instead of FiLM/style modulation.
+
+- surface-token queries attend to text-key/value projections, letting each spatial location pick up different news context
+- shares the merged-vol workbook format and WGAN-GP constraint stack with the other standalone modules
+- intended as a comparison point for FiLM (per-channel) vs cross-attention (per-token) text conditioning
+
 ### Shared Utilities
 
 - `src/logger.py`
@@ -134,9 +160,15 @@ The repo contains several script families. The preferred entrypoints are the uni
 | `train volgan` | `python scripts/volgan/main.py train --config ...` | Train the standalone MLP VolGAN on merged vol surfaces | `merged_vol.xlsx` plus a training config | timestamped artifacts under `outputs/training/volgan/` | Standalone pipeline |
 | `train cnn-wgan` | `python scripts/cnn_wgan/main.py train --config ...` | Train the standalone CNN WGAN-GP on merged vol surfaces | `merged_vol.xlsx` plus a training config | timestamped artifacts under `outputs/training/cnn_wgan/` | Standalone pipeline |
 | `train transformer-wgan` | `python scripts/transformer_wgan/main.py train --config ...` | Train the standalone Transformer WGAN-GP on merged vol surfaces | `merged_vol.xlsx` plus a training config | timestamped artifacts under `outputs/training/transformer_wgan/` | Standalone pipeline |
+| `train film-wgan` | `python scripts/film_wgan/main.py train --config ...` | Train the FiLM-conditioned CNN WGAN-GP on merged vol surfaces | `merged_vol.xlsx` plus a training config | timestamped artifacts under `outputs/training/film_wgan/` | Standalone pipeline |
+| `train stylemod-wgan` | `python scripts/stylemod_wgan/main.py train --config ...` | Train the StyleGAN-style WGAN-GP on merged vol surfaces | `merged_vol.xlsx` plus a training config | timestamped artifacts under `outputs/training/stylemod_wgan/` | Standalone pipeline |
+| `train crossattn-wgan` | `python scripts/crossattn_wgan/main.py train --config ...` | Train the cross-attention-conditioned WGAN-GP on merged vol surfaces | `merged_vol.xlsx` plus a training config | timestamped artifacts under `outputs/training/crossattn_wgan/` | Standalone pipeline |
 | `generate-result volgan` | `python scripts/volgan/main.py sample --config ...` | Generate scenarios from a trained VolGAN checkpoint | `merged_vol.xlsx` plus a saved checkpoint | JSON payloads, plots, and `summary.csv` | Standalone pipeline |
 | `generate-result cnn-wgan` | `python scripts/cnn_wgan/main.py generate-result --config ...` | Generate scenarios from a trained CNN WGAN checkpoint | `merged_vol.xlsx` plus a saved checkpoint | JSON payloads, plots, and `summary.csv` | Standalone pipeline |
 | `generate-result transformer-wgan` | `python scripts/transformer_wgan/main.py generate-result --config ...` | Generate scenarios from a trained Transformer WGAN checkpoint | `merged_vol.xlsx` plus a saved checkpoint | JSON payloads, plots, and `summary.csv` | Standalone pipeline |
+| `generate-result film-wgan` | `python scripts/film_wgan/main.py generate-result --config ...` | Generate scenarios from a trained Film WGAN checkpoint | `merged_vol.xlsx` plus a saved checkpoint | JSON payloads, plots, and `summary.csv` | Standalone pipeline |
+| `generate-result stylemod-wgan` | `python scripts/stylemod_wgan/main.py generate-result --config ...` | Generate scenarios from a trained StyleMod WGAN checkpoint | `merged_vol.xlsx` plus a saved checkpoint | JSON payloads, plots, and `summary.csv` | Standalone pipeline |
+| `generate-result crossattn-wgan` | `python scripts/crossattn_wgan/main.py generate-result --config ...` | Generate scenarios from a trained CrossAttn WGAN checkpoint | `merged_vol.xlsx` plus a saved checkpoint | JSON payloads, plots, and `summary.csv` | Standalone pipeline |
 
 ### Maintenance and Data Utility Jobs
 
@@ -157,6 +189,11 @@ These are helpers for launching background jobs. They are not the primary APIs o
 | `run_volgan_svi_excel.sh` | `scripts/volgan/main.py` | background launcher for VolGAN train + generate-result | Convenience wrapper |
 | `run_cnn_wgan_svi_excel.sh` | `scripts/cnn_wgan/main.py` | background launcher for CNN WGAN train + generate-result | Convenience wrapper |
 | `run_transformer_wgan_svi_excel.sh` | `scripts/transformer_wgan/main.py` | background launcher for Transformer WGAN train + generate-result | Convenience wrapper |
+| `run_film_wgan_svi_excel.sh` | `scripts/film_wgan/main.py` | background launcher for Film WGAN training | Convenience wrapper |
+| `run_stylemod_wgan_svi_excel.sh` | `scripts/stylemod_wgan/main.py` | background launcher for StyleMod WGAN training | Convenience wrapper |
+| `run_all_tests.sh` | `pytest` | run the project test suite in one shot | Convenience wrapper |
+| `run_merge_vol.sh` | `scripts/merge_file/merge_vol.py` | background launcher for merged-vol workbook construction | Convenience wrapper |
+| `run_generate-surface_svi_excel_parallel_bg.sh` | `scripts/generate_surface/main.py` | parallel background launcher for SVI + excel surface generation | Convenience wrapper |
 
 ## Semantics That Matter
 
@@ -243,7 +280,10 @@ wgan_option/
 │   ├── wgan/                      # Merged-workbook training configs
 │   ├── volgan/                    # Standalone VolGAN training and sampling configs
 │   ├── cnn_wgan/                  # Standalone CNN WGAN training configs
-│   └── transformer_wgan/          # Standalone Transformer WGAN training configs
+│   ├── transformer_wgan/          # Standalone Transformer WGAN training configs
+│   ├── film_wgan/                 # Standalone Film (FiLM) WGAN training configs
+│   ├── stylemod_wgan/             # Standalone StyleMod WGAN training configs
+│   └── crossattn_wgan/            # Standalone CrossAttention WGAN training configs
 ├── data/                          # Raw inputs and processed run directories
 ├── docs/                          # Thesis design notes and architecture writeups
 ├── scripts/
@@ -255,6 +295,9 @@ wgan_option/
 │   ├── volgan/                    # Standalone VolGAN train and sample CLI
 │   ├── cnn_wgan/                  # Standalone CNN WGAN train and generate-result CLI
 │   ├── transformer_wgan/          # Standalone Transformer WGAN train and generate-result CLI
+│   ├── film_wgan/                 # Standalone Film WGAN train and generate-result CLI
+│   ├── stylemod_wgan/             # Standalone StyleMod WGAN train and generate-result CLI
+│   ├── crossattn_wgan/            # Standalone CrossAttention WGAN train and generate-result CLI
 │   └── merge_raw_option_data.py   # Raw-data inspection utility
 ├── src/
 │   ├── market_data/               # Contract parsing and raw-data DTO helpers
@@ -264,6 +307,9 @@ wgan_option/
 │   ├── volgan/                    # Standalone MLP VolGAN module (BCE adversarial)
 │   ├── cnn_wgan/                  # Standalone CNN WGAN-GP module
 │   ├── transformer_wgan/          # Standalone Transformer WGAN-GP module
+│   ├── film_wgan/                 # Standalone FiLM-conditioned WGAN-GP module
+│   ├── stylemod_wgan/             # Standalone StyleGAN-style modulated WGAN-GP module
+│   ├── crossattn_wgan/            # Standalone cross-attention-conditioned WGAN-GP module
 │   └── logger.py                  # Shared logging helper
 ├── tests/                         # Script, quantlib, and workflow tests
 │   └── test_standalone_wgan/      # Tests for standalone WGAN modules
@@ -273,6 +319,11 @@ wgan_option/
 ├── run_volgan_svi_excel.sh        # VolGAN launcher helper
 ├── run_cnn_wgan_svi_excel.sh      # CNN WGAN launcher helper
 ├── run_transformer_wgan_svi_excel.sh  # Transformer WGAN launcher helper
+├── run_film_wgan_svi_excel.sh     # Film WGAN launcher helper
+├── run_stylemod_wgan_svi_excel.sh # StyleMod WGAN launcher helper
+├── run_merge_vol.sh               # merged-vol workbook launcher helper
+├── run_all_tests.sh               # test-suite launcher helper
+├── run_generate-surface_svi_excel_parallel_bg.sh  # parallel surface-generation launcher
 └── README.md
 ```
 
@@ -313,33 +364,157 @@ Standalone module architecture:
 - The merged vol workflow is currently the closest executable path to the thesis-facing current-surface -> future-surface forecasting setup.
 - The merged SVI workflow is a paired forecasting implementation, even though the source workbook remains direction-oriented.
 - The script families under `scripts/` are intentionally thin wrappers around reusable logic in `src/`.
-- The standalone modules (`volgan`, `cnn_wgan`, `transformer_wgan`) are fully independent of `src/wgan_option` and share only the `merged_vol.xlsx` workbook format and utilities under `src/utils/`.
+- The standalone modules (`volgan`, `cnn_wgan`, `transformer_wgan`, `film_wgan`, `stylemod_wgan`, `crossattn_wgan`) are fully independent of `src/wgan_option` and share only the `merged_vol.xlsx` workbook format and utilities under `src/utils/`.
+- Among the CNN-based WGAN variants, `film_wgan` realizes "text → current → future" most directly by letting text embeddings modulate every convolution over the current surface via FiLM; `stylemod_wgan` folds text into a global style vector, and `crossattn_wgan` lets each surface token attend to text features.
 
 
 # Pipelines
 
+Each pipeline walks end-to-end from raw inputs to a trained checkpoint and post-training artifacts. Unless noted, commands assume the repo root as the working directory, `py312` conda env is active, and the package is installed editable (`python -m pip install -e .`).
 
-## 1. run vol xlsx
+## 0. Environment bootstrap
 
-
-## 2. run raw vol 
 ```shell
+# one-time: create env, install deps, and install the repo editable
+conda create -n py312 python=3.12 -y
+conda activate py312
+python -m pip install -r requirements.txt
 python -m pip install -e .
 
+# quick sanity check
+bash run_all_tests.sh
+```
+
+## 1. run SVI vol xlsx (preferred merged-workbook path)
+
+End-to-end: build SVI surface → merge paired vol workbook → train merged vol-surface WGAN → post-training inspection.
+
+```shell
+# 1.1 build one processed SVI minute-surface run (GPU)
+python scripts/generate_surface/main.py generate_surface \
+  --device gpu \
+  --model svi \
+  --data_range excel \
+  --config configs/surface_builder/svi/generate_surface-svi-excel.yaml
+# or parallel background:
+# bash run_generate-surface_svi_excel_parallel_bg.sh
+
+# 1.2 merge into the training-ready paired workbook
+python scripts/merge_file/merge_vol.py \
+  --input-dir data/processed/svi-excel/<run_ts>
+# or background:
+# bash run_merge_vol.sh data/processed/svi-excel/<run_ts>
+
+# 1.3 train merged vol-surface WGAN (preferred entrypoint)
+python scripts/train/main.py vol-xlsx \
+  --config configs/wgan/train_vol_xlsx_24gb_lp_aggressive_es.yaml
+# background launcher:
+# bash run_train.sh configs/wgan/train_vol_xlsx_24gb_lp_aggressive_es.yaml
+
+# 1.4 post-training inspection (generate samples + error analysis)
+python scripts/generate_result/main.py vol \
+  --config configs/generate_result/vol_best.yaml
+python scripts/analyze_error/main.py vol \
+  --config configs/analyze_error/vol.yaml
+# background: bash run_analyze_error.sh configs/analyze_error/vol.yaml
+```
+
+## 2. run raw vol xlsx
+
+Raw-excel data path (no SVI parameterization, surfaces built directly from trades).
+
+```shell
 python scripts/generate_surface/main.py generate_surface \
   --device gpu \
   --config configs/surface_builder/raw/generate_surface-raw-excel-pipeline.yaml
 
 python scripts/merge_file/merge_vol.py \
-  --input-dir data/processed/raw-excel/20260410-raw-01
-
-# python scripts/train/main.py vol-xlsx \
-#   --config configs/wgan/train_vol_xlsx_24gb_raw_lp_aggressive_es.yaml
+  --input-dir data/processed/raw-excel/<run_ts>
 
 python scripts/train/main.py vol-xlsx \
   --config configs/wgan/train_vol_xlsx_24gb_raw_lp_aggressive_es_noconta.yaml
 
-
 python scripts/generate_result/main.py vol \
   --config configs/wgan/train_vol_xlsx.yaml
 ```
+
+## 3. run SVI xlsx (supervised SVI regressor)
+
+```shell
+python scripts/train/main.py svi-xlsx \
+  --config configs/wgan/train_svi_xlsx.yaml
+
+python scripts/generate_result/main.py svi \
+  --config configs/wgan/train_svi_xlsx.yaml
+
+python scripts/analyze_error/main.py svi \
+  --config configs/analyze_error/svi.yaml
+```
+
+## 4. Standalone model pipelines
+
+Each standalone module shares `merged_vol.xlsx` as input and writes to `outputs/training/<model>/`.
+
+### 4.1 VolGAN (MLP baseline)
+
+```shell
+python scripts/volgan/main.py train --config configs/volgan/train_lp.yaml
+python scripts/volgan/main.py sample --config configs/volgan/train_lp.yaml
+# or: bash run_volgan_svi_excel.sh configs/volgan/train_lp.yaml
+```
+
+### 4.2 CNN WGAN
+
+```shell
+python scripts/cnn_wgan/main.py train --config configs/cnn_wgan/train_lp_gen128_disc128.yaml
+python scripts/cnn_wgan/main.py generate-result --config configs/cnn_wgan/train_lp_gen128_disc128.yaml
+# or: bash run_cnn_wgan_svi_excel.sh configs/cnn_wgan/train_lp_gen128_disc128.yaml
+```
+
+### 4.3 Transformer WGAN
+
+```shell
+python scripts/transformer_wgan/main.py train --config configs/transformer_wgan/train_lp.yaml
+python scripts/transformer_wgan/main.py generate-result --config configs/transformer_wgan/train_lp.yaml
+# or: bash run_transformer_wgan_svi_excel.sh configs/transformer_wgan/train_lp.yaml
+```
+
+### 4.4 Film WGAN (FiLM-conditioned, "text → current → future" baseline)
+
+```shell
+python scripts/film_wgan/main.py train --config configs/film_wgan/train_lp_gen128_disc128.yaml
+python scripts/film_wgan/main.py generate-result --config configs/film_wgan/train_lp_gen128_disc128.yaml
+# or: bash run_film_wgan_svi_excel.sh configs/film_wgan/train_lp_gen128_disc128.yaml
+```
+
+### 4.5 StyleMod WGAN (StyleGAN-style text+noise style vector)
+
+```shell
+python scripts/stylemod_wgan/main.py train --config configs/stylemod_wgan/train_lp_gen64_disc64_tuned.yaml
+python scripts/stylemod_wgan/main.py generate-result --config configs/stylemod_wgan/train_lp_gen64_disc64_tuned.yaml
+# or: bash run_stylemod_wgan_svi_excel.sh configs/stylemod_wgan/train_lp_gen64_disc64_tuned.yaml
+```
+
+### 4.6 CrossAttention WGAN
+
+```shell
+python scripts/crossattn_wgan/main.py train --config configs/crossattn_wgan/train_lp.yaml
+python scripts/crossattn_wgan/main.py generate-result --config configs/crossattn_wgan/train_lp.yaml
+```
+
+## 5. Run monitoring & management
+
+Most `run_*.sh` wrappers write to `logs/<module>/<run_ts>/` with `run.log` and `run.pid`:
+
+```shell
+# follow training logs
+tail -f logs/stylemod_wgan/<run_ts>/run.log
+
+# check if a background job is still running
+kill -0 "$(cat logs/stylemod_wgan/<run_ts>/run.pid)" 2>/dev/null && echo running || echo stopped
+
+# stop a background job
+kill "$(cat logs/stylemod_wgan/<run_ts>/run.pid)"
+```
+
+Training artifacts (checkpoints, metrics CSV/JSON, loss curves PNG, resolved config) live under `outputs/training/<module>/<data_range>/<run_ts>/`. The best checkpoint is `<module>_best.pt`; `metrics/best_checkpoint.json` records `best_epoch` and `best_metric`.

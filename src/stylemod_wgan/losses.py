@@ -1,4 +1,4 @@
-"""Loss helpers for standalone CNN WGAN training."""
+"""Loss helpers for standalone StyleMod WGAN training."""
 
 from __future__ import annotations
 
