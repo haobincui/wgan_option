@@ -32,6 +32,10 @@ training:
   lambda_butterfly: 1.0
   lambda_smooth: 0.1
   lambda_recon: 2.0
+  recon_weight_mode: short_atm_band
+  recon_atm_range: 0.08
+  recon_atm_short_end_max_days: 90.0
+  recon_atm_multiplier: 3.0
   use_calendar_constraint: true
   use_butterfly_constraint: true
   use_smooth_constraint: true

@@ -67,6 +67,73 @@ def strike_smoothness_penalty(future_log_surface: torch.Tensor, strike_grid: tor
     return (weights * diff.pow(2)).mean()
 
 
+def _expand_weights_to_match(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    expanded = weights.to(device=values.device, dtype=values.dtype)
+    if expanded.dim() > values.dim():
+        raise ValueError(f"weights has more dimensions than values: {expanded.shape} vs {values.shape}")
+    while expanded.dim() < values.dim():
+        expanded = expanded.unsqueeze(0)
+    return torch.broadcast_to(expanded, values.shape)
+
+
+def build_reconstruction_weight_template(
+    *,
+    strike_grid: torch.Tensor,
+    maturity_days_grid: torch.Tensor,
+    mode: str,
+    atm_range: float,
+    short_end_max_days: float,
+    atm_multiplier: float,
+) -> torch.Tensor:
+    normalized_mode = str(mode).strip().lower()
+    strike_grid = strike_grid.reshape(-1)
+    maturity_days_grid = maturity_days_grid.reshape(-1)
+    weights = torch.ones(
+        (maturity_days_grid.numel(), strike_grid.numel()),
+        device=strike_grid.device,
+        dtype=strike_grid.dtype,
+    )
+    if normalized_mode == "uniform":
+        return weights
+    if normalized_mode != "short_atm_band":
+        raise ValueError(f"Unsupported recon_weight_mode: {mode}")
+    if float(atm_multiplier) <= 0.0:
+        raise ValueError(f"recon_atm_multiplier must be positive, got {atm_multiplier}")
+    if float(atm_range) < 0.0:
+        raise ValueError(f"recon_atm_range must be non-negative, got {atm_range}")
+
+    strike_mask = torch.abs(strike_grid - 1.0) <= float(atm_range) + 1e-6
+    maturity_mask = maturity_days_grid <= float(short_end_max_days) + 1e-6
+    emphasis_mask = maturity_mask.view(-1, 1) & strike_mask.view(1, -1)
+    if torch.any(emphasis_mask):
+        weights = torch.where(emphasis_mask, torch.full_like(weights, float(atm_multiplier)), weights)
+
+    normalizer = weights.mean()
+    if not torch.isfinite(normalizer) or float(normalizer.item()) <= 0.0:
+        raise ValueError("Reconstruction weight template must have a positive finite mean.")
+    return weights / normalizer
+
+
+def weighted_surface_mae(predicted: torch.Tensor, target: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    if predicted.shape != target.shape:
+        raise ValueError(f"predicted and target must share the same shape, got {predicted.shape} vs {target.shape}")
+    has_explicit_batch = predicted.dim() == weights.dim() + 1
+    expanded_weights = _expand_weights_to_match(predicted, weights)
+    abs_error = torch.abs(predicted - target)
+    if abs_error.dim() == 0:
+        denom = torch.clamp(expanded_weights, min=1e-12)
+        return abs_error * expanded_weights / denom
+    if not has_explicit_batch:
+        weighted_abs = abs_error * expanded_weights
+        return weighted_abs.sum() / torch.clamp(expanded_weights.sum(), min=1e-12)
+    weighted_abs = abs_error * expanded_weights
+    per_sample = weighted_abs.reshape(abs_error.shape[0], -1).sum(dim=1) / torch.clamp(
+        expanded_weights.reshape(abs_error.shape[0], -1).sum(dim=1),
+        min=1e-12,
+    )
+    return per_sample.mean()
+
+
 def reconstruction_loss(fake_future_flat: torch.Tensor, target_flat: torch.Tensor) -> torch.Tensor:
     """MAE between generated and real target surface, penalising lazy zero-delta generators."""
     return torch.nn.functional.l1_loss(fake_future_flat, target_flat)

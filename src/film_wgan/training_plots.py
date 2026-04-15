@@ -31,17 +31,22 @@ def plot_training_curves(
 
     metric_groups: list[tuple[str, tuple[str, ...], str]] = [
         ("Adversarial", ("g_total", "g_adv", "d_total", "gp"), "loss"),
-        ("Constraints", ("g_calendar", "g_butterfly", "g_smooth", "g_recon"), "penalty"),
+        ("Constraints", ("g_calendar", "g_butterfly", "g_smooth", "g_recon", "g_recon_weighted"), "penalty"),
         ("Validation vs Current", ("val_mae", "val_current_mae", "val_rmse", "val_current_rmse"), "metric"),
         (
             "Gap and Distances",
             ("val_mae_gap_vs_current", "val_win_rate_vs_current", "val_generated_current_mae", "val_real_current_mae"),
             "metric",
         ),
+        (
+            "Short-End ATM",
+            ("val_short_atm_weighted_mae", "val_current_short_atm_weighted_mae", "val_short_atm_mae_gap_vs_current"),
+            "metric",
+        ),
         ("Arbitrage and Weighting", ("val_calendar", "val_butterfly", "val_penalty_mean", "val_penalty_std", "val_weight_entropy"), "metric"),
     ]
 
-    fig, axes = plt.subplots(len(metric_groups), 1, figsize=(12, 12), sharex=True)
+    fig, axes = plt.subplots(len(metric_groups), 1, figsize=(12, 14), sharex=True)
     if len(metric_groups) == 1:
         axes = [axes]
 

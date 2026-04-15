@@ -27,6 +27,7 @@ from .data import FilmWGANDataBundle, create_train_val_bundle, denormalize_tenso
 from .inference import FilmWGANSampler, build_sample_payload, normalization_stats_to_tensors
 from .io import config_payload, save_checkpoint, write_csv, write_json
 from .losses import (
+    build_reconstruction_weight_template,
     critic_wgan_loss,
     generator_wgan_loss,
     gradient_penalty,
@@ -34,6 +35,7 @@ from .losses import (
     parameter_count,
     reconstruction_loss,
     strike_smoothness_penalty,
+    weighted_surface_mae,
 )
 from .models import FilmWGANCritic, FilmWGANGenerator, reconstruct_future_surface
 from .training_plots import plot_training_curves
@@ -70,6 +72,10 @@ class FilmWGANTrainer(BaseTrainer):
         self.generator_scheduler: Optional[CosineAnnealingLR] = None
         self.critic_scheduler: Optional[CosineAnnealingLR] = None
         self.normalization = None
+        self._strike_grid: Optional[torch.Tensor] = None
+        self._maturity_days_grid: Optional[torch.Tensor] = None
+        self._recon_weights_surface: Optional[torch.Tensor] = None
+        self._recon_weights_flat: Optional[torch.Tensor] = None
         self._disc_step_count: int = 0
         self._gp_warmup_steps: int = 200
         self._grad_clip: float = 5.0
@@ -115,6 +121,17 @@ class FilmWGANTrainer(BaseTrainer):
         self.logger.info("Loading merged-vol workbook from %s (%s)", self.config.data_path, self.config.sheet_name)
         self.bundle = create_train_val_bundle(self.config)
         self.normalization = normalization_stats_to_tensors(self.bundle.normalization_stats, self.device)
+        self._strike_grid = torch.tensor(self.bundle.strike_grid, dtype=torch.float32, device=self.device)
+        self._maturity_days_grid = torch.tensor(self.bundle.maturity_days_grid, dtype=torch.float32, device=self.device)
+        self._recon_weights_surface = build_reconstruction_weight_template(
+            strike_grid=self._strike_grid,
+            maturity_days_grid=self._maturity_days_grid,
+            mode=self.config.recon_weight_mode,
+            atm_range=float(self.config.recon_atm_range),
+            short_end_max_days=float(self.config.recon_atm_short_end_max_days),
+            atm_multiplier=float(self.config.recon_atm_multiplier),
+        )
+        self._recon_weights_flat = self._recon_weights_surface.reshape(-1)
         surface_height, surface_width = self.bundle.surface_shape
         self.generator = FilmWGANGenerator(
             surface_height=surface_height,
@@ -169,6 +186,13 @@ class FilmWGANTrainer(BaseTrainer):
             "Model initialized: G params=%s, C params=%s",
             parameter_count(self.generator.parameters()),
             parameter_count(self.critic.parameters()),
+        )
+        self.logger.info(
+            "Reconstruction weighting: mode=%s atm_range=%.4f short_end_max_days=%.1f atm_multiplier=%.3f",
+            str(self.config.recon_weight_mode),
+            float(self.config.recon_atm_range),
+            float(self.config.recon_atm_short_end_max_days),
+            float(self.config.recon_atm_multiplier),
         )
 
     def _discriminator_step(
@@ -236,9 +260,9 @@ class FilmWGANTrainer(BaseTrainer):
         assert self.generator_optimizer is not None
         assert self.bundle is not None
         assert self.normalization is not None
-
-        strike_grid = torch.tensor(self.bundle.strike_grid, dtype=torch.float32, device=self.device)
-        maturity_days_grid = torch.tensor(self.bundle.maturity_days_grid, dtype=torch.float32, device=self.device)
+        assert self._strike_grid is not None
+        assert self._maturity_days_grid is not None
+        assert self._recon_weights_flat is not None
 
         self.generator_optimizer.zero_grad(set_to_none=True)
         noise = torch.randn(current_features.size(0), int(self.config.noise_dim), device=self.device, dtype=torch.float32)
@@ -255,13 +279,14 @@ class FilmWGANTrainer(BaseTrainer):
         future_surface_level = fake_future_flat.view(current_features.size(0), self.bundle.surface_shape[0], self.bundle.surface_shape[1])
         future_log_surface = torch.log(torch.clamp(future_surface_level, min=1e-4))
         adv_loss = generator_wgan_loss(fake_scores)
-        calendar_penalty = calendar_arbitrage_penalty(future_surface_level, strike_grid, maturity_days_grid).mean()
-        butterfly_penalty = butterfly_arbitrage_penalty(future_surface_level, strike_grid, maturity_days_grid).mean()
-        smooth_penalty = strike_smoothness_penalty(future_log_surface, strike_grid) + maturity_smoothness_penalty(
+        calendar_penalty = calendar_arbitrage_penalty(future_surface_level, self._strike_grid, self._maturity_days_grid).mean()
+        butterfly_penalty = butterfly_arbitrage_penalty(future_surface_level, self._strike_grid, self._maturity_days_grid).mean()
+        smooth_penalty = strike_smoothness_penalty(future_log_surface, self._strike_grid) + maturity_smoothness_penalty(
             future_log_surface,
-            maturity_days_grid,
+            self._maturity_days_grid,
         )
         recon_penalty = reconstruction_loss(fake_future_flat, target_flat)
+        recon_penalty_weighted = weighted_surface_mae(fake_future_flat, target_flat, self._recon_weights_flat)
 
         total_loss = adv_loss
         if self.config.use_calendar_constraint:
@@ -271,7 +296,7 @@ class FilmWGANTrainer(BaseTrainer):
         if self.config.use_smooth_constraint:
             total_loss = total_loss + float(self.config.lambda_smooth) * smooth_penalty
         if self.config.use_recon_constraint:
-            total_loss = total_loss + float(self.config.lambda_recon) * recon_penalty
+            total_loss = total_loss + float(self.config.lambda_recon) * recon_penalty_weighted
         total_loss.backward()
         if torch.isfinite(total_loss):
             torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=self._grad_clip)
@@ -286,24 +311,27 @@ class FilmWGANTrainer(BaseTrainer):
             "g_butterfly": float(butterfly_penalty.detach().cpu()),
             "g_smooth": float(smooth_penalty.detach().cpu()),
             "g_recon": float(recon_penalty.detach().cpu()),
+            "g_recon_weighted": float(recon_penalty_weighted.detach().cpu()),
         }
 
     def _evaluate(self) -> dict[str, float]:
         assert self.bundle is not None
         assert self.generator is not None
         assert self.normalization is not None
+        assert self._strike_grid is not None
+        assert self._maturity_days_grid is not None
+        assert self._recon_weights_surface is not None
 
         if not self.bundle.val_items:
             return {}
-
-        strike_grid = torch.tensor(self.bundle.strike_grid, dtype=torch.float32, device=self.device)
-        maturity_days_grid = torch.tensor(self.bundle.maturity_days_grid, dtype=torch.float32, device=self.device)
 
         self.generator.eval()
         mae: list[float] = []
         rmse: list[float] = []
         current_mae: list[float] = []
         current_rmse: list[float] = []
+        short_atm_weighted_mae: list[float] = []
+        current_short_atm_weighted_mae: list[float] = []
         win_flags: list[float] = []
         generated_current_mae: list[float] = []
         real_current_mae: list[float] = []
@@ -339,23 +367,43 @@ class FilmWGANTrainer(BaseTrainer):
             current_rmse.append(float(payload["current_metrics"]["rmse"]))
             generated_current_mae.append(float(payload["generated_current_metrics"]["mae"]))
             real_current_mae.append(float(payload["current_metrics"]["mae"]))
+            generated_surface = torch.tensor(payload["generated_surface"], dtype=torch.float32, device=self.device)
+            current_surface = torch.tensor(payload["current_surface"], dtype=torch.float32, device=self.device)
+            target_surface = torch.tensor(payload["target_surface"], dtype=torch.float32, device=self.device)
+            short_atm_weighted_mae.append(
+                float(weighted_surface_mae(generated_surface, target_surface, self._recon_weights_surface).detach().cpu())
+            )
+            current_short_atm_weighted_mae.append(
+                float(weighted_surface_mae(current_surface, target_surface, self._recon_weights_surface).detach().cpu())
+            )
             win_flags.append(1.0 if float(payload["metrics"]["mae"]) < float(payload["current_metrics"]["mae"]) else 0.0)
             penalty_mean.append(float(payload["penalty_mean"]))
             penalty_std.append(float(payload["penalty_std"]))
             weight_entropy.append(float(payload["weight_entropy"]))
 
-            weighted_surface = torch.tensor(payload["generated_surface"], dtype=torch.float32, device=self.device).unsqueeze(0)
-            calendar.extend(calendar_arbitrage_penalty(weighted_surface, strike_grid, maturity_days_grid).detach().cpu().tolist())
-            butterfly.extend(butterfly_arbitrage_penalty(weighted_surface, strike_grid, maturity_days_grid).detach().cpu().tolist())
+            weighted_surface = generated_surface.unsqueeze(0)
+            calendar.extend(
+                calendar_arbitrage_penalty(weighted_surface, self._strike_grid, self._maturity_days_grid).detach().cpu().tolist()
+            )
+            butterfly.extend(
+                butterfly_arbitrage_penalty(weighted_surface, self._strike_grid, self._maturity_days_grid).detach().cpu().tolist()
+            )
 
         self.generator.train()
         val_mae = float(np.mean(mae)) if mae else 0.0
         val_current_mae = float(np.mean(current_mae)) if current_mae else 0.0
+        val_short_atm_weighted_mae = float(np.mean(short_atm_weighted_mae)) if short_atm_weighted_mae else 0.0
+        val_current_short_atm_weighted_mae = (
+            float(np.mean(current_short_atm_weighted_mae)) if current_short_atm_weighted_mae else 0.0
+        )
         return {
             "val_mae": val_mae,
             "val_rmse": float(np.mean(rmse)) if rmse else 0.0,
             "val_current_mae": val_current_mae,
             "val_current_rmse": float(np.mean(current_rmse)) if current_rmse else 0.0,
+            "val_short_atm_weighted_mae": val_short_atm_weighted_mae,
+            "val_current_short_atm_weighted_mae": val_current_short_atm_weighted_mae,
+            "val_short_atm_mae_gap_vs_current": val_short_atm_weighted_mae - val_current_short_atm_weighted_mae,
             "val_mae_gap_vs_current": val_mae - val_current_mae,
             "val_win_rate_vs_current": float(np.mean(win_flags)) if win_flags else 0.0,
             "val_generated_current_mae": float(np.mean(generated_current_mae)) if generated_current_mae else 0.0,
@@ -430,6 +478,7 @@ class FilmWGANTrainer(BaseTrainer):
                 "g_butterfly": [],
                 "g_smooth": [],
                 "g_recon": [],
+                "g_recon_weighted": [],
             }
             for current_features, text_features, _real_delta_norm, current_flat, target_flat in self.bundle.train_loader:
                 current_features = self._to_device(current_features)
@@ -458,6 +507,7 @@ class FilmWGANTrainer(BaseTrainer):
                 "g_butterfly": float(np.mean(running["g_butterfly"])) if running["g_butterfly"] else 0.0,
                 "g_smooth": float(np.mean(running["g_smooth"])) if running["g_smooth"] else 0.0,
                 "g_recon": float(np.mean(running["g_recon"])) if running["g_recon"] else 0.0,
+                "g_recon_weighted": float(np.mean(running["g_recon_weighted"])) if running["g_recon_weighted"] else 0.0,
             }
             row.update(self._evaluate())
             if self.generator_scheduler is not None:
@@ -485,13 +535,14 @@ class FilmWGANTrainer(BaseTrainer):
                 save_checkpoint(self.checkpoints_dir / f"film_wgan_epoch_{epoch:04d}.pt", self._checkpoint_payload())
 
             self.logger.info(
-                "epoch=%s g_total=%.6f d_total=%.6f val_mae=%.6f val_current_mae=%.6f gap=%.6f win_rate=%.3f",
+                "epoch=%s g_total=%.6f d_total=%.6f val_mae=%.6f val_current_mae=%.6f gap=%.6f short_atm_gap=%.6f win_rate=%.3f",
                 epoch,
                 row["g_total"],
                 row["d_total"],
                 row.get("val_mae", 0.0),
                 row.get("val_current_mae", 0.0),
                 row.get("val_mae_gap_vs_current", 0.0),
+                row.get("val_short_atm_mae_gap_vs_current", 0.0),
                 row.get("val_win_rate_vs_current", 0.0),
             )
 

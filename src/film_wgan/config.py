@@ -53,6 +53,10 @@ class FilmWGANTrainConfig:
     lambda_butterfly: float = 2.0
     lambda_smooth: float = 0.1
     lambda_recon: float = 0.0
+    recon_weight_mode: str = "uniform"
+    recon_atm_range: float = 0.08
+    recon_atm_short_end_max_days: float = 90.0
+    recon_atm_multiplier: float = 3.0
     use_calendar_constraint: bool = True
     use_butterfly_constraint: bool = True
     use_smooth_constraint: bool = True
