@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Type, TypeVar
 
@@ -74,6 +74,7 @@ class FilmWGANTrainConfig:
     eval_reweight_beta: float = 25.0
     eval_aggregation_mode: str = "weighted_mean"
     checkpoint_metric: str = "val_mae_gap_vs_current"
+    extra_checkpoint_metrics: list[str] = field(default_factory=list)
     checkpoint_warmup_epochs: int = 10
 
     use_early_stopping: bool = False

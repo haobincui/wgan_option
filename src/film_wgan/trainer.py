@@ -511,6 +511,47 @@ class FilmWGANTrainer(BaseTrainer):
         assert self.checkpoints_dir is not None
         assert self.metrics_dir is not None
 
+        primary_metric = str(self.config.checkpoint_metric).strip() or "val_mae_gap_vs_current"
+        configured_extra_metrics: list[str] = []
+        seen_metrics = {primary_metric}
+        for raw_metric in getattr(self.config, "extra_checkpoint_metrics", ()) or ():
+            metric_name = str(raw_metric).strip()
+            if not metric_name or metric_name in seen_metrics:
+                continue
+            configured_extra_metrics.append(metric_name)
+            seen_metrics.add(metric_name)
+
+        summary_metrics: list[str] = []
+        for metric_name in [
+            primary_metric,
+            "val_mae_gap_vs_current",
+            "val_short_atm_mae_gap_vs_current",
+            "val_atm_short_pure_mae_gap_vs_current",
+            *configured_extra_metrics,
+        ]:
+            if metric_name and metric_name not in summary_metrics:
+                summary_metrics.append(metric_name)
+
+        extra_checkpoint_paths = {
+            metric_name: self.checkpoints_dir / f"film_wgan_best_{metric_name}.pt"
+            for metric_name in configured_extra_metrics
+        }
+        metric_summary: dict[str, dict[str, object]] = {}
+        for metric_name in summary_metrics:
+            tracking_mode = "summary_only"
+            if metric_name == primary_metric:
+                tracking_mode = "primary"
+            elif metric_name in configured_extra_metrics:
+                tracking_mode = "extra"
+            metric_summary[metric_name] = {
+                "best_epoch": 0,
+                "best_value": None,
+                "checkpoint_path": "",
+                "tracking_mode": tracking_mode,
+                "is_primary": metric_name == primary_metric,
+                "is_extra": metric_name in configured_extra_metrics,
+            }
+
         metrics_rows: list[dict[str, float]] = []
         best_metric = float("inf")
         best_epoch = 0
@@ -538,7 +579,7 @@ class FilmWGANTrainer(BaseTrainer):
                 "Early stopping enabled (patience=%d, min_delta=%.6f) on %s.",
                 early_stopping_patience,
                 early_stopping_min_delta,
-                str(self.config.checkpoint_metric),
+                primary_metric,
             )
 
         for epoch in range(1, int(self.config.num_epochs) + 1):
@@ -603,7 +644,7 @@ class FilmWGANTrainer(BaseTrainer):
             write_csv(self.metrics_dir / "training_metrics.csv", metrics_rows)
             self._save_loss_curves(metrics_rows)
 
-            monitor_name = str(self.config.checkpoint_metric).strip() or "val_mae_gap_vs_current"
+            monitor_name = primary_metric
             monitor_value = float(row.get(monitor_name, row.get("val_mae", row["g_total"])))
             if monitor_value < fallback_metric:
                 fallback_metric = monitor_value
@@ -627,6 +668,17 @@ class FilmWGANTrainer(BaseTrainer):
                     best_metric,
                     best_epoch,
                 )
+            if epoch > checkpoint_warmup_epochs:
+                for metric_name, summary in metric_summary.items():
+                    if metric_name not in row:
+                        continue
+                    metric_value = float(row[metric_name])
+                    current_best = summary["best_value"]
+                    if current_best is None or metric_value < float(current_best):
+                        summary["best_epoch"] = int(epoch)
+                        summary["best_value"] = float(metric_value)
+                        if summary["tracking_mode"] == "extra":
+                            save_checkpoint(extra_checkpoint_paths[metric_name], self._checkpoint_payload())
             if epoch % int(self.config.save_every) == 0:
                 save_checkpoint(self.checkpoints_dir / f"film_wgan_epoch_{epoch:04d}.pt", self._checkpoint_payload())
 
@@ -684,6 +736,22 @@ class FilmWGANTrainer(BaseTrainer):
                 "fallback_used": bool(fallback_used),
                 "early_stopped": bool(early_stopped),
                 "checkpoint_path": str(self.checkpoints_dir / "film_wgan_best.pt"),
+            },
+        )
+        primary_summary = metric_summary[primary_metric]
+        primary_summary["best_epoch"] = int(best_epoch)
+        primary_summary["best_value"] = float(best_metric)
+        primary_summary["checkpoint_path"] = str(self.checkpoints_dir / "film_wgan_best.pt")
+        for metric_name, summary in metric_summary.items():
+            if summary["tracking_mode"] == "extra" and int(summary["best_epoch"]) > 0:
+                summary["checkpoint_path"] = str(extra_checkpoint_paths[metric_name])
+        write_json(
+            self.metrics_dir / "best_metrics_summary.json",
+            {
+                "primary_metric": primary_metric,
+                "checkpoint_warmup_epochs": int(checkpoint_warmup_epochs),
+                "selection_start_epoch": int(selection_start_epoch),
+                "metrics": metric_summary,
             },
         )
         self.logger.info("Standalone FiLM WGAN training complete. Best epoch=%s best_metric=%.6f", best_epoch, best_metric)

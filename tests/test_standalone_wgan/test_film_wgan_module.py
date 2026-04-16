@@ -290,6 +290,28 @@ class TestFilmWGANConfiguration(unittest.TestCase):
         self.assertAlmostEqual(float(config.recon_atm_short_end_max_days), 90.0, places=6)
         self.assertAlmostEqual(float(config.recon_atm_multiplier), 3.0, places=6)
 
+    def test_extra_checkpoint_metrics_default_to_empty_and_load_from_yaml(self):
+        self.assertEqual(FilmWGANTrainConfig().extra_checkpoint_metrics, [])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = _write_yaml(
+                Path(tmpdir) / "film_extra_metrics.yaml",
+                {
+                    "training": {
+                        "extra_checkpoint_metrics": [
+                            "val_mae_gap_vs_current",
+                            "val_short_atm_mae_gap_vs_current",
+                        ]
+                    }
+                },
+            )
+            config = load_train_config(config_path)
+
+        self.assertEqual(
+            config.extra_checkpoint_metrics,
+            ["val_mae_gap_vs_current", "val_short_atm_mae_gap_vs_current"],
+        )
+
 
 class TestFilmWGANGenerateResultATMOutputs(unittest.TestCase):
     def test_extract_atm_short_value_uses_nearest_atm_and_shortest_maturity(self):
@@ -504,6 +526,176 @@ class TestFilmWGANTrainerMetrics(unittest.TestCase):
             self.assertIn("val_short_atm_mae_gap_vs_current", row)
             self.assertAlmostEqual(float(row["val_short_atm_mae_gap_vs_current"]), -0.03, places=6)
             self.assertTrue((run_dir / "checkpoints" / "film_wgan_best.pt").exists())
+
+    def test_trainer_tracks_extra_checkpoint_metrics_without_changing_primary_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "training" / "film_wgan"
+            config_path = _write_yaml(
+                Path(tmpdir) / "film_multi_metric.yaml",
+                {
+                    "training": {
+                        "data_path": str(Path(tmpdir) / "dummy.xlsx"),
+                        "sheet_name": "gan_input_ready",
+                        "text_embedding_mode": "lp",
+                        "train_ratio": 0.67,
+                        "min_samples_for_training": 2,
+                        "noise_dim": 4,
+                        "gen_base_channels": 8,
+                        "disc_base_channels": 8,
+                        "gen_res_blocks": 1,
+                        "disc_res_blocks": 1,
+                        "text_hidden_dim": 16,
+                        "text_out_dim": 8,
+                        "fusion_hidden_dim": 32,
+                        "num_epochs": 5,
+                        "batch_size": 1,
+                        "eval_mc_samples": 2,
+                        "cuda": False,
+                        "num_workers": 0,
+                        "output_root": str(output_root),
+                        "save_every": 20,
+                        "checkpoint_metric": "val_atm_short_pure_mae_gap_vs_current",
+                        "extra_checkpoint_metrics": [
+                            "val_mae_gap_vs_current",
+                            "val_short_atm_mae_gap_vs_current",
+                        ],
+                        "checkpoint_warmup_epochs": 0,
+                        "use_early_stopping": True,
+                        "early_stopping_patience": 1,
+                        "early_stopping_min_delta": 0.0,
+                    }
+                },
+            )
+
+            trainer = FilmWGANTrainer(load_train_config(config_path), config_path=str(config_path))
+
+            def fake_setup():
+                trainer.checkpoints_dir.mkdir(parents=True, exist_ok=True)
+                trainer.metrics_dir.mkdir(parents=True, exist_ok=True)
+                trainer.bundle = type(
+                    "Bundle",
+                    (),
+                    {
+                        "train_loader": [
+                            (
+                                torch.zeros((1, 1, 4, 4), dtype=torch.float32),
+                                torch.zeros((1, 3), dtype=torch.float32),
+                                torch.zeros((1, 16), dtype=torch.float32),
+                                torch.ones((1, 16), dtype=torch.float32),
+                                torch.ones((1, 16), dtype=torch.float32),
+                            )
+                        ]
+                    },
+                )()
+
+            eval_rows = [
+                {
+                    "val_mae": 0.20,
+                    "val_rmse": 0.21,
+                    "val_current_mae": 0.30,
+                    "val_current_rmse": 0.31,
+                    "val_short_atm_weighted_mae": 0.18,
+                    "val_current_short_atm_weighted_mae": 0.38,
+                    "val_short_atm_mae_gap_vs_current": -0.20,
+                    "val_atm_short_pure_mae": 0.15,
+                    "val_current_atm_short_pure_mae": 0.55,
+                    "val_atm_short_pure_mae_gap_vs_current": -0.40,
+                    "val_atm_short_win_rate_vs_current": 0.60,
+                    "val_mae_gap_vs_current": -0.10,
+                    "val_win_rate_vs_current": 0.60,
+                    "val_generated_current_mae": 0.10,
+                    "val_real_current_mae": 0.30,
+                    "val_calendar": 0.0,
+                    "val_butterfly": 0.0,
+                    "val_penalty_mean": 0.0,
+                    "val_penalty_std": 0.0,
+                    "val_weight_entropy": 1.0,
+                },
+                {
+                    "val_mae": 0.10,
+                    "val_rmse": 0.12,
+                    "val_current_mae": 0.60,
+                    "val_current_rmse": 0.61,
+                    "val_short_atm_weighted_mae": 0.12,
+                    "val_current_short_atm_weighted_mae": 0.72,
+                    "val_short_atm_mae_gap_vs_current": -0.60,
+                    "val_atm_short_pure_mae": 0.25,
+                    "val_current_atm_short_pure_mae": 0.55,
+                    "val_atm_short_pure_mae_gap_vs_current": -0.30,
+                    "val_atm_short_win_rate_vs_current": 0.50,
+                    "val_mae_gap_vs_current": -0.50,
+                    "val_win_rate_vs_current": 0.70,
+                    "val_generated_current_mae": 0.12,
+                    "val_real_current_mae": 0.60,
+                    "val_calendar": 0.0,
+                    "val_butterfly": 0.0,
+                    "val_penalty_mean": 0.0,
+                    "val_penalty_std": 0.0,
+                    "val_weight_entropy": 1.0,
+                },
+            ]
+
+            with patch.object(trainer, "setup", side_effect=fake_setup), \
+                patch.object(
+                    trainer,
+                    "_discriminator_step",
+                    return_value={"d_total": 0.0, "d_real": 0.0, "d_fake": 0.0, "gp": 0.0},
+                ), \
+                patch.object(
+                    trainer,
+                    "_generator_step",
+                    return_value={
+                        "g_total": 0.0,
+                        "g_adv": 0.0,
+                        "g_adv_effective_lambda": 0.0,
+                        "g_calendar": 0.0,
+                        "g_butterfly": 0.0,
+                        "g_smooth": 0.0,
+                        "g_recon": 0.0,
+                        "g_recon_weighted": 0.0,
+                        "g_atm_short": 0.0,
+                    },
+                ), \
+                patch.object(trainer, "_evaluate", side_effect=eval_rows), \
+                patch.object(trainer, "_save_loss_curves", return_value=None), \
+                patch.object(trainer, "_checkpoint_payload", return_value={"state": "ok"}):
+                trainer.train()
+
+            run_dir = next(path for path in output_root.iterdir() if path.is_dir())
+            checkpoints_dir = run_dir / "checkpoints"
+            metrics_dir = run_dir / "metrics"
+
+            best_checkpoint = json.loads((metrics_dir / "best_checkpoint.json").read_text(encoding="utf-8"))
+            self.assertEqual(best_checkpoint["checkpoint_metric"], "val_atm_short_pure_mae_gap_vs_current")
+            self.assertEqual(int(best_checkpoint["best_epoch"]), 1)
+            self.assertAlmostEqual(float(best_checkpoint["best_metric"]), -0.40, places=6)
+            self.assertTrue(bool(best_checkpoint["early_stopped"]))
+
+            best_metrics_summary = json.loads((metrics_dir / "best_metrics_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(best_metrics_summary["primary_metric"], "val_atm_short_pure_mae_gap_vs_current")
+            primary_summary = best_metrics_summary["metrics"]["val_atm_short_pure_mae_gap_vs_current"]
+            overall_summary = best_metrics_summary["metrics"]["val_mae_gap_vs_current"]
+            short_atm_summary = best_metrics_summary["metrics"]["val_short_atm_mae_gap_vs_current"]
+
+            self.assertEqual(int(primary_summary["best_epoch"]), 1)
+            self.assertAlmostEqual(float(primary_summary["best_value"]), -0.40, places=6)
+            self.assertEqual(primary_summary["tracking_mode"], "primary")
+            self.assertTrue(bool(primary_summary["is_primary"]))
+            self.assertFalse(bool(primary_summary["is_extra"]))
+
+            self.assertEqual(int(overall_summary["best_epoch"]), 2)
+            self.assertAlmostEqual(float(overall_summary["best_value"]), -0.50, places=6)
+            self.assertEqual(overall_summary["tracking_mode"], "extra")
+            self.assertFalse(bool(overall_summary["is_primary"]))
+            self.assertTrue(bool(overall_summary["is_extra"]))
+
+            self.assertEqual(int(short_atm_summary["best_epoch"]), 2)
+            self.assertAlmostEqual(float(short_atm_summary["best_value"]), -0.60, places=6)
+            self.assertEqual(short_atm_summary["tracking_mode"], "extra")
+
+            self.assertTrue((checkpoints_dir / "film_wgan_best.pt").exists())
+            self.assertTrue((checkpoints_dir / "film_wgan_best_val_mae_gap_vs_current.pt").exists())
+            self.assertTrue((checkpoints_dir / "film_wgan_best_val_short_atm_mae_gap_vs_current.pt").exists())
 
 
 class TestFilmWGANInitializationSmoke(unittest.TestCase):

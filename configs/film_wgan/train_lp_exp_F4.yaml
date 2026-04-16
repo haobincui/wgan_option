@@ -1,0 +1,88 @@
+training:
+  data_path: data/processed/svi-excel/20260410-174929/merged_vol.xlsx
+  sheet_name: gan_input_ready
+  text_embedding_mode: lp
+  train_ratio: 0.8
+  min_samples_for_training: 2
+
+  normalize_current_surface: true
+  normalize_target_delta: true
+  normalize_text_embedding: true
+
+  noise_dim: 128
+  gen_base_channels: 112
+  disc_base_channels: 112
+  gen_res_blocks: 4
+  disc_res_blocks: 2
+  text_hidden_dim: 768
+  text_out_dim: 384
+  fusion_hidden_dim: 2048
+
+  learning_rate: 2e-5
+  generator_learning_rate: 2e-5
+  discriminator_learning_rate: 1e-5
+  beta_1: 0.5
+  beta_2: 0.9
+  critic_iter: 5
+  lambda_gp: 20.0
+  num_epochs: 30
+  batch_size: 128
+
+  lambda_adv: 0.05
+  adv_warmup_epochs: 10
+
+  lambda_calendar: 1.0
+  lambda_butterfly: 1.0
+  lambda_smooth: 0.1
+  lambda_recon: 20.0
+  recon_weight_mode: short_atm_band
+  recon_atm_range: 0.06
+  recon_atm_short_end_max_days: 90.0
+  recon_atm_multiplier: 8.0
+  use_calendar_constraint: true
+  use_butterfly_constraint: true
+  use_smooth_constraint: true
+  use_recon_constraint: true
+
+  use_atm_short_loss: true
+  lambda_atm_short: 50.0
+  atm_short_range: 0.04
+  atm_short_max_days: 60.0
+
+  eval_mc_samples: 32
+  eval_reweight_beta_mode: fixed
+  eval_reweight_beta: 10.0
+  eval_aggregation_mode: weighted_mean
+
+  checkpoint_metric: val_atm_short_pure_mae_gap_vs_current
+  extra_checkpoint_metrics:
+    - val_mae_gap_vs_current
+    - val_short_atm_mae_gap_vs_current
+  checkpoint_warmup_epochs: 5
+
+  use_early_stopping: true
+  early_stopping_patience: 7
+  early_stopping_min_delta: 0.0
+
+  seed: 42
+  cuda: true
+  num_workers: 0
+
+  output_root: ""
+  save_every: 5
+
+generate_result:
+  mc_samples: 64
+  reweight_beta_mode: fixed
+  reweight_beta: 10.0
+  quantiles:
+    - 0.05
+    - 0.5
+    - 0.95
+  split: val
+  selection_mode: all
+  selection_count: 0
+  aggregation_mode: weighted_mean
+  output_dir: ""
+  save_json: true
+  save_plots: true
