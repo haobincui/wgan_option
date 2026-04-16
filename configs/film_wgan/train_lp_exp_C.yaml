@@ -19,23 +19,23 @@ training:
   fusion_hidden_dim: 2048
 
   learning_rate: 1e-5
-  generator_learning_rate: 2e-5
-  discriminator_learning_rate: 1e-5
+  generator_learning_rate: 1e-5
+  discriminator_learning_rate: 2e-5
   beta_1: 0.5
   beta_2: 0.9
-  critic_iter: 5
-  lambda_gp: 10.0
-  num_epochs: 220
-  batch_size: 192
+  critic_iter: 3
+  lambda_gp: 20.0
+  num_epochs: 60
+  batch_size: 128
 
   lambda_calendar: 1.0
   lambda_butterfly: 1.0
   lambda_smooth: 0.1
-  lambda_recon: 2.0
+  lambda_recon: 20.0
   recon_weight_mode: short_atm_band
-  recon_atm_range: 0.08
+  recon_atm_range: 0.06
   recon_atm_short_end_max_days: 90.0
-  recon_atm_multiplier: 3.0
+  recon_atm_multiplier: 8.0
   use_calendar_constraint: true
   use_butterfly_constraint: true
   use_smooth_constraint: true
@@ -45,8 +45,8 @@ training:
   eval_reweight_beta_mode: fixed
   eval_reweight_beta: 25.0
   eval_aggregation_mode: weighted_mean
-  checkpoint_metric: val_mae_gap_vs_current
-  checkpoint_warmup_epochs: 10
+  checkpoint_metric: val_short_atm_mae_gap_vs_current
+  checkpoint_warmup_epochs: 8
 
   seed: 42
   cuda: true

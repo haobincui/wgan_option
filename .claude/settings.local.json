@@ -45,7 +45,23 @@
       "Bash(python -m pytest tests/test_scripts/test_generate_result.py tests/test_scripts/test_train_xlsx.py -x -q)",
       "Bash(python -m pytest tests/ -q --ignore=tests/test_argument_order_hygiene.py --ignore=tests/test_scripts/test_build_ty_plus_trade_tables.py)",
       "Bash(python -m pytest tests/test_scripts/test_merge_file.py tests/test_scripts/test_merge_vol.py -x -q)",
-      "Bash(ls /home/haobin_cui/research_files_space_2/wgan_option-svi-speedup-cnn-wgan-opt/run_*wgan*.sh /home/haobin_cui/research_files_space_2/wgan_option-svi-speedup-cnn-wgan-opt/run_*volgan*.sh)"
+      "Bash(ls /home/haobin_cui/research_files_space_2/wgan_option-svi-speedup-cnn-wgan-opt/run_*wgan*.sh /home/haobin_cui/research_files_space_2/wgan_option-svi-speedup-cnn-wgan-opt/run_*volgan*.sh)",
+      "Bash(wc -l /home/haobin_cui/research_files_space_2/wgan_option/outputs/training/cnn_wgan/svi-excel/*/metrics/training_metrics.csv)",
+      "Bash(ls -la /home/haobin_cui/research_files_space_2/wgan_option/outputs/training/cnn_wgan/svi-excel/20260412_*/metrics/)",
+      "Bash(cat)",
+      "Read(//tmp/**)",
+      "Bash(python -c ':*)",
+      "Bash(ls -d /home/haobin_cui/research_files_space_2/wgan_option/outputs/training/transformer_wgan/svi-excel/*/)",
+      "Bash(ls -d /home/haobin_cui/research_files_space_2/wgan_option/outputs/training/volgan/svi-excel/*/)",
+      "Bash(python3 -c ':*)",
+      "Bash(PYTHONPATH=src:. python -c \"from film_wgan import FilmWGANTrainer; print\\('film_wgan import OK'\\)\")",
+      "Bash(PYTHONPATH=src:. python -c \"from crossattn_wgan import CrossAttnWGANTrainer; print\\('crossattn_wgan import OK'\\)\")",
+      "Bash(awk -F',' 'NR==1 || NR==2 || NR==6 || NR==11 || NR==13 || NR==21 || NR==51 || NR==101 || NR==151 || NR==201 || NR==221' /home/haobin_cui/research_files_space_2/wgan_option/outputs/training/stylemod_wgan/svi-excel/20260414_121456/metrics/training_metrics.csv)",
+      "Bash(chmod +x /home/haobin_cui/research_files_space_2/wgan_option/run_film_wgan_svi_excel.sh)",
+      "Bash([ -f \"$d/metrics/best_checkpoint.json\" ])",
+      "Bash(ls /home/haobin_cui/research_files_space_2/wgan_option/run_*.sh)",
+      "Bash(chmod +x /home/haobin_cui/research_files_space_2/wgan_option/run_crossattn_wgan_svi_excel.sh)",
+      "Bash(python3 -c ' *)"
     ]
   }
 }

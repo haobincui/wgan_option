@@ -25,13 +25,13 @@ training:
   beta_2: 0.9
   critic_iter: 5
   lambda_gp: 10.0
-  num_epochs: 220
-  batch_size: 192
+  num_epochs: 60
+  batch_size: 128
 
   lambda_calendar: 1.0
   lambda_butterfly: 1.0
   lambda_smooth: 0.1
-  lambda_recon: 2.0
+  lambda_recon: 20.0
   recon_weight_mode: short_atm_band
   recon_atm_range: 0.08
   recon_atm_short_end_max_days: 90.0
@@ -46,7 +46,7 @@ training:
   eval_reweight_beta: 25.0
   eval_aggregation_mode: weighted_mean
   checkpoint_metric: val_mae_gap_vs_current
-  checkpoint_warmup_epochs: 10
+  checkpoint_warmup_epochs: 8
 
   seed: 42
   cuda: true
