@@ -71,6 +71,8 @@ class GenerateResultConfig:
     save_plots: bool = True
     save_json: bool = True
     plot_style: str = "heatmap_diff"
+    timeseries_atm_range: float = 0.08
+    timeseries_short_end_max_days: float = 10.0
 
     # Fixed-grid reconstruction for SVI
     strike_bins: int = DEFAULT_STRIKE_BINS

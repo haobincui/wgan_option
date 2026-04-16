@@ -139,5 +139,44 @@ def reconstruction_loss(fake_future_flat: torch.Tensor, target_flat: torch.Tenso
     return torch.nn.functional.l1_loss(fake_future_flat, target_flat)
 
 
+def build_atm_short_mask(
+    *,
+    strike_grid: torch.Tensor,
+    maturity_days_grid: torch.Tensor,
+    atm_range: float,
+    max_days: float,
+) -> torch.Tensor:
+    if float(atm_range) < 0.0:
+        raise ValueError(f"atm_short_range must be non-negative, got {atm_range}")
+    if float(max_days) <= 0.0:
+        raise ValueError(f"atm_short_max_days must be positive, got {max_days}")
+    strike_grid = strike_grid.reshape(-1)
+    maturity_days_grid = maturity_days_grid.reshape(-1)
+    strike_mask = torch.abs(strike_grid - 1.0) <= float(atm_range) + 1e-6
+    maturity_mask = maturity_days_grid <= float(max_days) + 1e-6
+    mask = (maturity_mask.view(-1, 1) & strike_mask.view(1, -1)).to(dtype=strike_grid.dtype)
+    return mask
+
+
+def atm_short_pure_mae(predicted: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Unnormalised MAE over the short-maturity × ATM mask (no dilution from non-masked cells)."""
+    if predicted.shape != target.shape:
+        raise ValueError(f"predicted and target must share the same shape, got {predicted.shape} vs {target.shape}")
+    expanded_mask = _expand_weights_to_match(predicted, mask)
+    abs_error = torch.abs(predicted - target)
+    if abs_error.dim() == 0:
+        denom = torch.clamp(expanded_mask, min=1e-12)
+        return abs_error * expanded_mask / denom
+    has_explicit_batch = predicted.dim() == mask.dim() + 1
+    masked = abs_error * expanded_mask
+    if not has_explicit_batch:
+        return masked.sum() / torch.clamp(expanded_mask.sum(), min=1e-12)
+    per_sample = masked.reshape(abs_error.shape[0], -1).sum(dim=1) / torch.clamp(
+        expanded_mask.reshape(abs_error.shape[0], -1).sum(dim=1),
+        min=1e-12,
+    )
+    return per_sample.mean()
+
+
 def parameter_count(parameters: Iterable[torch.nn.Parameter]) -> int:
     return int(sum(parameter.numel() for parameter in parameters if parameter.requires_grad))

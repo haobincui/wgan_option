@@ -27,6 +27,8 @@ from .data import FilmWGANDataBundle, create_train_val_bundle, denormalize_tenso
 from .inference import FilmWGANSampler, build_sample_payload, normalization_stats_to_tensors
 from .io import config_payload, save_checkpoint, write_csv, write_json
 from .losses import (
+    atm_short_pure_mae,
+    build_atm_short_mask,
     build_reconstruction_weight_template,
     critic_wgan_loss,
     generator_wgan_loss,
@@ -76,6 +78,9 @@ class FilmWGANTrainer(BaseTrainer):
         self._maturity_days_grid: Optional[torch.Tensor] = None
         self._recon_weights_surface: Optional[torch.Tensor] = None
         self._recon_weights_flat: Optional[torch.Tensor] = None
+        self._atm_short_mask_surface: Optional[torch.Tensor] = None
+        self._atm_short_mask_flat: Optional[torch.Tensor] = None
+        self._current_epoch: int = 0
         self._disc_step_count: int = 0
         self._gp_warmup_steps: int = 200
         self._grad_clip: float = 5.0
@@ -132,6 +137,13 @@ class FilmWGANTrainer(BaseTrainer):
             atm_multiplier=float(self.config.recon_atm_multiplier),
         )
         self._recon_weights_flat = self._recon_weights_surface.reshape(-1)
+        self._atm_short_mask_surface = build_atm_short_mask(
+            strike_grid=self._strike_grid,
+            maturity_days_grid=self._maturity_days_grid,
+            atm_range=float(self.config.atm_short_range),
+            max_days=float(self.config.atm_short_max_days),
+        )
+        self._atm_short_mask_flat = self._atm_short_mask_surface.reshape(-1)
         surface_height, surface_width = self.bundle.surface_shape
         self.generator = FilmWGANGenerator(
             surface_height=surface_height,
@@ -193,6 +205,21 @@ class FilmWGANTrainer(BaseTrainer):
             float(self.config.recon_atm_range),
             float(self.config.recon_atm_short_end_max_days),
             float(self.config.recon_atm_multiplier),
+        )
+        atm_short_cells = int(self._atm_short_mask_surface.sum().item()) if self._atm_short_mask_surface is not None else 0
+        self.logger.info(
+            "ATM-short pure loss: enabled=%s lambda=%.4f range=%.4f max_days=%.1f cells=%d/%d",
+            bool(self.config.use_atm_short_loss),
+            float(self.config.lambda_atm_short),
+            float(self.config.atm_short_range),
+            float(self.config.atm_short_max_days),
+            atm_short_cells,
+            surface_height * surface_width,
+        )
+        self.logger.info(
+            "Adversarial weighting: lambda_adv=%.4f adv_warmup_epochs=%d",
+            float(self.config.lambda_adv),
+            int(self.config.adv_warmup_epochs),
         )
 
     def _discriminator_step(
@@ -287,8 +314,18 @@ class FilmWGANTrainer(BaseTrainer):
         )
         recon_penalty = reconstruction_loss(fake_future_flat, target_flat)
         recon_penalty_weighted = weighted_surface_mae(fake_future_flat, target_flat, self._recon_weights_flat)
+        if self.config.use_atm_short_loss and self._atm_short_mask_flat is not None:
+            atm_short_penalty = atm_short_pure_mae(fake_future_flat, target_flat, self._atm_short_mask_flat)
+        else:
+            atm_short_penalty = torch.zeros((), device=fake_future_flat.device, dtype=fake_future_flat.dtype)
 
-        total_loss = adv_loss
+        adv_warmup_epochs = max(0, int(self.config.adv_warmup_epochs))
+        if self._current_epoch <= adv_warmup_epochs:
+            effective_lambda_adv = 0.0
+        else:
+            effective_lambda_adv = float(self.config.lambda_adv)
+
+        total_loss = effective_lambda_adv * adv_loss
         if self.config.use_calendar_constraint:
             total_loss = total_loss + float(self.config.lambda_calendar) * calendar_penalty
         if self.config.use_butterfly_constraint:
@@ -297,6 +334,8 @@ class FilmWGANTrainer(BaseTrainer):
             total_loss = total_loss + float(self.config.lambda_smooth) * smooth_penalty
         if self.config.use_recon_constraint:
             total_loss = total_loss + float(self.config.lambda_recon) * recon_penalty_weighted
+        if self.config.use_atm_short_loss:
+            total_loss = total_loss + float(self.config.lambda_atm_short) * atm_short_penalty
         total_loss.backward()
         if torch.isfinite(total_loss):
             torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=self._grad_clip)
@@ -307,11 +346,13 @@ class FilmWGANTrainer(BaseTrainer):
         return {
             "g_total": float(total_loss.detach().cpu()),
             "g_adv": float(adv_loss.detach().cpu()),
+            "g_adv_effective_lambda": float(effective_lambda_adv),
             "g_calendar": float(calendar_penalty.detach().cpu()),
             "g_butterfly": float(butterfly_penalty.detach().cpu()),
             "g_smooth": float(smooth_penalty.detach().cpu()),
             "g_recon": float(recon_penalty.detach().cpu()),
             "g_recon_weighted": float(recon_penalty_weighted.detach().cpu()),
+            "g_atm_short": float(atm_short_penalty.detach().cpu()),
         }
 
     def _evaluate(self) -> dict[str, float]:
@@ -332,6 +373,9 @@ class FilmWGANTrainer(BaseTrainer):
         current_rmse: list[float] = []
         short_atm_weighted_mae: list[float] = []
         current_short_atm_weighted_mae: list[float] = []
+        atm_short_pure_list: list[float] = []
+        current_atm_short_pure_list: list[float] = []
+        atm_short_win_flags: list[float] = []
         win_flags: list[float] = []
         generated_current_mae: list[float] = []
         real_current_mae: list[float] = []
@@ -376,6 +420,16 @@ class FilmWGANTrainer(BaseTrainer):
             current_short_atm_weighted_mae.append(
                 float(weighted_surface_mae(current_surface, target_surface, self._recon_weights_surface).detach().cpu())
             )
+            if self._atm_short_mask_surface is not None and float(self._atm_short_mask_surface.sum().item()) > 0.0:
+                gen_atm_pure = float(
+                    atm_short_pure_mae(generated_surface, target_surface, self._atm_short_mask_surface).detach().cpu()
+                )
+                cur_atm_pure = float(
+                    atm_short_pure_mae(current_surface, target_surface, self._atm_short_mask_surface).detach().cpu()
+                )
+                atm_short_pure_list.append(gen_atm_pure)
+                current_atm_short_pure_list.append(cur_atm_pure)
+                atm_short_win_flags.append(1.0 if gen_atm_pure < cur_atm_pure else 0.0)
             win_flags.append(1.0 if float(payload["metrics"]["mae"]) < float(payload["current_metrics"]["mae"]) else 0.0)
             penalty_mean.append(float(payload["penalty_mean"]))
             penalty_std.append(float(payload["penalty_std"]))
@@ -396,6 +450,10 @@ class FilmWGANTrainer(BaseTrainer):
         val_current_short_atm_weighted_mae = (
             float(np.mean(current_short_atm_weighted_mae)) if current_short_atm_weighted_mae else 0.0
         )
+        val_atm_short_pure_mae = float(np.mean(atm_short_pure_list)) if atm_short_pure_list else 0.0
+        val_current_atm_short_pure_mae = (
+            float(np.mean(current_atm_short_pure_list)) if current_atm_short_pure_list else 0.0
+        )
         return {
             "val_mae": val_mae,
             "val_rmse": float(np.mean(rmse)) if rmse else 0.0,
@@ -404,6 +462,10 @@ class FilmWGANTrainer(BaseTrainer):
             "val_short_atm_weighted_mae": val_short_atm_weighted_mae,
             "val_current_short_atm_weighted_mae": val_current_short_atm_weighted_mae,
             "val_short_atm_mae_gap_vs_current": val_short_atm_weighted_mae - val_current_short_atm_weighted_mae,
+            "val_atm_short_pure_mae": val_atm_short_pure_mae,
+            "val_current_atm_short_pure_mae": val_current_atm_short_pure_mae,
+            "val_atm_short_pure_mae_gap_vs_current": val_atm_short_pure_mae - val_current_atm_short_pure_mae,
+            "val_atm_short_win_rate_vs_current": float(np.mean(atm_short_win_flags)) if atm_short_win_flags else 0.0,
             "val_mae_gap_vs_current": val_mae - val_current_mae,
             "val_win_rate_vs_current": float(np.mean(win_flags)) if win_flags else 0.0,
             "val_generated_current_mae": float(np.mean(generated_current_mae)) if generated_current_mae else 0.0,
@@ -459,14 +521,28 @@ class FilmWGANTrainer(BaseTrainer):
         fallback_checkpoint_path = self.checkpoints_dir / "film_wgan_best_warmup_fallback.pt"
         fallback_used = False
 
+        early_stopping_enabled = bool(getattr(self.config, "use_early_stopping", False))
+        early_stopping_patience = max(1, int(getattr(self.config, "early_stopping_patience", 10)))
+        early_stopping_min_delta = float(getattr(self.config, "early_stopping_min_delta", 0.0))
+        epochs_without_improvement = 0
+        early_stopped = False
+
         if checkpoint_warmup_epochs > 0:
             self.logger.info(
                 "Best checkpoint selection warmup enabled: skipping epochs <= %s; selection begins at epoch %s.",
                 checkpoint_warmup_epochs,
                 selection_start_epoch,
             )
+        if early_stopping_enabled:
+            self.logger.info(
+                "Early stopping enabled (patience=%d, min_delta=%.6f) on %s.",
+                early_stopping_patience,
+                early_stopping_min_delta,
+                str(self.config.checkpoint_metric),
+            )
 
         for epoch in range(1, int(self.config.num_epochs) + 1):
+            self._current_epoch = epoch
             running: dict[str, list[float]] = {
                 "d_total": [],
                 "d_real": [],
@@ -474,11 +550,13 @@ class FilmWGANTrainer(BaseTrainer):
                 "gp": [],
                 "g_total": [],
                 "g_adv": [],
+                "g_adv_effective_lambda": [],
                 "g_calendar": [],
                 "g_butterfly": [],
                 "g_smooth": [],
                 "g_recon": [],
                 "g_recon_weighted": [],
+                "g_atm_short": [],
             }
             for current_features, text_features, _real_delta_norm, current_flat, target_flat in self.bundle.train_loader:
                 current_features = self._to_device(current_features)
@@ -503,11 +581,15 @@ class FilmWGANTrainer(BaseTrainer):
                 "gp": float(np.mean(running["gp"])) if running["gp"] else 0.0,
                 "g_total": float(np.mean(running["g_total"])) if running["g_total"] else 0.0,
                 "g_adv": float(np.mean(running["g_adv"])) if running["g_adv"] else 0.0,
+                "g_adv_effective_lambda": float(np.mean(running["g_adv_effective_lambda"]))
+                if running["g_adv_effective_lambda"]
+                else 0.0,
                 "g_calendar": float(np.mean(running["g_calendar"])) if running["g_calendar"] else 0.0,
                 "g_butterfly": float(np.mean(running["g_butterfly"])) if running["g_butterfly"] else 0.0,
                 "g_smooth": float(np.mean(running["g_smooth"])) if running["g_smooth"] else 0.0,
                 "g_recon": float(np.mean(running["g_recon"])) if running["g_recon"] else 0.0,
                 "g_recon_weighted": float(np.mean(running["g_recon_weighted"])) if running["g_recon_weighted"] else 0.0,
+                "g_atm_short": float(np.mean(running["g_atm_short"])) if running["g_atm_short"] else 0.0,
             }
             row.update(self._evaluate())
             if self.generator_scheduler is not None:
@@ -527,15 +609,29 @@ class FilmWGANTrainer(BaseTrainer):
                 fallback_metric = monitor_value
                 fallback_epoch = epoch
                 save_checkpoint(fallback_checkpoint_path, self._checkpoint_payload())
-            if epoch > checkpoint_warmup_epochs and monitor_value < best_metric:
+            improved = False
+            if epoch > checkpoint_warmup_epochs and monitor_value < (best_metric - early_stopping_min_delta):
                 best_metric = monitor_value
                 best_epoch = epoch
+                improved = True
+                epochs_without_improvement = 0
                 save_checkpoint(self.checkpoints_dir / "film_wgan_best.pt", self._checkpoint_payload())
+            elif epoch > checkpoint_warmup_epochs and early_stopping_enabled:
+                epochs_without_improvement += 1
+                self.logger.info(
+                    "Early stopping patience %d/%d without %s improvement (current=%.6f, best=%.6f at epoch %d)",
+                    epochs_without_improvement,
+                    early_stopping_patience,
+                    monitor_name,
+                    monitor_value,
+                    best_metric,
+                    best_epoch,
+                )
             if epoch % int(self.config.save_every) == 0:
                 save_checkpoint(self.checkpoints_dir / f"film_wgan_epoch_{epoch:04d}.pt", self._checkpoint_payload())
 
             self.logger.info(
-                "epoch=%s g_total=%.6f d_total=%.6f val_mae=%.6f val_current_mae=%.6f gap=%.6f short_atm_gap=%.6f win_rate=%.3f",
+                "epoch=%s g_total=%.6f d_total=%.6f val_mae=%.6f val_current_mae=%.6f gap=%.6f short_atm_gap=%.6f atm_short_pure_gap=%.6f win_rate=%.3f",
                 epoch,
                 row["g_total"],
                 row["d_total"],
@@ -543,8 +639,25 @@ class FilmWGANTrainer(BaseTrainer):
                 row.get("val_current_mae", 0.0),
                 row.get("val_mae_gap_vs_current", 0.0),
                 row.get("val_short_atm_mae_gap_vs_current", 0.0),
+                row.get("val_atm_short_pure_mae_gap_vs_current", 0.0),
                 row.get("val_win_rate_vs_current", 0.0),
             )
+
+            if (
+                early_stopping_enabled
+                and epoch > checkpoint_warmup_epochs
+                and best_epoch > 0
+                and epochs_without_improvement >= early_stopping_patience
+            ):
+                self.logger.info(
+                    "Early stopping triggered at epoch %d. Best %s=%.6f at epoch %d.",
+                    epoch,
+                    monitor_name,
+                    best_metric,
+                    best_epoch,
+                )
+                early_stopped = True
+                break
 
         if best_epoch == 0 and fallback_epoch > 0:
             fallback_used = True
@@ -569,6 +682,7 @@ class FilmWGANTrainer(BaseTrainer):
                 "checkpoint_warmup_epochs": int(checkpoint_warmup_epochs),
                 "selection_start_epoch": int(selection_start_epoch),
                 "fallback_used": bool(fallback_used),
+                "early_stopped": bool(early_stopped),
                 "checkpoint_path": str(self.checkpoints_dir / "film_wgan_best.pt"),
             },
         )

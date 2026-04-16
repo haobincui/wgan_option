@@ -59,6 +59,10 @@ def validate_result_config(config: GenerateResultConfig) -> None:
         raise ValueError(
             f"fallback_mode must be one of {sorted(VALID_FALLBACK_MODES)}, got: {config.fallback_mode}"
         )
+    if float(config.timeseries_atm_range) < 0.0:
+        raise ValueError("timeseries_atm_range must be >= 0.")
+    if float(config.timeseries_short_end_max_days) < 0.0:
+        raise ValueError("timeseries_short_end_max_days must be >= 0.")
     if int(config.mc_samples) <= 0:
         raise ValueError("mc_samples must be > 0.")
     if config.fallback_mode != "none" and int(config.mc_samples) < 2:
@@ -91,7 +95,11 @@ def generate_vol_result(config: GenerateResultConfig) -> Path:
         load_vol_generator,
     )
     from wgan_option.utils.merged_xlsx import load_vol_surface_samples, select_ordered_split
-    from wgan_option.visualization.surface_plot import plot_surface_payload
+    from wgan_option.visualization.surface_plot import (
+        extract_short_end_atm_band_value,
+        plot_short_end_atm_band_timeseries,
+        plot_surface_payload,
+    )
 
     all_samples = load_vol_surface_samples(config)
     split_selection = select_ordered_split(all_samples, train_ratio=config.train_ratio, split=config.split)
@@ -165,6 +173,27 @@ def generate_vol_result(config: GenerateResultConfig) -> Path:
             )
 
         metrics = compute_surface_metrics(generated_surface, real_surface)
+        current_band = extract_short_end_atm_band_value(
+            current_surface,
+            strike_grid=sample.strike_grid,
+            maturity_days_grid=sample.maturity_grid_days,
+            atm_range=float(config.timeseries_atm_range),
+            short_end_max_days=float(config.timeseries_short_end_max_days),
+        )
+        generated_band = extract_short_end_atm_band_value(
+            generated_surface,
+            strike_grid=sample.strike_grid,
+            maturity_days_grid=sample.maturity_grid_days,
+            atm_range=float(config.timeseries_atm_range),
+            short_end_max_days=float(config.timeseries_short_end_max_days),
+        )
+        real_band = extract_short_end_atm_band_value(
+            real_surface,
+            strike_grid=sample.strike_grid,
+            maturity_days_grid=sample.maturity_grid_days,
+            atm_range=float(config.timeseries_atm_range),
+            short_end_max_days=float(config.timeseries_short_end_max_days),
+        )
 
         payload = {
             "sample_id": sample.sample_id,
@@ -227,10 +256,30 @@ def generate_vol_result(config: GenerateResultConfig) -> Path:
             "fallback_threshold": "" if fallback_threshold is None else float(fallback_threshold),
             "used_fallback": bool(used_fallback),
             "prediction_source": prediction_source,
+            "short_atm_band_current_vol": float(current_band["value"]),
+            "short_atm_band_generated_future_vol": float(generated_band["value"]),
+            "short_atm_band_real_future_vol": float(real_band["value"]),
+            "short_atm_band_generated_abs_error": float(abs(generated_band["value"] - real_band["value"])),
+            "short_atm_band_current_abs_error": float(abs(current_band["value"] - real_band["value"])),
+            "short_atm_band_point_count": int(current_band["point_count"]),
+            "short_atm_band_selection": str(current_band["selection"]),
+            "short_atm_band_atm_range": float(config.timeseries_atm_range),
+            "short_atm_band_max_days": float(config.timeseries_short_end_max_days),
             **split_meta, **metrics,
         })
 
+    summary_rows = sorted(
+        summary_rows,
+        key=lambda row: (str(row.get("news_timestamp_utc", "")), int(row.get("global_index", -1))),
+    )
     write_summary_csv(summary_rows, run_dir / "summary.csv")
+    if config.save_plots and len(summary_rows) >= 2:
+        plot_short_end_atm_band_timeseries(
+            summary_rows,
+            plot_dir / "short_atm_band_timeseries.png",
+            atm_range=float(config.timeseries_atm_range),
+            short_end_max_days=float(config.timeseries_short_end_max_days),
+        )
     return run_dir
 
 def generate_svi_result(config: GenerateResultConfig) -> Path:

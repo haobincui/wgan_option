@@ -30,8 +30,12 @@ def plot_training_curves(
     output.parent.mkdir(parents=True, exist_ok=True)
 
     metric_groups: list[tuple[str, tuple[str, ...], str]] = [
-        ("Adversarial", ("g_total", "g_adv", "d_total", "gp"), "loss"),
-        ("Constraints", ("g_calendar", "g_butterfly", "g_smooth", "g_recon", "g_recon_weighted"), "penalty"),
+        ("Adversarial", ("g_total", "g_adv", "g_adv_effective_lambda", "d_total", "gp"), "loss"),
+        (
+            "Constraints",
+            ("g_calendar", "g_butterfly", "g_smooth", "g_recon", "g_recon_weighted", "g_atm_short"),
+            "penalty",
+        ),
         ("Validation vs Current", ("val_mae", "val_current_mae", "val_rmse", "val_current_rmse"), "metric"),
         (
             "Gap and Distances",
@@ -41,6 +45,16 @@ def plot_training_curves(
         (
             "Short-End ATM",
             ("val_short_atm_weighted_mae", "val_current_short_atm_weighted_mae", "val_short_atm_mae_gap_vs_current"),
+            "metric",
+        ),
+        (
+            "ATM x Short Pure Mask",
+            (
+                "val_atm_short_pure_mae",
+                "val_current_atm_short_pure_mae",
+                "val_atm_short_pure_mae_gap_vs_current",
+                "val_atm_short_win_rate_vs_current",
+            ),
             "metric",
         ),
         ("Arbitrage and Weighting", ("val_calendar", "val_butterfly", "val_penalty_mean", "val_penalty_std", "val_weight_entropy"), "metric"),

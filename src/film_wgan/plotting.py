@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -9,6 +10,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -52,6 +54,97 @@ def _atm_index(strike_grid: Sequence[float]) -> int:
 def _short_idx(maturity_days_grid: Sequence[float]) -> int:
     maturities = np.asarray(maturity_days_grid, dtype=np.float32)
     return int(np.argmin(maturities))
+
+
+def _parse_timestamp_utc(value: Any) -> datetime:
+    text = str(value).strip()
+    if not text:
+        raise ValueError("news_timestamp_utc must not be empty.")
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def extract_atm_short_value(
+    surface: Any,
+    *,
+    strike_grid: Sequence[float],
+    maturity_days_grid: Sequence[float],
+) -> dict[str, float | int]:
+    """Extract the nearest-ATM value at the shortest maturity row."""
+
+    surface_array = _to_surface(surface)
+    if surface_array is None:
+        raise ValueError("surface must not be empty.")
+
+    strikes = np.asarray(strike_grid, dtype=np.float32)
+    maturities = np.asarray(maturity_days_grid, dtype=np.float32)
+    expected_shape = (int(maturities.size), int(strikes.size))
+    if tuple(surface_array.shape) != expected_shape:
+        raise ValueError(f"Expected surface shape {expected_shape}, got {surface_array.shape}")
+
+    atm_idx = _atm_index(strikes)
+    short_idx = _short_idx(maturities)
+    return {
+        "value": float(surface_array[short_idx, atm_idx]),
+        "atm_index": int(atm_idx),
+        "short_index": int(short_idx),
+        "atm_strike": float(strikes[atm_idx]),
+        "short_maturity_days": float(maturities[short_idx]),
+    }
+
+
+def plot_atm_vol_timeseries(rows: Sequence[Mapping[str, Any]], output_path: str | Path) -> Path:
+    """Plot one run-level nearest-ATM shortest-maturity volatility time series."""
+
+    if not rows:
+        raise ValueError("rows must not be empty.")
+
+    ordered_rows = sorted(
+        rows,
+        key=lambda row: (str(row.get("news_timestamp_utc", "")), int(row.get("global_index", -1))),
+    )
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    timestamps = [_parse_timestamp_utc(row["news_timestamp_utc"]) for row in ordered_rows]
+
+    fig, ax = plt.subplots(1, 1, figsize=(10.0, 4.8))
+    for label, key, color in [
+        ("Current", "current_atm_vol", "#1f77b4"),
+        ("Generated", "generated_atm_vol", "#d62728"),
+        ("Target", "target_atm_vol", "#2ca02c"),
+    ]:
+        ax.plot(
+            timestamps,
+            [float(row[key]) for row in ordered_rows],
+            label=label,
+            color=color,
+            linewidth=2.0,
+            marker="o",
+            markersize=4.0,
+        )
+
+    locator = mdates.AutoDateLocator()
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d\n%H:%M", tz=timezone.utc))
+    ax.set_xlabel("News Timestamp (UTC)")
+    ax.set_ylabel("Implied Volatility")
+    ax.grid(alpha=0.3)
+    ax.legend()
+
+    first_row = ordered_rows[0]
+    fig.suptitle(
+        "Nearest-ATM / Shortest-Maturity Vol Time Series\n"
+        f"nearest strike to 1.0 = {float(first_row['atm_strike']):.4f} | "
+        f"shortest maturity = {float(first_row['short_maturity_days']):.1f}d"
+    )
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.92))
+    fig.savefig(output, dpi=150)
+    plt.close(fig)
+    return output
 
 
 def plot_film_wgan_payload(payload: Mapping[str, Any], output_path: str | Path) -> Path:

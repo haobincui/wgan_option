@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -9,6 +10,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import matplotlib.dates as mdates  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
@@ -67,7 +69,49 @@ def _short_maturity_index(maturity_days_grid: Sequence[float]) -> int:
     maturities = np.asarray(maturity_days_grid, dtype=np.float32)
     if maturities.size == 0:
         raise ValueError("maturity_days_grid must not be empty.")
-    return 0
+    return int(np.argmin(maturities))
+
+
+def extract_short_end_atm_band_value(
+    surface: np.ndarray,
+    *,
+    strike_grid: Sequence[float],
+    maturity_days_grid: Sequence[float],
+    atm_range: float,
+    short_end_max_days: float,
+) -> dict[str, Any]:
+    """Extract one short-end near-ATM volatility scalar from one surface."""
+
+    surface_array = _surface_array(surface)
+    if surface_array is None:
+        raise ValueError("surface must not be empty.")
+
+    strikes = np.asarray(strike_grid, dtype=np.float32)
+    maturities = np.asarray(maturity_days_grid, dtype=np.float32)
+    if surface_array.shape != (maturities.size, strikes.size):
+        raise ValueError(
+            "surface shape must match maturity_days_grid x strike_grid, "
+            f"got {surface_array.shape} vs {(maturities.size, strikes.size)}"
+        )
+
+    strike_mask = np.abs(strikes - 1.0) <= float(atm_range) + 1e-6
+    maturity_mask = maturities <= float(short_end_max_days) + 1e-6
+    band_mask = np.outer(maturity_mask, strike_mask)
+    if np.any(band_mask):
+        band_values = surface_array[band_mask]
+        return {
+            "value": float(band_values.mean()),
+            "point_count": int(band_values.size),
+            "selection": "band_mean",
+        }
+
+    short_idx = _short_maturity_index(maturities)
+    atm_idx = _nearest_atm_index(strikes)
+    return {
+        "value": float(surface_array[short_idx, atm_idx]),
+        "point_count": 1,
+        "selection": "nearest_cell_fallback",
+    }
 
 
 def _sidecar_output_path(output_path: str | Path, suffix: str) -> Path:
@@ -99,6 +143,18 @@ def _style_line_axis(ax, *, xlabel: str, ylabel: str, title: str) -> None:
     ax.set_ylabel(ylabel)
     ax.grid(alpha=0.3)
     ax.legend()
+
+
+def _parse_timestamp_utc(value: Any) -> datetime:
+    text = str(value).strip()
+    if not text:
+        raise ValueError("news_timestamp_utc must not be empty.")
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _plot_line_sidecars(
@@ -163,6 +219,63 @@ def _plot_line_sidecars(
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))
     fig.savefig(atm_output, dpi=150)
     plt.close(fig)
+
+
+def plot_short_end_atm_band_timeseries(
+    rows: Sequence[Mapping[str, Any]],
+    output_path: str | Path,
+    *,
+    atm_range: float,
+    short_end_max_days: float,
+) -> Path:
+    """Render one run-level short-end near-ATM volatility time-series plot."""
+
+    if not rows:
+        raise ValueError("rows must not be empty.")
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    ordered_rows = sorted(
+        rows,
+        key=lambda row: (str(row.get("news_timestamp_utc", "")), int(row.get("global_index", -1))),
+    )
+    timestamps = [_parse_timestamp_utc(row["news_timestamp_utc"]) for row in ordered_rows]
+
+    fig, ax = plt.subplots(1, 1, figsize=(10.0, 4.8))
+    series_specs = [
+        ("Current", "short_atm_band_current_vol", "#1f77b4"),
+        ("Generated Future", "short_atm_band_generated_future_vol", "#d62728"),
+        ("Real Future", "short_atm_band_real_future_vol", "#2ca02c"),
+    ]
+    for label, key, color in series_specs:
+        ax.plot(
+            timestamps,
+            [float(row[key]) for row in ordered_rows],
+            linewidth=2.0,
+            marker="o",
+            markersize=4.0,
+            label=label,
+            color=color,
+        )
+
+    locator = mdates.AutoDateLocator()
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d\n%H:%M", tz=timezone.utc))
+    _style_line_axis(
+        ax,
+        xlabel="News Timestamp (UTC)",
+        ylabel="Implied Volatility",
+        title="Short-End ATM Band",
+    )
+    fig.suptitle(
+        "Short-End ATM Vol Time Series\n"
+        f"|K/F - 1| <= {float(atm_range):.2f}, maturity <= {float(short_end_max_days):.0f}d | "
+        "x-axis = news_timestamp_utc | Generated/Real = future surfaces"
+    )
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.92))
+    fig.savefig(output, dpi=150)
+    plt.close(fig)
+    return output
 
 
 def plot_surface_payload(payload: Mapping[str, Any], output_path: str | Path) -> Path:

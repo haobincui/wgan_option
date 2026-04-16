@@ -32,6 +32,11 @@ Common responsibilities:
 - write `summary.csv`
 - write per-sample payload JSON files
 
+For `vol` mode, the resolved config also controls one run-level short-end ATM time-series view through:
+
+- `timeseries_atm_range` (default `0.08`)
+- `timeseries_short_end_max_days` (default `10`)
+
 Supported split selection:
 
 - `train`
@@ -66,7 +71,7 @@ Flow:
 7. Compare:
    - `generated_surface`
    - `real_surface` from the workbook
-8. Save JSON payloads, plots, and a run summary.
+8. Save JSON payloads, per-sample plots, a run-level short-end ATM time-series plot when multiple samples are selected, and a run summary.
 
 The per-sample payload includes:
 
@@ -76,6 +81,21 @@ The per-sample payload includes:
 - surface grids
 - simple comparison metrics
 - metadata such as timestamps and checkpoint path
+
+The vol `summary.csv` also includes one short-end near-ATM scalar per selected sample:
+
+- `short_atm_band_current_vol`
+- `short_atm_band_generated_future_vol`
+- `short_atm_band_real_future_vol`
+- absolute-error columns against the real future band
+- the band definition metadata (`short_atm_band_atm_range`, `short_atm_band_max_days`)
+
+The band is defined on the surface grid as:
+
+- `|strike - 1.0| <= timeseries_atm_range`
+- `maturity_days <= timeseries_short_end_max_days`
+
+If no grid cells satisfy that mask, the runtime falls back to the nearest ATM column at the shortest maturity row.
 
 ## svi Mode
 
@@ -135,6 +155,10 @@ For a standard payload JSON, it generates:
 - a `_lines` sidecar figure
 - an `_atm` sidecar figure
 
+For `vol` mode runs with `save_plots=true` and at least two selected samples, the runtime also generates:
+
+- `plots/short_atm_band_timeseries.png`
+
 The main figure includes:
 
 - current surface, if present
@@ -146,6 +170,12 @@ The sidecar line plots focus on:
 
 - an ATM term structure view
 - a short-maturity smile view
+
+The run-level time-series plot uses:
+
+- x-axis = `news_timestamp_utc`
+- lines = `Current`, `Generated Future`, `Real Future`
+- title text that records the active short-end ATM band definition
 
 ## Output Layout
 
@@ -163,6 +193,10 @@ For each selected sample, the plot output usually includes:
 - the main comparison PNG
 - a `_lines.png` sidecar
 - an `_atm.png` sidecar
+
+Additionally, vol runs that select multiple samples usually include:
+
+- `plots/short_atm_band_timeseries.png`
 
 ## Typical Commands
 

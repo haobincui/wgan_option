@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import torch
 
+from utils.training_paths import checkpoint_filename, generate_result_dir, infer_run_dir_from_checkpoint
 from .arbitrage import reweight_scenarios, total_arbitrage_penalty
 from .config import FilmWGANSampleConfig, FilmWGANTrainConfig
 from .data import (
@@ -23,7 +24,7 @@ from .data import (
 )
 from .io import load_checkpoint, write_csv, write_json
 from .models import FilmWGANGenerator, reconstruct_future_surface
-from .plotting import plot_film_wgan_payload
+from .plotting import extract_atm_short_value, plot_atm_vol_timeseries, plot_film_wgan_payload
 
 
 @dataclass(frozen=True)
@@ -297,6 +298,62 @@ def build_sample_payload(
     }
 
 
+def _resolve_atm_vol_dir(*, checkpoint_path: str | Path, output_dir: str | Path) -> Path:
+    run_dir = infer_run_dir_from_checkpoint(checkpoint_path)
+    if run_dir is None:
+        output_path = Path(output_dir)
+        for candidate in (output_path, *output_path.parents):
+            if candidate.name == "generate_result":
+                run_dir = candidate.parent
+                break
+    if run_dir is None:
+        raise ValueError(
+            f"Could not infer the training run directory for ATM outputs from "
+            f"checkpoint_path={checkpoint_path} output_dir={output_dir}"
+        )
+    target = generate_result_dir(run_dir) / "atm_vol"
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _build_atm_vol_row(
+    *,
+    sample: FilmWGANSample,
+    payload: Mapping[str, Any],
+    checkpoint_path: str | Path,
+) -> dict[str, Any]:
+    current_atm = extract_atm_short_value(
+        sample.current_surface,
+        strike_grid=sample.strike_grid,
+        maturity_days_grid=sample.maturity_days_grid,
+    )
+    generated_atm = extract_atm_short_value(
+        payload["generated_surface"],
+        strike_grid=sample.strike_grid,
+        maturity_days_grid=sample.maturity_days_grid,
+    )
+    target_atm = extract_atm_short_value(
+        sample.target_surface,
+        strike_grid=sample.strike_grid,
+        maturity_days_grid=sample.maturity_days_grid,
+    )
+    return {
+        "sample_id": sample.sample_id,
+        "global_index": int(sample.global_index),
+        "news_timestamp_utc": sample.timestamp,
+        "current_snapshot_time_utc": sample.current_snapshot_time_utc,
+        "target_snapshot_time_utc": sample.target_snapshot_time_utc,
+        "atm_strike": float(current_atm["atm_strike"]),
+        "short_maturity_days": float(current_atm["short_maturity_days"]),
+        "current_atm_vol": float(current_atm["value"]),
+        "generated_atm_vol": float(generated_atm["value"]),
+        "target_atm_vol": float(target_atm["value"]),
+        "generated_target_abs_error": float(abs(float(generated_atm["value"]) - float(target_atm["value"]))),
+        "current_target_abs_error": float(abs(float(current_atm["value"]) - float(target_atm["value"]))),
+        "checkpoint_path": str(checkpoint_path),
+    }
+
+
 class FilmWGANSampler:
     """Load a standalone FiLM WGAN checkpoint and generate arbitrage-weighted scenarios."""
 
@@ -332,6 +389,11 @@ class FilmWGANSampler:
 
     def sample(self):
         generator, _checkpoint, train_config, normalization = self._load_generator()
+        checkpoint_stem = checkpoint_filename(self.config.checkpoint_path)
+        atm_vol_dir = _resolve_atm_vol_dir(
+            checkpoint_path=self.config.checkpoint_path,
+            output_dir=self.config.output_dir,
+        )
 
         all_samples = load_film_wgan_samples(self.config)
         selected_samples = split_samples(self.config, all_samples)
@@ -339,6 +401,7 @@ class FilmWGANSampler:
             raise ValueError("No standalone FiLM WGAN samples are available after split/selection.")
 
         summary_rows: list[dict[str, Any]] = []
+        atm_vol_rows: list[dict[str, Any]] = []
         for sample in selected_samples:
             payload = build_sample_payload(
                 generator=generator,
@@ -364,6 +427,13 @@ class FilmWGANSampler:
                 write_json(json_path, payload)
             if bool(self.config.save_plots):
                 plot_film_wgan_payload(payload, self.plots_dir / f"{sample.global_index:04d}_{sample.sample_id}.png")
+            atm_vol_rows.append(
+                _build_atm_vol_row(
+                    sample=sample,
+                    payload=payload,
+                    checkpoint_path=self.config.checkpoint_path,
+                )
+            )
             summary_rows.append(
                 {
                     "sample_id": sample.sample_id,
@@ -383,6 +453,16 @@ class FilmWGANSampler:
                 }
             )
         write_csv(self.run_dir / "summary.csv", summary_rows)
+        ordered_atm_rows = sorted(
+            atm_vol_rows,
+            key=lambda row: (str(row.get("news_timestamp_utc", "")), int(row.get("global_index", -1))),
+        )
+        write_csv(atm_vol_dir / f"{checkpoint_stem}_atm_vol_timeseries.csv", ordered_atm_rows)
+        if bool(self.config.save_plots):
+            plot_atm_vol_timeseries(
+                ordered_atm_rows,
+                atm_vol_dir / f"{checkpoint_stem}_atm_vol_timeseries.png",
+            )
         write_json(
             self.run_dir / "run_metadata.json",
             {

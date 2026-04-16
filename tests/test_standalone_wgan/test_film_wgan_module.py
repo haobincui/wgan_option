@@ -1,11 +1,14 @@
+import csv
 import json
+import math
 import sys
 import tempfile
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
 import torch
 import yaml
 
@@ -16,9 +19,9 @@ if str(ROOT_DIR) not in sys.path:
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from film_wgan.config import load_train_config  # noqa: E402
+from film_wgan.config import FilmWGANSampleConfig, FilmWGANTrainConfig, load_train_config  # noqa: E402
 from film_wgan.data import create_train_val_bundle, denormalize_tensor, normalize_surface_tensor  # noqa: E402
-from film_wgan.inference import normalization_stats_to_tensors  # noqa: E402
+from film_wgan.inference import FilmWGANSampler, normalization_stats_to_tensors  # noqa: E402
 from film_wgan.losses import (  # noqa: E402
     build_reconstruction_weight_template,
     gradient_penalty,
@@ -39,6 +42,138 @@ FILM_TRAIN_CONFIG_PATH = ROOT_DIR / "configs/film_wgan/train_lp_gen128_disc128.y
 def _write_yaml(path: Path, payload: dict) -> Path:
     path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=False), encoding="utf-8")
     return path
+
+
+def _json_text(values) -> str:
+    return json.dumps(list(values), ensure_ascii=False)
+
+
+def _surface_values(base: float, cells: int) -> list[float]:
+    return [float(base + idx) / 1000.0 for idx in range(cells)]
+
+
+def _write_vol_workbook(tmpdir: str) -> Path:
+    path = Path(tmpdir) / "merged_vol.xlsx"
+    strike_grid = [0.80, 1.02, 1.20]
+    maturity_grid = [7, 30]
+    cells = len(strike_grid) * len(maturity_grid)
+    dataframe = pd.DataFrame(
+        [
+            {
+                "sample_id": "news_2",
+                "news_timestamp_utc": "2022-12-30T13:40:00Z",
+                "current_snapshot_time_utc": "2022-12-30T13:40:00Z",
+                "target_snapshot_time_utc": "2022-12-30T13:45:00Z",
+                "hd_embedding": _json_text([1.0, 2.0]),
+                "lp_embedding": _json_text([10.0, 20.0, 30.0]),
+                "strike_grid": _json_text(strike_grid),
+                "maturity_days_grid": _json_text(maturity_grid),
+                "current_surface_flat": _json_text(_surface_values(1.0, cells)),
+                "target_surface_flat": _json_text(_surface_values(2.0, cells)),
+                "pair_quality_label": "usable",
+                "training_candidate_flag": 1,
+            },
+            {
+                "sample_id": "news_1",
+                "news_timestamp_utc": "2022-12-30T13:30:00Z",
+                "current_snapshot_time_utc": "2022-12-30T13:30:00Z",
+                "target_snapshot_time_utc": "2022-12-30T13:35:00Z",
+                "hd_embedding": _json_text([3.0, 4.0]),
+                "lp_embedding": _json_text([40.0, 50.0, 60.0]),
+                "strike_grid": _json_text(strike_grid),
+                "maturity_days_grid": _json_text(maturity_grid),
+                "current_surface_flat": _json_text(_surface_values(3.0, cells)),
+                "target_surface_flat": _json_text(_surface_values(4.0, cells)),
+                "pair_quality_label": "usable",
+                "training_candidate_flag": 1,
+            },
+            {
+                "sample_id": "news_3",
+                "news_timestamp_utc": "2022-12-30T13:50:00Z",
+                "current_snapshot_time_utc": "2022-12-30T13:50:00Z",
+                "target_snapshot_time_utc": "2022-12-30T13:55:00Z",
+                "hd_embedding": _json_text([5.0, 6.0]),
+                "lp_embedding": _json_text([70.0, 80.0, 90.0]),
+                "strike_grid": _json_text(strike_grid),
+                "maturity_days_grid": _json_text(maturity_grid),
+                "current_surface_flat": _json_text(_surface_values(5.0, cells)),
+                "target_surface_flat": _json_text(_surface_values(6.0, cells)),
+                "pair_quality_label": "usable",
+                "training_candidate_flag": 1,
+            },
+        ]
+    )
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        dataframe.to_excel(writer, sheet_name="gan_input_ready", index=False)
+    return path
+
+
+def _write_film_checkpoint(
+    tmpdir: str,
+    *,
+    workbook_path: Path,
+    run_ts: str = "20260416_010101",
+) -> tuple[Path, Path, Path]:
+    output_root = Path(tmpdir) / "training" / "film_wgan"
+    run_dir = output_root / run_ts
+    checkpoints_dir = run_dir / "checkpoints"
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+
+    config = FilmWGANTrainConfig(
+        data_path=str(workbook_path),
+        sheet_name="gan_input_ready",
+        text_embedding_mode="lp",
+        train_ratio=2 / 3,
+        normalize_current_surface=True,
+        normalize_target_delta=True,
+        normalize_text_embedding=True,
+        noise_dim=4,
+        gen_base_channels=8,
+        disc_base_channels=8,
+        gen_res_blocks=1,
+        disc_res_blocks=1,
+        text_hidden_dim=16,
+        text_out_dim=8,
+        fusion_hidden_dim=32,
+        num_epochs=1,
+        batch_size=2,
+        cuda=False,
+        num_workers=0,
+        output_root=str(output_root),
+        checkpoints_path=str(checkpoints_dir),
+        metrics_path=str(run_dir / "metrics"),
+        save_every=1,
+    )
+    generator = FilmWGANGenerator(
+        surface_height=2,
+        surface_width=3,
+        embedding_dim=3,
+        noise_dim=config.noise_dim,
+        base_channels=config.gen_base_channels,
+        res_blocks=config.gen_res_blocks,
+        text_hidden_dim=config.text_hidden_dim,
+        text_out_dim=config.text_out_dim,
+        fusion_hidden_dim=config.fusion_hidden_dim,
+    )
+    checkpoint_path = checkpoints_dir / "film_wgan_best.pt"
+    torch.save(
+        {
+            "config": asdict(config),
+            "surface_shape": [2, 3],
+            "embedding_dim": 3,
+            "generator_state_dict": generator.state_dict(),
+            "normalization_stats": {
+                "current_log_mean": [0.0] * 6,
+                "current_log_std": [1.0] * 6,
+                "delta_mean": [0.0] * 6,
+                "delta_std": [1.0] * 6,
+                "text_mean": [0.0] * 3,
+                "text_std": [1.0] * 3,
+            },
+        },
+        checkpoint_path,
+    )
+    return output_root, run_dir, checkpoint_path
 
 
 class TestFiLMLayerInitialization(unittest.TestCase):
@@ -154,6 +289,114 @@ class TestFilmWGANConfiguration(unittest.TestCase):
         self.assertAlmostEqual(float(config.recon_atm_range), 0.08, places=6)
         self.assertAlmostEqual(float(config.recon_atm_short_end_max_days), 90.0, places=6)
         self.assertAlmostEqual(float(config.recon_atm_multiplier), 3.0, places=6)
+
+
+class TestFilmWGANGenerateResultATMOutputs(unittest.TestCase):
+    def test_extract_atm_short_value_uses_nearest_atm_and_shortest_maturity(self):
+        from film_wgan.plotting import extract_atm_short_value
+
+        stats = extract_atm_short_value(
+            [[0.10, 0.20, 0.30], [0.40, 0.50, 0.60]],
+            strike_grid=[0.75, 1.05, 1.30],
+            maturity_days_grid=[7.0, 30.0],
+        )
+
+        self.assertAlmostEqual(float(stats["value"]), 0.20, places=6)
+        self.assertAlmostEqual(float(stats["atm_strike"]), 1.05, places=6)
+        self.assertAlmostEqual(float(stats["short_maturity_days"]), 7.0, places=6)
+        self.assertEqual(int(stats["atm_index"]), 1)
+        self.assertEqual(int(stats["short_index"]), 0)
+
+    def test_sampler_writes_fixed_atm_vol_outputs_alongside_original_outputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = _write_vol_workbook(tmpdir)
+            _output_root, training_run_dir, checkpoint_path = _write_film_checkpoint(tmpdir, workbook_path=workbook_path)
+            sample_run_dir = training_run_dir / "generate_result" / "custom_samples"
+            config = FilmWGANSampleConfig(
+                data_path=str(workbook_path),
+                sheet_name="gan_input_ready",
+                text_embedding_mode="lp",
+                train_ratio=2 / 3,
+                checkpoint_path=str(checkpoint_path),
+                seed=123,
+                cuda=False,
+                mc_samples=2,
+                split="all",
+                selection_mode="all",
+                selection_count=0,
+                aggregation_mode="weighted_mean",
+                output_dir=str(sample_run_dir),
+                save_json=True,
+                save_plots=True,
+            )
+
+            run_dir = FilmWGANSampler(config).sample()
+
+            self.assertEqual(run_dir, sample_run_dir)
+            self.assertTrue((run_dir / "summary.csv").exists())
+            self.assertTrue((run_dir / "run_metadata.json").exists())
+            self.assertEqual(len(list((run_dir / "samples").glob("*.json"))), 3)
+            self.assertEqual(len(list((run_dir / "plots").glob("*.png"))), 6)
+
+            atm_vol_dir = training_run_dir / "generate_result" / "atm_vol"
+            atm_csv = atm_vol_dir / "film_wgan_best_atm_vol_timeseries.csv"
+            atm_png = atm_vol_dir / "film_wgan_best_atm_vol_timeseries.png"
+            self.assertTrue(atm_csv.exists())
+            self.assertTrue(atm_png.exists())
+            self.assertGreater(atm_png.stat().st_size, 0)
+
+            with atm_csv.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual([row["sample_id"] for row in rows], ["news_1", "news_2", "news_3"])
+            for row, expected_current, expected_target in [
+                (rows[0], 0.004, 0.005),
+                (rows[1], 0.002, 0.003),
+                (rows[2], 0.006, 0.007),
+            ]:
+                self.assertAlmostEqual(float(row["atm_strike"]), 1.02, places=6)
+                self.assertAlmostEqual(float(row["short_maturity_days"]), 7.0, places=6)
+                self.assertAlmostEqual(float(row["current_atm_vol"]), expected_current, places=6)
+                self.assertAlmostEqual(float(row["target_atm_vol"]), expected_target, places=6)
+                self.assertAlmostEqual(float(row["current_target_abs_error"]), 0.001, places=6)
+                self.assertEqual(row["checkpoint_path"], str(checkpoint_path))
+                self.assertTrue(math.isfinite(float(row["generated_atm_vol"])))
+                self.assertTrue(math.isfinite(float(row["generated_target_abs_error"])))
+
+    def test_sampler_writes_atm_csv_without_any_png_when_save_plots_is_false(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = _write_vol_workbook(tmpdir)
+            _output_root, training_run_dir, checkpoint_path = _write_film_checkpoint(tmpdir, workbook_path=workbook_path)
+            sample_run_dir = training_run_dir / "generate_result" / "custom_no_plot"
+            config = FilmWGANSampleConfig(
+                data_path=str(workbook_path),
+                sheet_name="gan_input_ready",
+                text_embedding_mode="lp",
+                train_ratio=2 / 3,
+                checkpoint_path=str(checkpoint_path),
+                seed=123,
+                cuda=False,
+                mc_samples=2,
+                split="all",
+                selection_mode="all",
+                selection_count=0,
+                aggregation_mode="weighted_mean",
+                output_dir=str(sample_run_dir),
+                save_json=True,
+                save_plots=False,
+            )
+
+            run_dir = FilmWGANSampler(config).sample()
+
+            self.assertEqual(run_dir, sample_run_dir)
+            self.assertTrue((run_dir / "summary.csv").exists())
+            self.assertEqual(len(list((run_dir / "samples").glob("*.json"))), 3)
+            self.assertFalse((run_dir / "plots").exists())
+
+            atm_vol_dir = training_run_dir / "generate_result" / "atm_vol"
+            atm_csv = atm_vol_dir / "film_wgan_best_atm_vol_timeseries.csv"
+            atm_png = atm_vol_dir / "film_wgan_best_atm_vol_timeseries.png"
+            self.assertTrue(atm_csv.exists())
+            self.assertFalse(atm_png.exists())
 
 
 class TestFilmWGANTrainerMetrics(unittest.TestCase):

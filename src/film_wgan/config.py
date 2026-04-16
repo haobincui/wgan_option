@@ -49,6 +49,8 @@ class FilmWGANTrainConfig:
     num_epochs: int = 100
     batch_size: int = 32
 
+    lambda_adv: float = 1.0
+    adv_warmup_epochs: int = 0
     lambda_calendar: float = 2.0
     lambda_butterfly: float = 2.0
     lambda_smooth: float = 0.1
@@ -62,12 +64,21 @@ class FilmWGANTrainConfig:
     use_smooth_constraint: bool = True
     use_recon_constraint: bool = False
 
+    use_atm_short_loss: bool = False
+    lambda_atm_short: float = 0.0
+    atm_short_range: float = 0.05
+    atm_short_max_days: float = 60.0
+
     eval_mc_samples: int = 32
     eval_reweight_beta_mode: str = "fixed"
     eval_reweight_beta: float = 25.0
     eval_aggregation_mode: str = "weighted_mean"
     checkpoint_metric: str = "val_mae_gap_vs_current"
     checkpoint_warmup_epochs: int = 10
+
+    use_early_stopping: bool = False
+    early_stopping_patience: int = 10
+    early_stopping_min_delta: float = 0.0
 
     seed: int = 42
     cuda: bool = torch.cuda.is_available()

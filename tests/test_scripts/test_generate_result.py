@@ -470,6 +470,8 @@ class TestGenerateResultScripts(unittest.TestCase):
                 "fallback_mode=mc_uncertainty_to_current",
                 "mc_samples=5",
                 "uncertainty_threshold=0.2",
+                "timeseries_atm_range=0.05",
+                "timeseries_short_end_max_days=12",
             ]
         )
         config = build_generate_result_config(
@@ -480,6 +482,8 @@ class TestGenerateResultScripts(unittest.TestCase):
         self.assertEqual(config.fallback_mode, "mc_uncertainty_to_current")
         self.assertEqual(config.mc_samples, 5)
         self.assertAlmostEqual(config.uncertainty_threshold, 0.2, places=6)
+        self.assertAlmostEqual(config.timeseries_atm_range, 0.05, places=6)
+        self.assertAlmostEqual(config.timeseries_short_end_max_days, 12.0, places=6)
 
         for invalid_bool in ["save_json=off", "save_json=yes", "save_json=1"]:
             with self.subTest(invalid_bool=invalid_bool):
@@ -605,6 +609,8 @@ class TestGenerateResultScripts(unittest.TestCase):
             self.assertTrue((run_dir / "summary.csv").exists())
             resolved_config = yaml.safe_load((run_dir / "generate_resolved_config.yaml").read_text(encoding="utf-8"))
             self.assertEqual(resolved_config["output_dir"], str(run_dir))
+            self.assertAlmostEqual(float(resolved_config["timeseries_atm_range"]), 0.08, places=6)
+            self.assertAlmostEqual(float(resolved_config["timeseries_short_end_max_days"]), 10.0, places=6)
             self.assertEqual(
                 resolved_config["checkpoint_path"],
                 str(training_run_dir / "checkpoints" / "generator_best.pt"),
@@ -623,6 +629,81 @@ class TestGenerateResultScripts(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["sample_id"], "news_3")
+            self.assertAlmostEqual(float(rows[0]["short_atm_band_current_vol"]), 0.0125, places=6)
+            self.assertAlmostEqual(float(rows[0]["short_atm_band_real_future_vol"]), 0.0135, places=6)
+            self.assertEqual(rows[0]["short_atm_band_point_count"], "4")
+            self.assertEqual(rows[0]["short_atm_band_selection"], "band_mean")
+            self.assertAlmostEqual(float(rows[0]["short_atm_band_atm_range"]), 0.08, places=6)
+            self.assertAlmostEqual(float(rows[0]["short_atm_band_max_days"]), 10.0, places=6)
+
+    def test_generate_vol_script_outputs_run_level_short_atm_timeseries(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = self._write_vol_workbook(tmpdir)
+            run_root, training_run_dir = self._write_generator_checkpoint_run_root(tmpdir, run_ts="20260407_122222")
+            config_path = Path(tmpdir) / "generate_vol_all.yaml"
+            _write_pipeline_yaml(
+                config_path,
+                training={
+                    "data_path": str(workbook_path),
+                    "sheet_name": "gan_input_ready",
+                    "text_embedding_mode": "hd",
+                    "train_ratio": 2 / 3,
+                    "cuda": False,
+                    "seed": 123,
+                    "output_root": str(run_root),
+                },
+                generate_result={
+                    "checkpoint_path": "",
+                    "models_path": str(run_root),
+                    "metrics_path": str(run_root),
+                    "split": "val",
+                    "selection_mode": "row_index",
+                    "row_index": 0,
+                    "save_plots": True,
+                    "save_json": True,
+                    "plot_style": "heatmap_diff",
+                },
+            )
+
+            module = _load_script_module(ROOT_DIR / "scripts/generate_result/main.py", "generate_vol_timeseries_script")
+            run_dir = module.main(
+                [
+                    "vol",
+                    "--config",
+                    str(config_path),
+                    "--set",
+                    "split=all",
+                    "--set",
+                    "selection_mode=all",
+                    "--set",
+                    "timeseries_atm_range=0.05",
+                    "--set",
+                    "timeseries_short_end_max_days=12",
+                ]
+            )
+
+            resolved_config = yaml.safe_load((run_dir / "generate_resolved_config.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(run_dir, training_run_dir / "generate_result" / "generator_best")
+            self.assertAlmostEqual(float(resolved_config["timeseries_atm_range"]), 0.05, places=6)
+            self.assertAlmostEqual(float(resolved_config["timeseries_short_end_max_days"]), 12.0, places=6)
+
+            timeseries_path = run_dir / "plots" / "short_atm_band_timeseries.png"
+            self.assertTrue(timeseries_path.exists())
+            self.assertGreater(timeseries_path.stat().st_size, 0)
+
+            png_files = sorted((run_dir / "plots").glob("*.png"))
+            self.assertEqual(len(png_files), 10)
+
+            with (run_dir / "summary.csv").open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual([row["sample_id"] for row in rows], ["news_1", "news_2", "news_3"])
+            for row in rows:
+                self.assertIn("short_atm_band_generated_future_vol", row)
+                self.assertIn("short_atm_band_current_abs_error", row)
+                self.assertEqual(row["short_atm_band_selection"], "band_mean")
+                self.assertEqual(row["short_atm_band_point_count"], "2")
+                self.assertAlmostEqual(float(row["short_atm_band_atm_range"]), 0.05, places=6)
+                self.assertAlmostEqual(float(row["short_atm_band_max_days"]), 12.0, places=6)
 
     def test_generate_vol_script_supports_fallback_to_current_surface(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -880,6 +961,50 @@ class TestGenerateResultScripts(unittest.TestCase):
 
         self.assertEqual(atm_idx, 2)
         self.assertEqual(short_idx, 0)
+
+    def test_extract_short_end_atm_band_value_uses_band_mean_when_mask_matches(self):
+        from wgan_option.visualization.surface_plot import extract_short_end_atm_band_value
+
+        surface = np.asarray(
+            [
+                [0.10, 0.20, 0.30, 0.40],
+                [1.10, 1.20, 1.30, 1.40],
+            ],
+            dtype=np.float32,
+        )
+        stats = extract_short_end_atm_band_value(
+            surface,
+            strike_grid=[0.88, 0.95, 1.02, 1.18],
+            maturity_days_grid=[5.0, 15.0],
+            atm_range=0.08,
+            short_end_max_days=10.0,
+        )
+
+        self.assertAlmostEqual(float(stats["value"]), 0.25, places=6)
+        self.assertEqual(int(stats["point_count"]), 2)
+        self.assertEqual(stats["selection"], "band_mean")
+
+    def test_extract_short_end_atm_band_value_falls_back_to_nearest_cell(self):
+        from wgan_option.visualization.surface_plot import extract_short_end_atm_band_value
+
+        surface = np.asarray(
+            [
+                [0.10, 0.20, 0.30],
+                [0.40, 0.50, 0.60],
+            ],
+            dtype=np.float32,
+        )
+        stats = extract_short_end_atm_band_value(
+            surface,
+            strike_grid=[0.70, 0.90, 1.30],
+            maturity_days_grid=[20.0, 30.0],
+            atm_range=0.08,
+            short_end_max_days=10.0,
+        )
+
+        self.assertAlmostEqual(float(stats["value"]), 0.20, places=6)
+        self.assertEqual(int(stats["point_count"]), 1)
+        self.assertEqual(stats["selection"], "nearest_cell_fallback")
 
     def test_generate_result_main_dispatches_subcommands(self):
         module = _load_script_module(ROOT_DIR / "scripts/generate_result/main.py", "generate_result_main_script")
