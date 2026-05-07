@@ -113,6 +113,7 @@ class FilmWGANSampleConfig:
     selection_mode: str = "all"
     selection_count: int = 0
     aggregation_mode: str = "weighted_mean"
+    residual_blend_alpha: float = 1.0
     output_dir: str = ""
     save_json: bool = True
     save_plots: bool = True

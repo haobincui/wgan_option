@@ -97,7 +97,12 @@ def extract_atm_short_value(
     }
 
 
-def plot_atm_vol_timeseries(rows: Sequence[Mapping[str, Any]], output_path: str | Path) -> Path:
+def plot_atm_vol_timeseries(
+    rows: Sequence[Mapping[str, Any]],
+    output_path: str | Path,
+    *,
+    series_scope: str | None = None,
+) -> Path:
     """Plot one run-level nearest-ATM shortest-maturity volatility time series."""
 
     if not rows:
@@ -112,10 +117,10 @@ def plot_atm_vol_timeseries(rows: Sequence[Mapping[str, Any]], output_path: str 
     timestamps = [_parse_timestamp_utc(row["news_timestamp_utc"]) for row in ordered_rows]
 
     fig, ax = plt.subplots(1, 1, figsize=(10.0, 4.8))
-    for label, key, color in [
-        ("Current", "current_atm_vol", "#1f77b4"),
-        ("Generated", "generated_atm_vol", "#d62728"),
-        ("Target", "target_atm_vol", "#2ca02c"),
+    for label, key, color, linestyle in [
+        ("Current", "current_atm_vol", "#1f77b4", "-"),
+        ("Generated", "generated_atm_vol", "#d62728", "-"),
+        ("Target", "target_atm_vol", "#2ca02c", "--"),
     ]:
         ax.plot(
             timestamps,
@@ -123,8 +128,7 @@ def plot_atm_vol_timeseries(rows: Sequence[Mapping[str, Any]], output_path: str 
             label=label,
             color=color,
             linewidth=2.0,
-            marker="o",
-            markersize=4.0,
+            linestyle=linestyle,
         )
 
     locator = mdates.AutoDateLocator()
@@ -136,8 +140,9 @@ def plot_atm_vol_timeseries(rows: Sequence[Mapping[str, Any]], output_path: str 
     ax.legend()
 
     first_row = ordered_rows[0]
+    scope_suffix = f" ({str(series_scope).strip()})" if str(series_scope or "").strip() else ""
     fig.suptitle(
-        "Nearest-ATM / Shortest-Maturity Vol Time Series\n"
+        f"Nearest-ATM / Shortest-Maturity Vol Time Series{scope_suffix}\n"
         f"nearest strike to 1.0 = {float(first_row['atm_strike']):.4f} | "
         f"shortest maturity = {float(first_row['short_maturity_days']):.1f}d"
     )

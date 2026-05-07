@@ -14,6 +14,7 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(SRC_DIR))
 
 from scripts.film_wgan.generate_result import main as generate_result_main  # noqa: E402
+from scripts.film_wgan.short_atm_study import main as short_atm_study_main  # noqa: E402
 from scripts.film_wgan.sample import main as sample_main  # noqa: E402
 from scripts.film_wgan.train import main as train_main  # noqa: E402
 
@@ -21,10 +22,12 @@ HELP_TEXT = """Usage:
   python scripts/film_wgan/main.py train --config configs/film_wgan/train_default.yaml
   python scripts/film_wgan/main.py sample --config configs/film_wgan/train_default.yaml
   python scripts/film_wgan/main.py generate-result --config configs/film_wgan/train_default.yaml
+  python scripts/film_wgan/main.py short-atm-study --config configs/film_wgan/train_lp_exp_F3.yaml
 
 Notes:
   `train` defaults to the full pipeline: training plus generate_result.
   `sample` is a thin alias for `generate-result` and also consumes the training YAML.
+  `short-atm-study` runs the fixed 2x2x3 short-end ATM experiment workflow.
 """
 
 
@@ -40,6 +43,8 @@ def main(argv: list[str] | None = None):
         return sample_main(remainder)
     if command in {"generate-result", "generate_result"}:
         return generate_result_main(remainder)
+    if command in {"short-atm-study", "short_atm_study"}:
+        return short_atm_study_main(remainder)
     raise SystemExit(f"Unsupported standalone FiLM WGAN command: {command}\n\n{HELP_TEXT}")
 
 

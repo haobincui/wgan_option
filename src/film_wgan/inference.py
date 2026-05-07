@@ -10,7 +10,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import torch
 
-from utils.training_paths import checkpoint_filename, generate_result_dir, infer_run_dir_from_checkpoint
+from utils.training_paths import generate_result_dir, infer_run_dir_from_checkpoint
 from .arbitrage import reweight_scenarios, total_arbitrage_penalty
 from .config import FilmWGANSampleConfig, FilmWGANTrainConfig
 from .data import (
@@ -23,6 +23,12 @@ from .data import (
     split_samples,
 )
 from .io import load_checkpoint, write_csv, write_json
+from .losses import (
+    atm_short_pure_mae,
+    build_atm_short_mask,
+    build_reconstruction_weight_template,
+    weighted_surface_mae,
+)
 from .models import FilmWGANGenerator, reconstruct_future_surface
 from .plotting import extract_atm_short_value, plot_atm_vol_timeseries, plot_film_wgan_payload
 
@@ -167,6 +173,75 @@ def _surface_metrics(predicted: np.ndarray, target: np.ndarray) -> dict[str, flo
     }
 
 
+def _apply_residual_blend(
+    generated_surface: np.ndarray,
+    current_surface: np.ndarray,
+    *,
+    residual_blend_alpha: float,
+) -> np.ndarray:
+    alpha = float(residual_blend_alpha)
+    generated = np.asarray(generated_surface, dtype=np.float32)
+    current = np.asarray(current_surface, dtype=np.float32)
+    if math.isclose(alpha, 1.0, rel_tol=0.0, abs_tol=1e-12):
+        return generated
+    return (current + alpha * (generated - current)).astype(np.float32)
+
+
+def _short_atm_metrics(
+    *,
+    generated_surface: np.ndarray,
+    current_surface: np.ndarray,
+    target_surface: np.ndarray,
+    recon_weights_surface: torch.Tensor | None,
+    atm_short_mask_surface: torch.Tensor | None,
+) -> dict[str, float]:
+    generated_tensor = torch.tensor(np.asarray(generated_surface, dtype=np.float32), dtype=torch.float32)
+    current_tensor = torch.tensor(np.asarray(current_surface, dtype=np.float32), dtype=torch.float32)
+    target_tensor = torch.tensor(np.asarray(target_surface, dtype=np.float32), dtype=torch.float32)
+
+    metrics = {
+        "short_atm_weighted_mae": 0.0,
+        "current_short_atm_weighted_mae": 0.0,
+        "short_atm_mae_gap_vs_current": 0.0,
+        "short_atm_weighted_win_flag_vs_current": 0.0,
+        "atm_short_pure_mae": 0.0,
+        "current_atm_short_pure_mae": 0.0,
+        "atm_short_pure_mae_gap_vs_current": 0.0,
+        "atm_short_pure_win_flag_vs_current": 0.0,
+    }
+    if recon_weights_surface is not None:
+        generated_weighted = float(
+            weighted_surface_mae(generated_tensor, target_tensor, recon_weights_surface).detach().cpu()
+        )
+        current_weighted = float(
+            weighted_surface_mae(current_tensor, target_tensor, recon_weights_surface).detach().cpu()
+        )
+        metrics.update(
+            {
+                "short_atm_weighted_mae": generated_weighted,
+                "current_short_atm_weighted_mae": current_weighted,
+                "short_atm_mae_gap_vs_current": generated_weighted - current_weighted,
+                "short_atm_weighted_win_flag_vs_current": 1.0 if generated_weighted < current_weighted else 0.0,
+            }
+        )
+    if atm_short_mask_surface is not None and float(atm_short_mask_surface.sum().item()) > 0.0:
+        generated_pure = float(
+            atm_short_pure_mae(generated_tensor, target_tensor, atm_short_mask_surface).detach().cpu()
+        )
+        current_pure = float(
+            atm_short_pure_mae(current_tensor, target_tensor, atm_short_mask_surface).detach().cpu()
+        )
+        metrics.update(
+            {
+                "atm_short_pure_mae": generated_pure,
+                "current_atm_short_pure_mae": current_pure,
+                "atm_short_pure_mae_gap_vs_current": generated_pure - current_pure,
+                "atm_short_pure_win_flag_vs_current": 1.0 if generated_pure < current_pure else 0.0,
+            }
+        )
+    return metrics
+
+
 def summarize_surface_scenarios(
     *,
     surface_stack: np.ndarray,
@@ -178,6 +253,9 @@ def summarize_surface_scenarios(
     reweight_beta: float,
     aggregation_mode: str,
     quantiles: Sequence[float] = (),
+    recon_weights_surface: torch.Tensor | None = None,
+    atm_short_mask_surface: torch.Tensor | None = None,
+    residual_blend_alpha: float = 1.0,
 ) -> dict[str, Any]:
     penalties = total_arbitrage_penalty(
         torch.tensor(surface_stack, dtype=torch.float32),
@@ -194,20 +272,34 @@ def summarize_surface_scenarios(
         raise ValueError(f"Unsupported aggregation_mode: {aggregation_mode}")
     weighted_mean_surface = _weighted_mean(surface_stack, weights).astype(np.float32)
     flat_surface_stack = surface_stack.reshape(surface_stack.shape[0], -1)
-    quantile_surfaces = {
-        f"q_{float(quantile):.2f}": _weighted_quantile(flat_surface_stack, weights, float(quantile))
-        .reshape(target_surface.shape)
-        .astype(np.float32)
-        .tolist()
-        for quantile in quantiles
-    }
     current_surface = np.asarray(current_surface, dtype=np.float32)
     target_surface = np.asarray(target_surface, dtype=np.float32)
+    blended_surface = _apply_residual_blend(
+        weighted_mean_surface,
+        current_surface,
+        residual_blend_alpha=float(residual_blend_alpha),
+    )
+    quantile_surfaces = {
+        f"q_{float(quantile):.2f}": _apply_residual_blend(
+            _weighted_quantile(flat_surface_stack, weights, float(quantile))
+            .reshape(target_surface.shape)
+            .astype(np.float32),
+            current_surface,
+            residual_blend_alpha=float(residual_blend_alpha),
+        ).tolist()
+        for quantile in quantiles
+    }
     current_metrics = _surface_metrics(current_surface, target_surface)
-    metrics = _surface_metrics(weighted_mean_surface, target_surface)
-    generated_current_metrics = _surface_metrics(weighted_mean_surface, current_surface)
+    metrics = _surface_metrics(blended_surface, target_surface)
+    generated_current_metrics = _surface_metrics(blended_surface, current_surface)
+    comparison_metrics = {
+        "mae_gap_vs_current": metrics["mae"] - current_metrics["mae"],
+        "rmse_gap_vs_current": metrics["rmse"] - current_metrics["rmse"],
+        "max_abs_gap_vs_current": metrics["max_abs"] - current_metrics["max_abs"],
+        "win_flag_vs_current": 1.0 if metrics["mae"] < current_metrics["mae"] else 0.0,
+    }
     return {
-        "generated_surface": weighted_mean_surface.astype(float).tolist(),
+        "generated_surface": blended_surface.astype(float).tolist(),
         "quantile_surfaces": quantile_surfaces,
         "penalties": penalties.astype(float).tolist(),
         "weights": weights.astype(float).tolist(),
@@ -218,6 +310,14 @@ def summarize_surface_scenarios(
         "metrics": metrics,
         "current_metrics": current_metrics,
         "generated_current_metrics": generated_current_metrics,
+        "comparison_metrics": comparison_metrics,
+        "short_atm_metrics": _short_atm_metrics(
+            generated_surface=blended_surface,
+            current_surface=current_surface,
+            target_surface=target_surface,
+            recon_weights_surface=recon_weights_surface,
+            atm_short_mask_surface=atm_short_mask_surface,
+        ),
     }
 
 
@@ -237,9 +337,12 @@ def build_sample_payload(
     checkpoint_path: str,
     split: str,
     selection_mode: str,
+    recon_weights_surface: torch.Tensor | None,
+    atm_short_mask_surface: torch.Tensor | None,
     normalize_current_surface: bool,
     normalize_text_embedding: bool,
     normalize_target_delta: bool,
+    residual_blend_alpha: float,
 ) -> dict[str, Any]:
     surface_stack = generate_surface_scenarios(
         generator=generator,
@@ -263,6 +366,9 @@ def build_sample_payload(
         reweight_beta=reweight_beta,
         aggregation_mode=aggregation_mode,
         quantiles=quantiles,
+        recon_weights_surface=recon_weights_surface,
+        atm_short_mask_surface=atm_short_mask_surface,
+        residual_blend_alpha=float(residual_blend_alpha),
     )
     return {
         "sample_id": sample.sample_id,
@@ -287,6 +393,8 @@ def build_sample_payload(
         "metrics": summary["metrics"],
         "current_metrics": summary["current_metrics"],
         "generated_current_metrics": summary["generated_current_metrics"],
+        "comparison_metrics": summary["comparison_metrics"],
+        "short_atm_metrics": summary["short_atm_metrics"],
         "metadata": {
             "pair_quality_label": sample.metadata.get("pair_quality_label", ""),
             "checkpoint_path": str(checkpoint_path),
@@ -294,6 +402,7 @@ def build_sample_payload(
             "split": str(split),
             "selection_mode": str(selection_mode),
             "aggregation_mode": str(aggregation_mode),
+            "residual_blend_alpha": float(residual_blend_alpha),
         },
     }
 
@@ -389,7 +498,22 @@ class FilmWGANSampler:
 
     def sample(self):
         generator, _checkpoint, train_config, normalization = self._load_generator()
-        checkpoint_stem = checkpoint_filename(self.config.checkpoint_path)
+        strike_grid = torch.tensor(_checkpoint["strike_grid"], dtype=torch.float32)
+        maturity_days_grid = torch.tensor(_checkpoint["maturity_days_grid"], dtype=torch.float32)
+        recon_weights_surface = build_reconstruction_weight_template(
+            strike_grid=strike_grid,
+            maturity_days_grid=maturity_days_grid,
+            mode=str(train_config.recon_weight_mode),
+            atm_range=float(train_config.recon_atm_range),
+            short_end_max_days=float(train_config.recon_atm_short_end_max_days),
+            atm_multiplier=float(train_config.recon_atm_multiplier),
+        )
+        atm_short_mask_surface = build_atm_short_mask(
+            strike_grid=strike_grid,
+            maturity_days_grid=maturity_days_grid,
+            atm_range=float(train_config.atm_short_range),
+            max_days=float(train_config.atm_short_max_days),
+        )
         atm_vol_dir = _resolve_atm_vol_dir(
             checkpoint_path=self.config.checkpoint_path,
             output_dir=self.config.output_dir,
@@ -401,33 +525,47 @@ class FilmWGANSampler:
             raise ValueError("No standalone FiLM WGAN samples are available after split/selection.")
 
         summary_rows: list[dict[str, Any]] = []
-        atm_vol_rows: list[dict[str, Any]] = []
+        sample_atm_rows: list[dict[str, Any]] = []
+        payload_cache: dict[tuple[int, str], dict[str, Any]] = {}
+
+        def _cache_key(sample: FilmWGANSample) -> tuple[int, str]:
+            return int(sample.global_index), str(sample.sample_id)
+
+        def _payload_for_sample(sample: FilmWGANSample) -> dict[str, Any]:
+            key = _cache_key(sample)
+            if key not in payload_cache:
+                payload_cache[key] = build_sample_payload(
+                    generator=generator,
+                    sample=sample,
+                    normalization=normalization,
+                    noise_dim=int(train_config.noise_dim),
+                    mc_samples=int(self.config.mc_samples),
+                    seed=int(self.config.seed),
+                    device=self.device,
+                    reweight_beta_mode=self.config.reweight_beta_mode,
+                    reweight_beta=float(self.config.reweight_beta),
+                    aggregation_mode=self.config.aggregation_mode,
+                    quantiles=self.config.quantiles,
+                    checkpoint_path=str(self.config.checkpoint_path),
+                    split=str(self.config.split),
+                    selection_mode=str(self.config.selection_mode),
+                    recon_weights_surface=recon_weights_surface,
+                    atm_short_mask_surface=atm_short_mask_surface,
+                    normalize_current_surface=bool(train_config.normalize_current_surface),
+                    normalize_text_embedding=bool(train_config.normalize_text_embedding),
+                    normalize_target_delta=bool(train_config.normalize_target_delta),
+                    residual_blend_alpha=float(self.config.residual_blend_alpha),
+                )
+            return payload_cache[key]
+
         for sample in selected_samples:
-            payload = build_sample_payload(
-                generator=generator,
-                sample=sample,
-                normalization=normalization,
-                noise_dim=int(train_config.noise_dim),
-                mc_samples=int(self.config.mc_samples),
-                seed=int(self.config.seed),
-                device=self.device,
-                reweight_beta_mode=self.config.reweight_beta_mode,
-                reweight_beta=float(self.config.reweight_beta),
-                aggregation_mode=self.config.aggregation_mode,
-                quantiles=self.config.quantiles,
-                checkpoint_path=str(self.config.checkpoint_path),
-                split=str(self.config.split),
-                selection_mode=str(self.config.selection_mode),
-                normalize_current_surface=bool(train_config.normalize_current_surface),
-                normalize_text_embedding=bool(train_config.normalize_text_embedding),
-                normalize_target_delta=bool(train_config.normalize_target_delta),
-            )
+            payload = _payload_for_sample(sample)
             json_path = self.samples_dir / f"{sample.global_index:04d}_{sample.sample_id}.json"
             if bool(self.config.save_json):
                 write_json(json_path, payload)
             if bool(self.config.save_plots):
                 plot_film_wgan_payload(payload, self.plots_dir / f"{sample.global_index:04d}_{sample.sample_id}.png")
-            atm_vol_rows.append(
+            sample_atm_rows.append(
                 _build_atm_vol_row(
                     sample=sample,
                     payload=payload,
@@ -443,31 +581,73 @@ class FilmWGANSampler:
                     "weight_entropy": float(payload["weight_entropy"]),
                     "penalty_mean": float(payload["penalty_mean"]),
                     "penalty_std": float(payload["penalty_std"]),
+                    "residual_blend_alpha": float(payload["metadata"]["residual_blend_alpha"]),
                     "mae": float(payload["metrics"]["mae"]),
                     "rmse": float(payload["metrics"]["rmse"]),
                     "max_abs": float(payload["metrics"]["max_abs"]),
                     "current_mae": float(payload["current_metrics"]["mae"]),
                     "current_rmse": float(payload["current_metrics"]["rmse"]),
                     "current_max_abs": float(payload["current_metrics"]["max_abs"]),
+                    "mae_gap_vs_current": float(payload["comparison_metrics"]["mae_gap_vs_current"]),
+                    "rmse_gap_vs_current": float(payload["comparison_metrics"]["rmse_gap_vs_current"]),
+                    "max_abs_gap_vs_current": float(payload["comparison_metrics"]["max_abs_gap_vs_current"]),
+                    "win_flag_vs_current": float(payload["comparison_metrics"]["win_flag_vs_current"]),
+                    "short_atm_weighted_mae": float(payload["short_atm_metrics"]["short_atm_weighted_mae"]),
+                    "current_short_atm_weighted_mae": float(
+                        payload["short_atm_metrics"]["current_short_atm_weighted_mae"]
+                    ),
+                    "short_atm_mae_gap_vs_current": float(payload["short_atm_metrics"]["short_atm_mae_gap_vs_current"]),
+                    "short_atm_weighted_win_flag_vs_current": float(
+                        payload["short_atm_metrics"]["short_atm_weighted_win_flag_vs_current"]
+                    ),
+                    "atm_short_pure_mae": float(payload["short_atm_metrics"]["atm_short_pure_mae"]),
+                    "current_atm_short_pure_mae": float(payload["short_atm_metrics"]["current_atm_short_pure_mae"]),
+                    "atm_short_pure_mae_gap_vs_current": float(
+                        payload["short_atm_metrics"]["atm_short_pure_mae_gap_vs_current"]
+                    ),
+                    "atm_short_pure_win_flag_vs_current": float(
+                        payload["short_atm_metrics"]["atm_short_pure_win_flag_vs_current"]
+                    ),
                     "generated_current_mae": float(payload["generated_current_metrics"]["mae"]),
                 }
             )
         write_csv(self.run_dir / "summary.csv", summary_rows)
-        ordered_atm_rows = sorted(
-            atm_vol_rows,
-            key=lambda row: (str(row.get("news_timestamp_utc", "")), int(row.get("global_index", -1))),
-        )
-        write_csv(atm_vol_dir / f"{checkpoint_stem}_atm_vol_timeseries.csv", ordered_atm_rows)
+
+        def _ordered_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+            return sorted(
+                rows,
+                key=lambda row: (str(row.get("news_timestamp_utc", "")), int(row.get("global_index", -1))),
+            )
+
+        full_atm_rows = [
+            _build_atm_vol_row(
+                sample=sample,
+                payload=_payload_for_sample(sample),
+                checkpoint_path=self.config.checkpoint_path,
+            )
+            for sample in all_samples
+        ]
+        ordered_sample_rows = _ordered_rows(sample_atm_rows)
+        ordered_full_rows = _ordered_rows(full_atm_rows)
+        write_csv(atm_vol_dir / "film_wgan_best_atm_vol_timeseries_sample.csv", ordered_sample_rows)
+        write_csv(atm_vol_dir / "film_wgan_best_atm_vol_timeseries_full.csv", ordered_full_rows)
         if bool(self.config.save_plots):
             plot_atm_vol_timeseries(
-                ordered_atm_rows,
-                atm_vol_dir / f"{checkpoint_stem}_atm_vol_timeseries.png",
+                ordered_sample_rows,
+                atm_vol_dir / "film_wgan_best_atm_vol_timeseries_sample.png",
+                series_scope="sample",
+            )
+            plot_atm_vol_timeseries(
+                ordered_full_rows,
+                atm_vol_dir / "film_wgan_best_atm_vol_timeseries_full.png",
+                series_scope="full",
             )
         write_json(
             self.run_dir / "run_metadata.json",
             {
                 "checkpoint_path": str(self.config.checkpoint_path),
                 "selected_samples": len(summary_rows),
+                "full_samples": len(ordered_full_rows),
                 "config": asdict(self.config),
             },
         )

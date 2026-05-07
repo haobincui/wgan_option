@@ -401,9 +401,12 @@ class FilmWGANTrainer(BaseTrainer):
                 checkpoint_path="",
                 split="val",
                 selection_mode="all",
+                recon_weights_surface=self._recon_weights_surface,
+                atm_short_mask_surface=self._atm_short_mask_surface,
                 normalize_current_surface=bool(self.config.normalize_current_surface),
                 normalize_text_embedding=bool(self.config.normalize_text_embedding),
                 normalize_target_delta=bool(self.config.normalize_target_delta),
+                residual_blend_alpha=1.0,
             )
             mae.append(float(payload["metrics"]["mae"]))
             rmse.append(float(payload["metrics"]["rmse"]))

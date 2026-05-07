@@ -33,6 +33,11 @@ from film_wgan.models import (  # noqa: E402
     FilmWGANGenerator,
     reconstruct_future_surface,
 )
+from film_wgan.short_atm_study import (  # noqa: E402
+    build_short_atm_grid_specs,
+    choose_recommended_config,
+    select_blend_scan_config_ids,
+)
 from film_wgan.trainer import FilmWGANTrainer  # noqa: E402
 from stylemod_wgan.models import FiLMLayer as StyleModFiLMLayer  # noqa: E402
 
@@ -160,6 +165,8 @@ def _write_film_checkpoint(
         {
             "config": asdict(config),
             "surface_shape": [2, 3],
+            "strike_grid": [0.80, 1.02, 1.20],
+            "maturity_days_grid": [7.0, 30.0],
             "embedding_dim": 3,
             "generator_state_dict": generator.state_dict(),
             "normalization_stats": {
@@ -329,7 +336,50 @@ class TestFilmWGANGenerateResultATMOutputs(unittest.TestCase):
         self.assertEqual(int(stats["atm_index"]), 1)
         self.assertEqual(int(stats["short_index"]), 0)
 
-    def test_sampler_writes_fixed_atm_vol_outputs_alongside_original_outputs(self):
+    def test_plot_atm_vol_timeseries_uses_line_only_and_dashed_target(self):
+        from film_wgan import plotting as plotting_module
+
+        rows = [
+            {
+                "sample_id": "news_1",
+                "global_index": 0,
+                "news_timestamp_utc": "2022-12-30T13:30:00Z",
+                "current_atm_vol": 0.004,
+                "generated_atm_vol": 0.0045,
+                "target_atm_vol": 0.005,
+                "atm_strike": 1.02,
+                "short_maturity_days": 7.0,
+            },
+            {
+                "sample_id": "news_2",
+                "global_index": 1,
+                "news_timestamp_utc": "2022-12-30T13:35:00Z",
+                "current_atm_vol": 0.006,
+                "generated_atm_vol": 0.0065,
+                "target_atm_vol": 0.007,
+                "atm_strike": 1.02,
+                "short_maturity_days": 7.0,
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "atm_vol.png"
+            fig = plotting_module.plt.figure(figsize=(10.0, 4.8))
+            ax = fig.subplots(1, 1)
+
+            with patch.object(plotting_module.plt, "subplots", return_value=(fig, ax)):
+                plotting_module.plot_atm_vol_timeseries(rows, output_path, series_scope="sample")
+
+            self.assertTrue(output_path.exists())
+            lines = ax.get_lines()
+            self.assertEqual([line.get_label() for line in lines], ["Current", "Generated", "Target"])
+            self.assertEqual([line.get_linestyle() for line in lines], ["-", "-", "--"])
+            for line in lines:
+                self.assertIn(str(line.get_marker()).lower(), {"none", ""})
+
+            plotting_module.plt.close(fig)
+
+    def test_sampler_writes_sample_and_full_atm_vol_outputs_alongside_original_outputs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = _write_vol_workbook(tmpdir)
             _output_root, training_run_dir, checkpoint_path = _write_film_checkpoint(tmpdir, workbook_path=workbook_path)
@@ -343,7 +393,7 @@ class TestFilmWGANGenerateResultATMOutputs(unittest.TestCase):
                 seed=123,
                 cuda=False,
                 mc_samples=2,
-                split="all",
+                split="val",
                 selection_mode="all",
                 selection_count=0,
                 aggregation_mode="weighted_mean",
@@ -357,23 +407,44 @@ class TestFilmWGANGenerateResultATMOutputs(unittest.TestCase):
             self.assertEqual(run_dir, sample_run_dir)
             self.assertTrue((run_dir / "summary.csv").exists())
             self.assertTrue((run_dir / "run_metadata.json").exists())
-            self.assertEqual(len(list((run_dir / "samples").glob("*.json"))), 3)
-            self.assertEqual(len(list((run_dir / "plots").glob("*.png"))), 6)
+            self.assertEqual(len(list((run_dir / "samples").glob("*.json"))), 1)
+            self.assertEqual(len(list((run_dir / "plots").glob("*.png"))), 2)
 
             atm_vol_dir = training_run_dir / "generate_result" / "atm_vol"
-            atm_csv = atm_vol_dir / "film_wgan_best_atm_vol_timeseries.csv"
-            atm_png = atm_vol_dir / "film_wgan_best_atm_vol_timeseries.png"
-            self.assertTrue(atm_csv.exists())
-            self.assertTrue(atm_png.exists())
-            self.assertGreater(atm_png.stat().st_size, 0)
+            sample_csv = atm_vol_dir / "film_wgan_best_atm_vol_timeseries_sample.csv"
+            sample_png = atm_vol_dir / "film_wgan_best_atm_vol_timeseries_sample.png"
+            full_csv = atm_vol_dir / "film_wgan_best_atm_vol_timeseries_full.csv"
+            full_png = atm_vol_dir / "film_wgan_best_atm_vol_timeseries_full.png"
+            for path in (sample_csv, sample_png, full_csv, full_png):
+                self.assertTrue(path.exists())
+            self.assertGreater(sample_png.stat().st_size, 0)
+            self.assertGreater(full_png.stat().st_size, 0)
 
-            with atm_csv.open(encoding="utf-8", newline="") as handle:
-                rows = list(csv.DictReader(handle))
-            self.assertEqual([row["sample_id"] for row in rows], ["news_1", "news_2", "news_3"])
+            with sample_csv.open(encoding="utf-8", newline="") as handle:
+                sample_rows = list(csv.DictReader(handle))
+            with full_csv.open(encoding="utf-8", newline="") as handle:
+                full_rows = list(csv.DictReader(handle))
+
+            self.assertEqual([row["sample_id"] for row in sample_rows], ["news_3"])
+            self.assertEqual([row["sample_id"] for row in full_rows], ["news_1", "news_2", "news_3"])
+            self.assertEqual(len(sample_rows), 1)
+            self.assertEqual(len(full_rows), 3)
+            self.assertLess(len(sample_rows), len(full_rows))
+
+            row = sample_rows[0]
+            self.assertAlmostEqual(float(row["atm_strike"]), 1.02, places=6)
+            self.assertAlmostEqual(float(row["short_maturity_days"]), 7.0, places=6)
+            self.assertAlmostEqual(float(row["current_atm_vol"]), 0.006, places=6)
+            self.assertAlmostEqual(float(row["target_atm_vol"]), 0.007, places=6)
+            self.assertAlmostEqual(float(row["current_target_abs_error"]), 0.001, places=6)
+            self.assertEqual(row["checkpoint_path"], str(checkpoint_path))
+            self.assertTrue(math.isfinite(float(row["generated_atm_vol"])))
+            self.assertTrue(math.isfinite(float(row["generated_target_abs_error"])))
+
             for row, expected_current, expected_target in [
-                (rows[0], 0.004, 0.005),
-                (rows[1], 0.002, 0.003),
-                (rows[2], 0.006, 0.007),
+                (full_rows[0], 0.004, 0.005),
+                (full_rows[1], 0.002, 0.003),
+                (full_rows[2], 0.006, 0.007),
             ]:
                 self.assertAlmostEqual(float(row["atm_strike"]), 1.02, places=6)
                 self.assertAlmostEqual(float(row["short_maturity_days"]), 7.0, places=6)
@@ -415,10 +486,59 @@ class TestFilmWGANGenerateResultATMOutputs(unittest.TestCase):
             self.assertFalse((run_dir / "plots").exists())
 
             atm_vol_dir = training_run_dir / "generate_result" / "atm_vol"
-            atm_csv = atm_vol_dir / "film_wgan_best_atm_vol_timeseries.csv"
-            atm_png = atm_vol_dir / "film_wgan_best_atm_vol_timeseries.png"
-            self.assertTrue(atm_csv.exists())
-            self.assertFalse(atm_png.exists())
+            sample_csv = atm_vol_dir / "film_wgan_best_atm_vol_timeseries_sample.csv"
+            sample_png = atm_vol_dir / "film_wgan_best_atm_vol_timeseries_sample.png"
+            full_csv = atm_vol_dir / "film_wgan_best_atm_vol_timeseries_full.csv"
+            full_png = atm_vol_dir / "film_wgan_best_atm_vol_timeseries_full.png"
+            self.assertTrue(sample_csv.exists())
+            self.assertTrue(full_csv.exists())
+            self.assertFalse(sample_png.exists())
+            self.assertFalse(full_png.exists())
+
+    def test_sampler_summary_tracks_short_end_metrics_and_residual_blend_alpha(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = _write_vol_workbook(tmpdir)
+            _output_root, training_run_dir, checkpoint_path = _write_film_checkpoint(tmpdir, workbook_path=workbook_path)
+            sample_run_dir = training_run_dir / "generate_result" / "blended_current"
+            config = FilmWGANSampleConfig(
+                data_path=str(workbook_path),
+                sheet_name="gan_input_ready",
+                text_embedding_mode="lp",
+                train_ratio=2 / 3,
+                checkpoint_path=str(checkpoint_path),
+                seed=123,
+                cuda=False,
+                mc_samples=2,
+                split="val",
+                selection_mode="all",
+                selection_count=0,
+                aggregation_mode="weighted_mean",
+                residual_blend_alpha=0.0,
+                output_dir=str(sample_run_dir),
+                save_json=False,
+                save_plots=False,
+            )
+
+            run_dir = FilmWGANSampler(config).sample()
+
+            with (run_dir / "summary.csv").open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertAlmostEqual(float(row["residual_blend_alpha"]), 0.0, places=6)
+            self.assertAlmostEqual(float(row["mae"]), float(row["current_mae"]), places=6)
+            self.assertAlmostEqual(float(row["rmse"]), float(row["current_rmse"]), places=6)
+            self.assertAlmostEqual(float(row["max_abs"]), float(row["current_max_abs"]), places=6)
+            self.assertAlmostEqual(float(row["generated_current_mae"]), 0.0, places=6)
+            self.assertAlmostEqual(float(row["mae_gap_vs_current"]), 0.0, places=6)
+            self.assertAlmostEqual(float(row["short_atm_weighted_mae"]), float(row["current_short_atm_weighted_mae"]), places=6)
+            self.assertAlmostEqual(float(row["short_atm_mae_gap_vs_current"]), 0.0, places=6)
+            self.assertAlmostEqual(float(row["atm_short_pure_mae"]), float(row["current_atm_short_pure_mae"]), places=6)
+            self.assertAlmostEqual(float(row["atm_short_pure_mae_gap_vs_current"]), 0.0, places=6)
+            self.assertEqual(float(row["win_flag_vs_current"]), 0.0)
+            self.assertEqual(float(row["short_atm_weighted_win_flag_vs_current"]), 0.0)
+            self.assertEqual(float(row["atm_short_pure_win_flag_vs_current"]), 0.0)
 
 
 class TestFilmWGANTrainerMetrics(unittest.TestCase):
@@ -779,3 +899,66 @@ class TestFilmWGANInitializationSmoke(unittest.TestCase):
         self.assertTrue(torch.isfinite(fake_future_flat).all())
         self.assertTrue(torch.isfinite(gp))
         self.assertLess(frac_floor + frac_ceil, 1.0)
+
+
+class TestFilmWGANShortATMStudy(unittest.TestCase):
+    def test_short_atm_study_grid_matches_expected_2x2_matrix(self):
+        specs = build_short_atm_grid_specs()
+
+        self.assertEqual(
+            [
+                (
+                    spec.config_id,
+                    spec.recon_atm_range,
+                    spec.recon_atm_short_end_max_days,
+                    spec.recon_atm_multiplier,
+                    spec.lambda_atm_short,
+                )
+                for spec in specs
+            ],
+            [
+                ("A", 0.04, 60.0, 16.0, 50.0),
+                ("B", 0.04, 60.0, 16.0, 75.0),
+                ("C", 0.06, 90.0, 8.0, 50.0),
+                ("D", 0.06, 90.0, 8.0, 75.0),
+            ],
+        )
+
+    def test_short_atm_selection_rule_prefers_qualified_config(self):
+        primary_rows = [
+            {
+                "config_id": "A",
+                "val_atm_short_pure_mae_gap_vs_current_mean": -0.00118,
+                "val_mae_gap_vs_current_mean": -0.00210,
+                "val_calendar_mean": 1.3e-5,
+                "val_butterfly_mean": 9.0e-7,
+            },
+            {
+                "config_id": "B",
+                "val_atm_short_pure_mae_gap_vs_current_mean": -0.00150,
+                "val_mae_gap_vs_current_mean": -0.00205,
+                "val_calendar_mean": 1.2e-5,
+                "val_butterfly_mean": 8.5e-7,
+            },
+            {
+                "config_id": "C",
+                "val_atm_short_pure_mae_gap_vs_current_mean": -0.00160,
+                "val_mae_gap_vs_current_mean": -0.00120,
+                "val_calendar_mean": 1.1e-5,
+                "val_butterfly_mean": 7.5e-7,
+            },
+            {
+                "config_id": "D",
+                "val_atm_short_pure_mae_gap_vs_current_mean": -0.00125,
+                "val_mae_gap_vs_current_mean": -0.00195,
+                "val_calendar_mean": 2.5e-5,
+                "val_butterfly_mean": 8.0e-7,
+            },
+        ]
+
+        recommended = choose_recommended_config(primary_rows)
+        top_two = select_blend_scan_config_ids(primary_rows, top_k=2)
+
+        self.assertEqual(recommended["recommended_config_id"], "B")
+        self.assertEqual(recommended["qualified_config_ids"], ["B"])
+        self.assertEqual(top_two, ["C", "B"])
