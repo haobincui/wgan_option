@@ -40,7 +40,7 @@ def _parse_serialized_list(value: Any) -> list[float]:
 
 
 def _parse_embedding(row: Any, mode: str) -> np.ndarray:
-    normalized_mode = str(mode).strip().lower()
+    normalized_mode = str(mode).strip().lower().replace("-", "_")
     if normalized_mode == "none":
         return np.zeros(1, dtype=np.float32)
     hd = np.asarray(_parse_serialized_list(getattr(row, "hd_embedding", [])), dtype=np.float32)
@@ -51,7 +51,21 @@ def _parse_embedding(row: Any, mode: str) -> np.ndarray:
         return lp
     if normalized_mode == "concat":
         return np.concatenate([hd, lp], axis=0).astype(np.float32)
-    raise ValueError(f"text_embedding_mode must be one of ['none', 'hd', 'lp', 'concat'], got: {mode}")
+    if normalized_mode == "bow":
+        embedding = np.asarray(_parse_serialized_list(getattr(row, "bow_embedding", [])), dtype=np.float32)
+        if embedding.size <= 0:
+            raise ValueError("text_embedding_mode=bow requires a non-empty 'bow_embedding' column.")
+        return embedding
+    if normalized_mode in {"sentiment", "llm_sentiment"}:
+        embedding = np.asarray(_parse_serialized_list(getattr(row, "sentiment_embedding", [])), dtype=np.float32)
+        if embedding.size <= 0:
+            raise ValueError("text_embedding_mode=sentiment requires a non-empty 'sentiment_embedding' column.")
+        return embedding
+    raise ValueError(
+        "text_embedding_mode must be one of "
+        "['none', 'hd', 'lp', 'concat', 'bow', 'sentiment', 'llm_sentiment'], "
+        f"got: {mode}"
+    )
 
 
 @dataclass(frozen=True)
