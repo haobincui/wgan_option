@@ -71,6 +71,8 @@ def _write_vol_workbook(tmpdir: str) -> Path:
                 "target_snapshot_time_utc": "2022-12-30T13:45:00Z",
                 "hd_embedding": _json_text([1.0, 2.0]),
                 "lp_embedding": _json_text([10.0, 20.0, 30.0]),
+                "bow_embedding": _json_text([0.10, 0.20, 0.30, 0.40]),
+                "sentiment_embedding": _json_text([1.0, 0.0, 0.5, 0.0, 0.25]),
                 "strike_grid": _json_text(strike_grid),
                 "maturity_days_grid": _json_text(maturity_grid),
                 "current_surface_flat": _json_text(_surface_values(1.0, cells)),
@@ -85,6 +87,8 @@ def _write_vol_workbook(tmpdir: str) -> Path:
                 "target_snapshot_time_utc": "2022-12-30T13:35:00Z",
                 "hd_embedding": _json_text([3.0, 4.0]),
                 "lp_embedding": _json_text([40.0, 50.0, 60.0]),
+                "bow_embedding": _json_text([0.50, 0.60, 0.70, 0.80]),
+                "sentiment_embedding": _json_text([0.0, 1.0, 0.25, 0.0, 0.50]),
                 "strike_grid": _json_text(strike_grid),
                 "maturity_days_grid": _json_text(maturity_grid),
                 "current_surface_flat": _json_text(_surface_values(3.0, cells)),
@@ -99,6 +103,8 @@ def _write_vol_workbook(tmpdir: str) -> Path:
                 "target_snapshot_time_utc": "2022-12-30T13:55:00Z",
                 "hd_embedding": _json_text([5.0, 6.0]),
                 "lp_embedding": _json_text([70.0, 80.0, 90.0]),
+                "bow_embedding": _json_text([0.90, 1.00, 1.10, 1.20]),
+                "sentiment_embedding": _json_text([0.0, 0.0, 0.75, 1.0, 0.00]),
                 "strike_grid": _json_text(strike_grid),
                 "maturity_days_grid": _json_text(maturity_grid),
                 "current_surface_flat": _json_text(_surface_values(5.0, cells)),
@@ -345,6 +351,33 @@ class TestFilmWGANConfiguration(unittest.TestCase):
                 self.assertFalse(torch.isnan(target_delta).any())
                 self.assertFalse(torch.isnan(current_flat).any())
                 self.assertFalse(torch.isnan(target_flat).any())
+
+    def test_rq2_text_modes_read_bow_and_sentiment_embeddings(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = _write_vol_workbook(tmpdir)
+
+            expected_dims = {
+                "bow": 4,
+                "sentiment": 5,
+                "llm-sentiment": 5,
+            }
+            for mode, expected_dim in expected_dims.items():
+                config = FilmWGANTrainConfig(
+                    data_path=str(workbook_path),
+                    sheet_name="gan_input_ready",
+                    text_embedding_mode=mode,
+                    train_ratio=2 / 3,
+                    normalize_text_embedding=False,
+                    batch_size=8,
+                    cuda=False,
+                    num_workers=0,
+                )
+                bundle = create_train_val_bundle(config)
+                _current_features, text_features, _target_delta, _current_flat, _target_flat = next(iter(bundle.train_loader))
+
+                self.assertEqual(bundle.embedding_dim, expected_dim)
+                self.assertEqual(int(text_features.shape[1]), expected_dim)
+                self.assertFalse(torch.isnan(text_features).any())
 
 
 class TestFilmWGANGenerateResultATMOutputs(unittest.TestCase):
