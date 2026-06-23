@@ -41,6 +41,8 @@ def _parse_serialized_list(value: Any) -> list[float]:
 
 def _parse_embedding(row: Any, mode: str) -> np.ndarray:
     normalized_mode = str(mode).strip().lower()
+    if normalized_mode == "none":
+        return np.zeros(1, dtype=np.float32)
     hd = np.asarray(_parse_serialized_list(getattr(row, "hd_embedding", [])), dtype=np.float32)
     lp = np.asarray(_parse_serialized_list(getattr(row, "lp_embedding", [])), dtype=np.float32)
     if normalized_mode == "hd":
@@ -49,7 +51,7 @@ def _parse_embedding(row: Any, mode: str) -> np.ndarray:
         return lp
     if normalized_mode == "concat":
         return np.concatenate([hd, lp], axis=0).astype(np.float32)
-    raise ValueError(f"text_embedding_mode must be one of ['hd', 'lp', 'concat'], got: {mode}")
+    raise ValueError(f"text_embedding_mode must be one of ['none', 'hd', 'lp', 'concat'], got: {mode}")
 
 
 @dataclass(frozen=True)

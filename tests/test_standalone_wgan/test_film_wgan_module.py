@@ -319,6 +319,33 @@ class TestFilmWGANConfiguration(unittest.TestCase):
             ["val_mae_gap_vs_current", "val_short_atm_mae_gap_vs_current"],
         )
 
+    def test_none_text_mode_uses_single_zero_feature_with_or_without_normalization(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = _write_vol_workbook(tmpdir)
+
+            for normalize_text_embedding in (True, False):
+                config = FilmWGANTrainConfig(
+                    data_path=str(workbook_path),
+                    sheet_name="gan_input_ready",
+                    text_embedding_mode="none",
+                    train_ratio=2 / 3,
+                    normalize_text_embedding=normalize_text_embedding,
+                    batch_size=8,
+                    cuda=False,
+                    num_workers=0,
+                )
+                bundle = create_train_val_bundle(config)
+
+                self.assertEqual(bundle.embedding_dim, 1)
+                current_features, text_features, target_delta, current_flat, target_flat = next(iter(bundle.train_loader))
+                self.assertEqual(int(text_features.shape[1]), 1)
+                self.assertTrue(torch.all(text_features == 0.0))
+                self.assertFalse(torch.isnan(text_features).any())
+                self.assertFalse(torch.isnan(current_features).any())
+                self.assertFalse(torch.isnan(target_delta).any())
+                self.assertFalse(torch.isnan(current_flat).any())
+                self.assertFalse(torch.isnan(target_flat).any())
+
 
 class TestFilmWGANGenerateResultATMOutputs(unittest.TestCase):
     def test_extract_atm_short_value_uses_nearest_atm_and_shortest_maturity(self):
