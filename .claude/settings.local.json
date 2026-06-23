@@ -61,7 +61,10 @@
       "Bash([ -f \"$d/metrics/best_checkpoint.json\" ])",
       "Bash(ls /home/haobin_cui/research_files_space_2/wgan_option/run_*.sh)",
       "Bash(chmod +x /home/haobin_cui/research_files_space_2/wgan_option/run_crossattn_wgan_svi_excel.sh)",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -c \"import ast; [ast.parse\\(open\\(p\\).read\\(\\), filename=p\\) for p in ['src/film_wgan/config.py','src/film_wgan/losses.py','src/film_wgan/trainer.py','src/film_wgan/training_plots.py']]; print\\('OK'\\)\")",
+      "Bash(PYTHONPATH=src python3 -m pytest tests/test_standalone_wgan/test_film_wgan_module.py -q)",
+      "Bash(python3 -)"
     ]
   }
 }
