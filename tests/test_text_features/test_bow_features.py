@@ -1,4 +1,5 @@
 import json
+import math
 import sys
 import tempfile
 import unittest
@@ -42,6 +43,16 @@ class TestBowFeatures(unittest.TestCase):
         self.assertEqual(len(_parse_vector(first.frame.loc[0, "bow_embedding"])), 4)
         self.assertEqual(first.frame["bow_embedding"].tolist(), second.frame["bow_embedding"].tolist())
         self.assertTrue(first.manifest["fitted"])
+        self.assertEqual(first.manifest["representation"], "ngram_frequency")
+        self.assertEqual(first.manifest["weighting"], "log1p_count")
+        self.assertEqual(first.manifest["reference_method"], "Manela_Moreira_2017_style_ngram_frequency")
+        self.assertEqual(first.vocabulary, ["market", "policy", "volatility", "after"])
+        expected_first = [0.0, math.log1p(1.0), math.log1p(1.0), math.log1p(1.0)]
+        expected_second = [math.log1p(1.0), math.log1p(1.0), math.log1p(1.0), 0.0]
+        for actual, expected in zip(_parse_vector(first.frame.loc[0, "bow_embedding"]), expected_first):
+            self.assertAlmostEqual(actual, expected)
+        for actual, expected in zip(_parse_vector(first.frame.loc[1, "bow_embedding"]), expected_second):
+            self.assertAlmostEqual(actual, expected)
 
     def test_build_bow_features_handles_empty_text_rows(self):
         news_df = pd.DataFrame(
@@ -89,9 +100,15 @@ class TestBowFeatures(unittest.TestCase):
             self.assertEqual(feature_path, output_dir / "bow_features.xlsx")
             self.assertTrue(feature_path.exists())
             self.assertTrue((output_dir / "bow_manifest.json").exists())
+            self.assertTrue((output_dir / "bow_vocabulary.json").exists())
+            self.assertFalse((output_dir / "tfidf_vectorizer.joblib").exists())
+            self.assertFalse((output_dir / "svd_model.joblib").exists())
             manifest = json.loads((output_dir / "bow_manifest.json").read_text(encoding="utf-8"))
-            if manifest["backend"] == "sklearn":
-                self.assertTrue((output_dir / "tfidf_vectorizer.joblib").exists())
+            self.assertEqual(manifest["representation"], "ngram_frequency")
+            self.assertEqual(manifest["weighting"], "log1p_count")
+            self.assertEqual(manifest["vocabulary_path"], str(output_dir / "bow_vocabulary.json"))
+            vocabulary = json.loads((output_dir / "bow_vocabulary.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(vocabulary), 3)
 
 
 if __name__ == "__main__":

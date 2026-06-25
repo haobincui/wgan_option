@@ -1,4 +1,4 @@
-"""CLI for building RQ2 dictionary sentiment text features."""
+"""CLI for building RQ2 Sun-style LLaMA sentiment text features."""
 
 from __future__ import annotations
 
@@ -17,28 +17,31 @@ import scripts._path_setup  # noqa: F401
 
 import pandas as pd
 
-from llm_sentiment import fit_sentiment_features
+from llm_sentiment.features import DEFAULT_MODEL_ID, fit_sentiment_features
 
 
 DEFAULT_NEWS_XLSX = "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx"
 
 
 def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build dictionary sentiment features for RQ2 text baselines.")
+    parser = argparse.ArgumentParser(description="Build Sun-style LLaMA sentiment features for RQ2 text baselines.")
     parser.add_argument("--news-xlsx", default=DEFAULT_NEWS_XLSX, help="Raw news workbook path.")
     parser.add_argument("--output-dir", required=True, help="Directory for llm_sentiment_features.xlsx.")
     parser.add_argument("--text-column", default="LP", help="Raw text column to featurize.")
     parser.add_argument("--target-dim", type=int, default=1024, help="Fixed output vector width.")
+    parser.add_argument("--model-id", default=DEFAULT_MODEL_ID, help="HuggingFace LLaMA-style instruct model id.")
+    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"], help="Transformers inference device.")
     parser.add_argument(
-        "--dictionary-path",
-        default="",
-        help="Optional Loughran-McDonald dictionary CSV. If set and missing, the CLI fails unless --allow-fallback is used.",
+        "--torch-dtype",
+        default="auto",
+        choices=["auto", "float16", "bfloat16", "float32"],
+        help="Torch dtype for model loading.",
     )
-    parser.add_argument(
-        "--allow-fallback",
-        action="store_true",
-        help="Use the explicit builtin fallback lexicon when dictionary-path is missing.",
-    )
+    parser.add_argument("--max-new-tokens", type=int, default=256, help="Maximum generated tokens per article.")
+    parser.add_argument("--max-input-chars", type=int, default=6000, help="Maximum article characters sent to the model.")
+    parser.add_argument("--cache-path", default="", help="JSONL cache path. Defaults to <output-dir>/llama3_sentiment_cache.jsonl.")
+    parser.add_argument("--limit", type=int, default=None, help="Optional first-N article limit for smoke runs.")
+    parser.add_argument("--sleep-seconds", type=float, default=0.0, help="Optional delay between uncached generations.")
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -48,19 +51,23 @@ def main(argv: Iterable[str] | None = None) -> Path:
     if not news_path.exists():
         raise FileNotFoundError(f"News workbook does not exist: {news_path}")
 
-    dictionary_path = str(args.dictionary_path).strip()
-    allow_builtin_fallback = bool(args.allow_fallback or not dictionary_path)
-
     output_dir = Path(args.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = Path(args.cache_path).expanduser() if str(args.cache_path).strip() else output_dir / "llama3_sentiment_cache.jsonl"
 
     news_df = pd.read_excel(news_path, engine="openpyxl", dtype=object)
     result = fit_sentiment_features(
         news_df,
         text_column=str(args.text_column),
         target_dim=int(args.target_dim),
-        dictionary_path=dictionary_path or None,
-        allow_builtin_fallback=allow_builtin_fallback,
+        model_id=str(args.model_id),
+        device=str(args.device),
+        torch_dtype=str(args.torch_dtype),
+        max_new_tokens=int(args.max_new_tokens),
+        max_input_chars=int(args.max_input_chars),
+        cache_path=cache_path,
+        limit=args.limit,
+        sleep_seconds=float(args.sleep_seconds),
     )
 
     feature_path = output_dir / "llm_sentiment_features.xlsx"

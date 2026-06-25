@@ -19,7 +19,7 @@ import scripts._path_setup  # noqa: F401
 import pandas as pd
 
 from bow import fit_bow_features
-from llm_sentiment import fit_sentiment_features
+from llm_sentiment.features import DEFAULT_MODEL_ID, fit_sentiment_features
 
 
 DEFAULT_NEWS_XLSX = "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx"
@@ -32,7 +32,7 @@ def _timestamp() -> str:
 
 def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate both BoW/TF-IDF and sentiment features for RQ2 FiLM experiments.",
+        description="Generate both n-gram frequency BoW and sentiment features for RQ2 FiLM experiments.",
     )
     parser.add_argument("--news-xlsx", default=DEFAULT_NEWS_XLSX, help="Raw news workbook path.")
     parser.add_argument(
@@ -42,20 +42,23 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--text-column", default="LP", help="Raw text column to featurize.")
     parser.add_argument("--target-dim", type=int, default=1024, help="Fixed output vector width for both feature types.")
-    parser.add_argument("--max-features", type=int, default=5000, help="Maximum TF-IDF vocabulary size.")
+    parser.add_argument("--max-features", type=int, default=5000, help="Deprecated compatibility option; ignored.")
     parser.add_argument("--ngram-min", type=int, default=1, help="Minimum BoW n-gram length.")
     parser.add_argument("--ngram-max", type=int, default=2, help="Maximum BoW n-gram length.")
-    parser.add_argument("--random-state", type=int, default=42, help="Random state for BoW SVD when sklearn is available.")
+    parser.add_argument("--random-state", type=int, default=42, help="Deprecated compatibility option; ignored.")
+    parser.add_argument("--model-id", default=DEFAULT_MODEL_ID, help="HuggingFace LLaMA-style instruct model id.")
+    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"], help="Transformers inference device.")
     parser.add_argument(
-        "--dictionary-path",
-        default="",
-        help="Optional Loughran-McDonald dictionary CSV. If set and missing, the script fails unless --allow-fallback is used.",
+        "--torch-dtype",
+        default="auto",
+        choices=["auto", "float16", "bfloat16", "float32"],
+        help="Torch dtype for model loading.",
     )
-    parser.add_argument(
-        "--allow-fallback",
-        action="store_true",
-        help="Use the explicit builtin fallback lexicon when dictionary-path is missing.",
-    )
+    parser.add_argument("--max-new-tokens", type=int, default=256, help="Maximum generated tokens per article.")
+    parser.add_argument("--max-input-chars", type=int, default=6000, help="Maximum article characters sent to the model.")
+    parser.add_argument("--cache-path", default="", help="JSONL cache path. Defaults to <output-dir>/llama3_sentiment_cache.jsonl.")
+    parser.add_argument("--limit", type=int, default=None, help="Optional first-N article limit for smoke runs.")
+    parser.add_argument("--sleep-seconds", type=float, default=0.0, help="Optional delay between uncached generations.")
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -71,35 +74,32 @@ def _write_bow_artifacts(news_df: pd.DataFrame, output_dir: Path, args: argparse
     feature_path = output_dir / "bow_features.xlsx"
     result.frame.to_excel(feature_path, sheet_name="features", index=False)
 
-    vectorizer_path = output_dir / "tfidf_vectorizer.joblib"
-    svd_path = output_dir / "svd_model.joblib"
+    vocabulary_path = output_dir / "bow_vocabulary.json"
+    vocabulary_path.write_text(json.dumps(result.vocabulary, indent=2), encoding="utf-8")
+
     manifest = {
         **result.manifest,
         "feature_path": str(feature_path),
-        "vectorizer_path": str(vectorizer_path) if result.vectorizer is not None else "",
-        "svd_path": str(svd_path) if result.svd is not None else "",
+        "vocabulary_path": str(vocabulary_path),
     }
-    if result.vectorizer is not None:
-        from joblib import dump
-
-        dump(result.vectorizer, vectorizer_path)
-    if result.svd is not None:
-        from joblib import dump
-
-        dump(result.svd, svd_path)
     (output_dir / "bow_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return feature_path, manifest
 
 
 def _write_sentiment_artifacts(news_df: pd.DataFrame, output_dir: Path, args: argparse.Namespace) -> tuple[Path, dict]:
-    dictionary_path = str(args.dictionary_path).strip()
-    allow_builtin_fallback = bool(args.allow_fallback or not dictionary_path)
+    cache_path = Path(args.cache_path).expanduser() if str(args.cache_path).strip() else output_dir / "llama3_sentiment_cache.jsonl"
     result = fit_sentiment_features(
         news_df,
         text_column=str(args.text_column),
         target_dim=int(args.target_dim),
-        dictionary_path=dictionary_path or None,
-        allow_builtin_fallback=allow_builtin_fallback,
+        model_id=str(args.model_id),
+        device=str(args.device),
+        torch_dtype=str(args.torch_dtype),
+        max_new_tokens=int(args.max_new_tokens),
+        max_input_chars=int(args.max_input_chars),
+        cache_path=cache_path,
+        limit=args.limit,
+        sleep_seconds=float(args.sleep_seconds),
     )
     feature_path = output_dir / "llm_sentiment_features.xlsx"
     result.frame.to_excel(feature_path, sheet_name="features", index=False)
@@ -125,6 +125,8 @@ def main(argv: Iterable[str] | None = None) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     news_df = pd.read_excel(news_path, engine="openpyxl", dtype=object)
+    if args.limit is not None and int(args.limit) >= 0:
+        news_df = news_df.head(int(args.limit)).copy()
     bow_path, bow_manifest = _write_bow_artifacts(news_df, output_dir, args)
     sentiment_path, sentiment_manifest = _write_sentiment_artifacts(news_df, output_dir, args)
 

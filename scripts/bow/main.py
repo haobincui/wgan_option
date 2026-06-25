@@ -1,4 +1,4 @@
-"""CLI for building RQ2 BoW/TF-IDF text features."""
+"""CLI for building RQ2 n-gram frequency BoW text features."""
 
 from __future__ import annotations
 
@@ -24,15 +24,15 @@ DEFAULT_NEWS_XLSX = "data/raw/text_embedding/news_with_openai_embeddings_large.x
 
 
 def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build BoW/TF-IDF features for RQ2 text baselines.")
+    parser = argparse.ArgumentParser(description="Build n-gram frequency BoW features for RQ2 text baselines.")
     parser.add_argument("--news-xlsx", default=DEFAULT_NEWS_XLSX, help="Raw news workbook path.")
-    parser.add_argument("--output-dir", required=True, help="Directory for bow_features.xlsx and fitted artifacts.")
+    parser.add_argument("--output-dir", required=True, help="Directory for bow_features.xlsx and bow_vocabulary.json.")
     parser.add_argument("--text-column", default="LP", help="Raw text column to featurize.")
     parser.add_argument("--target-dim", type=int, default=1024, help="Fixed output vector width.")
-    parser.add_argument("--max-features", type=int, default=5000, help="Maximum TF-IDF vocabulary size.")
+    parser.add_argument("--max-features", type=int, default=5000, help="Deprecated compatibility option; ignored.")
     parser.add_argument("--ngram-min", type=int, default=1, help="Minimum n-gram length.")
     parser.add_argument("--ngram-max", type=int, default=2, help="Maximum n-gram length.")
-    parser.add_argument("--random-state", type=int, default=42, help="Random state for SVD.")
+    parser.add_argument("--random-state", type=int, default=42, help="Deprecated compatibility option; ignored.")
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -58,21 +58,15 @@ def main(argv: Iterable[str] | None = None) -> Path:
     feature_path = output_dir / "bow_features.xlsx"
     result.frame.to_excel(feature_path, sheet_name="features", index=False)
 
+    vocabulary_path = output_dir / "bow_vocabulary.json"
+    vocabulary_path.write_text(json.dumps(result.vocabulary, indent=2), encoding="utf-8")
+
     manifest = {
         **result.manifest,
         "news_xlsx": str(news_path),
         "feature_path": str(feature_path),
-        "vectorizer_path": str(output_dir / "tfidf_vectorizer.joblib") if result.vectorizer is not None else "",
-        "svd_path": str(output_dir / "svd_model.joblib") if result.svd is not None else "",
+        "vocabulary_path": str(vocabulary_path),
     }
-    if result.vectorizer is not None:
-        from joblib import dump
-
-        dump(result.vectorizer, output_dir / "tfidf_vectorizer.joblib")
-    if result.svd is not None:
-        from joblib import dump
-
-        dump(result.svd, output_dir / "svd_model.joblib")
     (output_dir / "bow_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     print(f"BoW features written to {feature_path}")

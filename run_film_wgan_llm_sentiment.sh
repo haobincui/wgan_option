@@ -34,7 +34,8 @@ Generate it first, for example:
     --output-dir "\${FEATURE_DIR}" \\
     --text-column LP \\
     --target-dim 1024 \\
-    --dictionary-path data/reference/Loughran-McDonald_MasterDictionary_1993-2025.csv
+    --model-id meta-llama/Meta-Llama-3-8B-Instruct \\
+    --device auto
 
   python scripts/rq2/enrich_merged_vol.py \\
     --merged-vol data/processed/svi-excel/20260410-174929/merged_vol.xlsx \\
@@ -45,7 +46,7 @@ EOF
   exit 1
 fi
 
-# RQ2 sentiment baseline: same FiLM WGAN downstream, LM dictionary text representation.
+# RQ2 sentiment baseline: same FiLM WGAN downstream, Sun-style LLaMA 3 text representation.
 bash "${BASE_RUNNER}" "${TRAIN_CONFIG_PATH}" \
   --set "data_path=${DATA_PATH}" \
   --set "text_embedding_mode=llm_sentiment" \

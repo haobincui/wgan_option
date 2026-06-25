@@ -45,7 +45,7 @@ EOF
   exit 1
 fi
 
-# RQ2 BoW baseline: same FiLM WGAN downstream, BoW/TF-IDF text representation.
+# RQ2 BoW baseline: same FiLM WGAN downstream, n-gram frequency text representation.
 bash "${BASE_RUNNER}" "${TRAIN_CONFIG_PATH}" \
   --set "data_path=${DATA_PATH}" \
   --set "text_embedding_mode=bow" \
