@@ -3,7 +3,7 @@
 This note summarizes the literature basis for the RQ2 text-feature comparison:
 
 ```text
-no-text vs n-gram BoW frequency vs Sun-style LLaMA sentiment vs LLM embedding
+no-text vs n-gram BoW frequency vs Sun-style ChatGPT sentiment vs LLM embedding
 ```
 
 The purpose is practical thesis support. These papers are used mainly to justify
@@ -27,11 +27,11 @@ downstream forecasting setup fixed. In this repository, the intended comparison 
 | --- | --- | --- |
 | no-text | Control with same downstream FiLM WGAN architecture | `text_embedding_mode=none` |
 | n-gram BoW frequency | Traditional sparse text / news-frequency representation | `text_embedding_mode=bow` |
-| Sun-style LLaMA sentiment | Multi-dimensional LLM sentiment decomposition for volatility | `text_embedding_mode=llm_sentiment` reads `sentiment_embedding` |
+| Sun-style ChatGPT sentiment | Multi-dimensional LLM sentiment decomposition for volatility | `text_embedding_mode=llm_sentiment` reads `sentiment_embedding` |
 | LLM embedding | Main proposed representation | `text_embedding_mode=lp`, `hd`, or `concat` depending on experiment |
 
 Implementation note: `llm_sentiment` now follows the Sun (2026)-style
-zero-shot LLaMA 3 decomposition. It scores each article on
+zero-shot multi-dimensional decomposition using OpenAI ChatGPT. It scores each article on
 `macroeconomic_uncertainty`, `institutional_action`, and
 `risk_off_intensity`, then pads those three scores into the existing
 `sentiment_embedding` interface for FiLM WGAN.
@@ -389,7 +389,7 @@ outputs/training/film_wgan/llm_sentiment
 For thesis wording, use:
 
 - `n-gram frequency BoW` for the BoW baseline
-- `Sun-style LLaMA sentiment` for the current `llm_sentiment` baseline
+- `Sun-style ChatGPT sentiment` for the current `llm_sentiment` baseline
 - `LLM embedding` for the OpenAI embedding baseline
 - `Loughran-McDonald sentiment` only if a separate dictionary baseline is
   restored or reported from older artifacts

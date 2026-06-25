@@ -1,4 +1,4 @@
-"""Build Sun-style LLaMA sentiment features for RQ2 text baselines."""
+"""Build Sun-style ChatGPT sentiment features for RQ2 text baselines."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ import numpy as np
 import pandas as pd
 
 
-DEFAULT_MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
-PROMPT_VERSION = "sun2026_zero_shot_v1"
+DEFAULT_MODEL_ID = "gpt-5.5"
+PROMPT_VERSION = "sun2026_zero_shot_chatgpt_v1"
 SENTIMENT_DIMENSIONS = (
     "macroeconomic_uncertainty",
     "institutional_action",
@@ -41,96 +41,107 @@ class ParsedSentiment:
 
 @dataclass(frozen=True)
 class SentimentFeatureResult:
-    """Feature frame plus metadata describing the LLaMA sentiment source."""
+    """Feature frame plus metadata describing the ChatGPT sentiment source."""
 
     frame: pd.DataFrame
     manifest: dict[str, Any]
 
 
-class HuggingFaceLlamaSentimentBackend:
-    """Lazy HuggingFace text-generation backend for LLaMA-style instruct models."""
+def _sentiment_schema() -> dict[str, Any]:
+    return {
+        "type": "json_schema",
+        "name": "sun2026_sentiment_scores",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                dimension: {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                    "description": "A score from 0 to 1.",
+                }
+                for dimension in SENTIMENT_DIMENSIONS
+            },
+            "required": list(SENTIMENT_DIMENSIONS),
+            "additionalProperties": False,
+        },
+    }
+
+
+class OpenAIChatGPTSentimentBackend:
+    """Lazy OpenAI Responses API backend for ChatGPT-style sentiment scoring."""
 
     def __init__(
         self,
         *,
         model_id: str = DEFAULT_MODEL_ID,
-        device: str = "auto",
-        torch_dtype: str = "auto",
-        max_new_tokens: int = 256,
+        max_output_tokens: int = 256,
+        reasoning_effort: str = "low",
+        api_key_env: str = "OPENAI_API_KEY",
     ) -> None:
         self.model_id = str(model_id)
-        self.device = str(device)
-        self.torch_dtype = str(torch_dtype)
-        self.max_new_tokens = int(max_new_tokens)
+        self.max_output_tokens = int(max_output_tokens)
+        self.reasoning_effort = str(reasoning_effort)
+        self.api_key_env = str(api_key_env)
+
+        api_key = os.environ.get(self.api_key_env)
+        if not api_key:
+            raise ValueError(
+                f"OpenAI API key is not configured. Set {self.api_key_env}, for example: "
+                f"export {self.api_key_env}='your_api_key_here'"
+            )
 
         try:
-            import torch
-            from transformers import AutoTokenizer, pipeline
-        except ImportError as exc:  # pragma: no cover - exercised only without optional deps at runtime.
-            raise ImportError(
-                "LLaMA sentiment generation requires transformers, accelerate, "
-                "huggingface_hub, safetensors, sentencepiece, and protobuf. "
-                "Install project requirements before running the real HuggingFace backend."
-            ) from exc
+            from openai import OpenAI
+        except ImportError as exc:  # pragma: no cover - exercised only without optional dep at runtime.
+            raise ImportError("OpenAI sentiment generation requires the openai Python package.") from exc
 
-        token = os.environ.get("HF_TOKEN") or None
-        dtype = None
-        if self.torch_dtype != "auto":
-            dtype_map = {
-                "float16": torch.float16,
-                "bfloat16": torch.bfloat16,
-                "float32": torch.float32,
-            }
-            if self.torch_dtype not in dtype_map:
-                raise ValueError(
-                    "torch_dtype must be one of ['auto', 'float16', 'bfloat16', 'float32'], "
-                    f"got: {self.torch_dtype}"
-                )
-            dtype = dtype_map[self.torch_dtype]
-
-        tokenizer_kwargs: dict[str, Any] = {}
-        pipeline_kwargs: dict[str, Any] = {"model": self.model_id}
-        if token is not None:
-            tokenizer_kwargs["token"] = token
-            pipeline_kwargs["token"] = token
-        if dtype is not None:
-            pipeline_kwargs["torch_dtype"] = dtype
-
-        if self.device == "auto":
-            pipeline_kwargs["device_map"] = "auto"
-        elif self.device == "cpu":
-            pipeline_kwargs["device"] = -1
-        elif self.device == "cuda":
-            pipeline_kwargs["device"] = 0
-        else:
-            raise ValueError("device must be one of ['auto', 'cpu', 'cuda'], got: " + self.device)
-
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, **tokenizer_kwargs)
-        self.generator = pipeline("text-generation", tokenizer=self.tokenizer, **pipeline_kwargs)
-
-    def _format_prompt(self, prompt: str) -> str:
-        messages = [{"role": "user", "content": prompt}]
-        try:
-            return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        except Exception:
-            return prompt
+        self.client = OpenAI(api_key=api_key)
 
     def generate(self, prompt: str) -> str:
-        formatted = self._format_prompt(prompt)
-        eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
-        outputs = self.generator(
-            formatted,
-            max_new_tokens=self.max_new_tokens,
-            do_sample=False,
-            return_full_text=False,
-            pad_token_id=eos_token_id,
+        response = self.client.responses.create(
+            model=self.model_id,
+            reasoning={"effort": self.reasoning_effort},
+            input=[
+                {
+                    "role": "developer",
+                    "content": (
+                        "You are a financial-news sentiment scorer for volatility forecasting. "
+                        "Return only the requested JSON object."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            text={"format": _sentiment_schema()},
+            max_output_tokens=self.max_output_tokens,
         )
-        if not outputs:
-            return ""
-        first = outputs[0]
-        if isinstance(first, dict):
-            return str(first.get("generated_text", ""))
-        return str(first)
+        output_text = getattr(response, "output_text", None)
+        if output_text:
+            return str(output_text)
+        return _extract_response_text(response)
+
+
+def _extract_response_text(response: Any) -> str:
+    output = getattr(response, "output", None)
+    if output is None and isinstance(response, dict):
+        output = response.get("output")
+    if not output:
+        return ""
+    chunks: list[str] = []
+    for item in output:
+        content = getattr(item, "content", None)
+        if content is None and isinstance(item, dict):
+            content = item.get("content")
+        if not content:
+            continue
+        for part in content:
+            text = getattr(part, "text", None)
+            if text is None and isinstance(part, dict):
+                text = part.get("text")
+            if text:
+                chunks.append(str(text))
+    return "\n".join(chunks)
 
 
 def _serialize_vector(values: np.ndarray) -> str:
@@ -203,8 +214,8 @@ def _regex_score(raw_response: str, key: str) -> float | None:
         return None
 
 
-def parse_llama_sentiment_response(raw_response: str) -> ParsedSentiment:
-    """Parse Sun-style three-dimensional scores from a LLaMA response."""
+def parse_chatgpt_sentiment_response(raw_response: str) -> ParsedSentiment:
+    """Parse Sun-style three-dimensional scores from a ChatGPT response."""
 
     text = str(raw_response or "").strip()
     if not text:
@@ -231,8 +242,8 @@ def parse_llama_sentiment_response(raw_response: str) -> ParsedSentiment:
 def build_sun_prompt(text: str, *, max_input_chars: int = 6000) -> str:
     clipped = str(text or "")[: int(max_input_chars)]
     return (
-        "You are a financial-news sentiment scorer for volatility forecasting.\n"
-        "Follow the method of decomposing narratives into three theory-driven\n"
+        "Score the following financial news article for a volatility-forecasting experiment.\n"
+        "Follow the Sun (2026)-style decomposition of narratives into three theory-driven\n"
         "dimensions: macroeconomic uncertainty, institutional action, and risk-off\n"
         "intensity.\n\n"
         "Score only the factual financial content of the article. Do not mechanically\n"
@@ -309,15 +320,15 @@ def _append_cache_record(cache_path: str | Path | None, record: dict[str, Any]) 
 def _default_backend(
     *,
     model_id: str,
-    device: str,
-    torch_dtype: str,
-    max_new_tokens: int,
+    max_output_tokens: int,
+    reasoning_effort: str,
+    api_key_env: str,
 ) -> SentimentBackend:
-    return HuggingFaceLlamaSentimentBackend(
+    return OpenAIChatGPTSentimentBackend(
         model_id=model_id,
-        device=device,
-        torch_dtype=torch_dtype,
-        max_new_tokens=max_new_tokens,
+        max_output_tokens=max_output_tokens,
+        reasoning_effort=reasoning_effort,
+        api_key_env=api_key_env,
     )
 
 
@@ -326,17 +337,17 @@ def fit_sentiment_features(
     *,
     text_column: str = "LP",
     target_dim: int = 1024,
-    model_id: str = DEFAULT_MODEL_ID,
-    device: str = "auto",
-    torch_dtype: str = "auto",
-    max_new_tokens: int = 256,
+    model_id: str | None = None,
+    max_output_tokens: int = 256,
     max_input_chars: int = 6000,
+    reasoning_effort: str = "low",
+    api_key_env: str = "OPENAI_API_KEY",
     cache_path: str | Path | None = None,
     limit: int | None = None,
     sleep_seconds: float = 0.0,
     backend: SentimentBackend | None = None,
 ) -> SentimentFeatureResult:
-    """Build fixed-width Sun-style LLaMA sentiment vectors from news text."""
+    """Build fixed-width Sun-style ChatGPT sentiment vectors from news text."""
 
     target_dim = int(target_dim)
     if target_dim <= 0:
@@ -344,15 +355,16 @@ def fit_sentiment_features(
     if limit is not None and int(limit) >= 0:
         news_df = news_df.head(int(limit)).copy()
 
+    resolved_model_id = str(model_id or os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL_ID)
     texts = _text_series(news_df, text_column)
     backend = backend or _default_backend(
-        model_id=str(model_id),
-        device=str(device),
-        torch_dtype=str(torch_dtype),
-        max_new_tokens=int(max_new_tokens),
+        model_id=resolved_model_id,
+        max_output_tokens=int(max_output_tokens),
+        reasoning_effort=str(reasoning_effort),
+        api_key_env=str(api_key_env),
     )
     cache = _load_cache(cache_path)
-    source = f"hf_llama3_sun2026_style:{model_id}"
+    source = f"openai_chatgpt_sun2026_style:{resolved_model_id}"
 
     vectors: list[np.ndarray] = []
     raw_responses: list[str] = []
@@ -365,7 +377,7 @@ def fit_sentiment_features(
             raw_response = ""
         else:
             key = _cache_key(
-                model_id=str(model_id),
+                model_id=resolved_model_id,
                 prompt_version=PROMPT_VERSION,
                 text=clean_text,
                 max_input_chars=int(max_input_chars),
@@ -373,15 +385,15 @@ def fit_sentiment_features(
             cached = cache.get(key)
             if cached is not None:
                 raw_response = str(cached.get("raw_response", ""))
-                parsed = parse_llama_sentiment_response(raw_response)
+                parsed = parse_chatgpt_sentiment_response(raw_response)
                 parsed = ParsedSentiment(scores=parsed.scores, parse_status=f"cache_{parsed.parse_status}")
             else:
                 prompt = build_sun_prompt(clean_text, max_input_chars=int(max_input_chars))
                 raw_response = backend.generate(prompt)
-                parsed = parse_llama_sentiment_response(raw_response)
+                parsed = parse_chatgpt_sentiment_response(raw_response)
                 record = {
                     "cache_key": key,
-                    "model_id": str(model_id),
+                    "model_id": resolved_model_id,
                     "prompt_version": PROMPT_VERSION,
                     "raw_response": raw_response,
                     "parse_status": parsed.parse_status,
@@ -402,7 +414,7 @@ def fit_sentiment_features(
             "sentiment_embedding": [_serialize_vector(vector) for vector in vectors],
             "sentiment_dim": [target_dim] * len(news_df),
             "sentiment_dictionary_source": [source] * len(news_df),
-            "sentiment_model_id": [str(model_id)] * len(news_df),
+            "sentiment_model_id": [resolved_model_id] * len(news_df),
             "sentiment_prompt_version": [PROMPT_VERSION] * len(news_df),
             "sentiment_parse_status": parse_statuses,
             "sentiment_raw_response": raw_responses,
@@ -414,16 +426,16 @@ def fit_sentiment_features(
             "text_column": text_column,
             "target_dim": target_dim,
             "row_count": int(len(news_df)),
-            "model_id": str(model_id),
+            "model_id": resolved_model_id,
             "prompt_version": PROMPT_VERSION,
             "sentiment_dimensions": list(SENTIMENT_DIMENSIONS),
             "base_feature_dim": int(len(SENTIMENT_DIMENSIONS)),
-            "representation": "sun2026_style_llama3_multidimensional_sentiment",
+            "representation": "sun2026_style_openai_chatgpt_multidimensional_sentiment",
             "sentiment_source": source,
-            "max_new_tokens": int(max_new_tokens),
+            "max_output_tokens": int(max_output_tokens),
             "max_input_chars": int(max_input_chars),
-            "device": str(device),
-            "torch_dtype": str(torch_dtype),
+            "reasoning_effort": str(reasoning_effort),
+            "api_key_env": str(api_key_env),
             "cache_path": str(cache_path) if cache_path is not None else "",
         },
     )
@@ -434,7 +446,7 @@ def build_sentiment_features(
     *,
     text_column: str = "LP",
     target_dim: int = 1024,
-    model_id: str = DEFAULT_MODEL_ID,
+    model_id: str | None = None,
     backend: SentimentBackend | None = None,
 ) -> pd.DataFrame:
     """Return only the sentiment feature frame for simple callers."""

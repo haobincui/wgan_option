@@ -34,7 +34,7 @@ Generate it first, for example:
     --output-dir "\${FEATURE_DIR}" \\
     --text-column LP \\
     --target-dim 1024 \\
-    --dictionary-path data/reference/Loughran-McDonald_MasterDictionary_1993-2025.csv
+    --model gpt-5.5
 
   python scripts/rq2/enrich_merged_vol.py \\
     --merged-vol data/processed/svi-excel/20260410-174929/merged_vol.xlsx \\

@@ -17,7 +17,7 @@ if str(SRC_DIR) not in sys.path:
 from llm_sentiment.features import (  # noqa: E402
     SENTIMENT_DIMENSIONS,
     fit_sentiment_features,
-    parse_llama_sentiment_response,
+    parse_chatgpt_sentiment_response,
 )
 from scripts.rq2.enrich_merged_vol import enrich_workbook  # noqa: E402
 
@@ -27,7 +27,7 @@ def _parse_vector(value: str) -> list[float]:
 
 
 class TestSentimentFeatures(unittest.TestCase):
-    def test_llama_sentiment_features_use_sun_dimensions_and_fixed_width(self):
+    def test_chatgpt_sentiment_features_use_sun_dimensions_and_fixed_width(self):
         class FakeBackend:
             def __init__(self):
                 self.prompts = []
@@ -51,13 +51,13 @@ class TestSentimentFeatures(unittest.TestCase):
             }
         )
 
-        result = fit_sentiment_features(news_df, target_dim=8, model_id="fixture-llama", backend=backend)
+        result = fit_sentiment_features(news_df, target_dim=8, model_id="fixture-chatgpt", backend=backend)
 
         self.assertEqual(result.manifest["sentiment_dimensions"], list(SENTIMENT_DIMENSIONS))
         self.assertEqual(result.frame["sentiment_dim"].tolist(), [8, 8])
         self.assertEqual(
             result.frame["sentiment_dictionary_source"].tolist(),
-            ["hf_llama3_sun2026_style:fixture-llama", "hf_llama3_sun2026_style:fixture-llama"],
+            ["openai_chatgpt_sun2026_style:fixture-chatgpt", "openai_chatgpt_sun2026_style:fixture-chatgpt"],
         )
         first_vector = _parse_vector(result.frame.loc[0, "sentiment_embedding"])
         second_vector = _parse_vector(result.frame.loc[1, "sentiment_embedding"])
@@ -71,7 +71,7 @@ class TestSentimentFeatures(unittest.TestCase):
         self.assertIn("Do not mechanically", backend.prompts[0])
 
     def test_response_parser_handles_fenced_json_regex_and_malformed_text(self):
-        fenced = parse_llama_sentiment_response(
+        fenced = parse_chatgpt_sentiment_response(
             """
             ```json
             {"macroeconomic_uncertainty": 0.6, "institutional_action": 0.1, "risk_off_intensity": 0.4}
@@ -81,14 +81,14 @@ class TestSentimentFeatures(unittest.TestCase):
         self.assertEqual(fenced.parse_status, "json")
         self.assertEqual(fenced.scores["macroeconomic_uncertainty"], 0.6)
 
-        regex = parse_llama_sentiment_response(
+        regex = parse_chatgpt_sentiment_response(
             "macroeconomic_uncertainty=75% institutional_action: 0.2 risk_off_intensity: 1.2"
         )
         self.assertEqual(regex.parse_status, "regex")
         self.assertEqual(regex.scores["macroeconomic_uncertainty"], 0.75)
         self.assertEqual(regex.scores["risk_off_intensity"], 1.0)
 
-        malformed = parse_llama_sentiment_response("not a score")
+        malformed = parse_chatgpt_sentiment_response("not a score")
         self.assertEqual(malformed.parse_status, "parse_failed")
         self.assertEqual(malformed.scores, {dimension: 0.0 for dimension in SENTIMENT_DIMENSIONS})
 
@@ -112,7 +112,7 @@ class TestSentimentFeatures(unittest.TestCase):
             result = fit_sentiment_features(
                 news_df,
                 target_dim=4,
-                model_id="fixture-llama",
+                model_id="fixture-chatgpt",
                 cache_path=cache_path,
                 backend=backend,
             )
@@ -121,7 +121,7 @@ class TestSentimentFeatures(unittest.TestCase):
             self.assertTrue(cache_path.exists())
             self.assertEqual(result.frame["sentiment_parse_status"].tolist(), ["json", "cache_json"])
 
-    def test_sentiment_cli_writes_feature_artifacts_with_fake_llama_backend(self):
+    def test_sentiment_cli_writes_feature_artifacts_with_fake_openai_backend(self):
         from scripts.llm_sentiment.main import main as sentiment_main
 
         class FakeBackend:
@@ -145,7 +145,7 @@ class TestSentimentFeatures(unittest.TestCase):
                 }
             ).to_excel(news_path, index=False)
 
-            with patch("llm_sentiment.features.HuggingFaceLlamaSentimentBackend", FakeBackend):
+            with patch("llm_sentiment.features.OpenAIChatGPTSentimentBackend", FakeBackend):
                 feature_path = sentiment_main(
                     [
                         "--news-xlsx",
@@ -154,8 +154,8 @@ class TestSentimentFeatures(unittest.TestCase):
                         str(output_dir),
                         "--target-dim",
                         "8",
-                        "--model-id",
-                        "fixture-llama",
+                        "--model",
+                        "fixture-chatgpt",
                     ]
                 )
 
@@ -165,7 +165,7 @@ class TestSentimentFeatures(unittest.TestCase):
             features = pd.read_excel(feature_path)
             self.assertEqual(
                 features["sentiment_dictionary_source"].tolist(),
-                ["hf_llama3_sun2026_style:fixture-llama", "hf_llama3_sun2026_style:fixture-llama"],
+                ["openai_chatgpt_sun2026_style:fixture-chatgpt", "openai_chatgpt_sun2026_style:fixture-chatgpt"],
             )
             self.assertIn("sentiment_raw_response", features.columns)
 

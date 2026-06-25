@@ -40,7 +40,7 @@ class TestGenerateRQ2TextFeaturesScript(unittest.TestCase):
                 }
             ).to_excel(news_path, index=False)
 
-            with patch("llm_sentiment.features.HuggingFaceLlamaSentimentBackend", FakeBackend):
+            with patch("llm_sentiment.features.OpenAIChatGPTSentimentBackend", FakeBackend):
                 result_dir = generate_rq2_text_features(
                     [
                         "--news-xlsx",
@@ -51,8 +51,8 @@ class TestGenerateRQ2TextFeaturesScript(unittest.TestCase):
                         "6",
                         "--max-features",
                         "20",
-                        "--model-id",
-                        "fixture-llama",
+                        "--model",
+                        "fixture-chatgpt",
                     ]
                 )
 
@@ -72,9 +72,9 @@ class TestGenerateRQ2TextFeaturesScript(unittest.TestCase):
             self.assertEqual(combined_manifest["bow_manifest"]["vocabulary_path"], str(output_dir / "bow_vocabulary.json"))
             self.assertEqual(
                 combined_manifest["llm_sentiment_manifest"]["representation"],
-                "sun2026_style_llama3_multidimensional_sentiment",
+                "sun2026_style_openai_chatgpt_multidimensional_sentiment",
             )
-            self.assertEqual(combined_manifest["llm_sentiment_manifest"]["model_id"], "fixture-llama")
+            self.assertEqual(combined_manifest["llm_sentiment_manifest"]["model_id"], "fixture-chatgpt")
 
 
 if __name__ == "__main__":

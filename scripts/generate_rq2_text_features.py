@@ -46,17 +46,30 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ngram-min", type=int, default=1, help="Minimum BoW n-gram length.")
     parser.add_argument("--ngram-max", type=int, default=2, help="Maximum BoW n-gram length.")
     parser.add_argument("--random-state", type=int, default=42, help="Deprecated compatibility option; ignored.")
-    parser.add_argument("--model-id", default=DEFAULT_MODEL_ID, help="HuggingFace LLaMA-style instruct model id.")
-    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"], help="Transformers inference device.")
     parser.add_argument(
-        "--torch-dtype",
-        default="auto",
-        choices=["auto", "float16", "bfloat16", "float32"],
-        help="Torch dtype for model loading.",
+        "--model",
+        "--model-id",
+        dest="model_id",
+        default=None,
+        help=f"OpenAI model id. Defaults to OPENAI_MODEL or {DEFAULT_MODEL_ID}.",
     )
-    parser.add_argument("--max-new-tokens", type=int, default=256, help="Maximum generated tokens per article.")
+    parser.add_argument(
+        "--max-output-tokens",
+        "--max-new-tokens",
+        dest="max_output_tokens",
+        type=int,
+        default=256,
+        help="Maximum generated tokens per article.",
+    )
     parser.add_argument("--max-input-chars", type=int, default=6000, help="Maximum article characters sent to the model.")
-    parser.add_argument("--cache-path", default="", help="JSONL cache path. Defaults to <output-dir>/llama3_sentiment_cache.jsonl.")
+    parser.add_argument(
+        "--reasoning-effort",
+        default="low",
+        choices=["minimal", "low", "medium", "high"],
+        help="OpenAI reasoning effort for supported models.",
+    )
+    parser.add_argument("--api-key-env", default="OPENAI_API_KEY", help="Environment variable containing the OpenAI API key.")
+    parser.add_argument("--cache-path", default="", help="JSONL cache path. Defaults to <output-dir>/openai_sentiment_cache.jsonl.")
     parser.add_argument("--limit", type=int, default=None, help="Optional first-N article limit for smoke runs.")
     parser.add_argument("--sleep-seconds", type=float, default=0.0, help="Optional delay between uncached generations.")
     return parser.parse_args(list(argv) if argv is not None else None)
@@ -87,16 +100,16 @@ def _write_bow_artifacts(news_df: pd.DataFrame, output_dir: Path, args: argparse
 
 
 def _write_sentiment_artifacts(news_df: pd.DataFrame, output_dir: Path, args: argparse.Namespace) -> tuple[Path, dict]:
-    cache_path = Path(args.cache_path).expanduser() if str(args.cache_path).strip() else output_dir / "llama3_sentiment_cache.jsonl"
+    cache_path = Path(args.cache_path).expanduser() if str(args.cache_path).strip() else output_dir / "openai_sentiment_cache.jsonl"
     result = fit_sentiment_features(
         news_df,
         text_column=str(args.text_column),
         target_dim=int(args.target_dim),
-        model_id=str(args.model_id),
-        device=str(args.device),
-        torch_dtype=str(args.torch_dtype),
-        max_new_tokens=int(args.max_new_tokens),
+        model_id=args.model_id,
+        max_output_tokens=int(args.max_output_tokens),
         max_input_chars=int(args.max_input_chars),
+        reasoning_effort=str(args.reasoning_effort),
+        api_key_env=str(args.api_key_env),
         cache_path=cache_path,
         limit=args.limit,
         sleep_seconds=float(args.sleep_seconds),

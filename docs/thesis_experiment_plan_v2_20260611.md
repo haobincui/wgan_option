@@ -147,7 +147,7 @@ v2 把中心实验改成 **Δ_text =（no-text 误差）−（text 误差）**�
 
 1. **特征构造**（新模块 `src/text_baselines/`）：
    - **n-gram frequency BoW**：参考 Manela and Moreira 风格的传统文本表示，从原始 `LP` 文本（回源 `data/raw/text_embedding/`）构造 unigram/bigram frequency features，作为迁移到本文数据上的 sparse text baseline。
-   - **Sun-style LLaMA sentiment**：参考 Sun (2026) 的 zero-shot LLaMA 3 multi-dimensional sentiment decomposition，按 `macroeconomic_uncertainty`、`institutional_action`、`risk_off_intensity` 三个维度给每条新闻打分。
+   - **Sun-style ChatGPT sentiment**：参考 Sun (2026) 的 zero-shot multi-dimensional sentiment decomposition，用 OpenAI ChatGPT 按 `macroeconomic_uncertainty`、`institutional_action`、`risk_off_intensity` 三个维度给每条新闻打分。
 2. **集成点（保证"只换 text 表示，下游不变"）**：在 merge / 预处理阶段把这些特征写成与 `lp_embedding` 同构的列（如 `bow_embedding` / `sentiment_embedding`）→ `_parse_embedding` 加 `bow` / `sentiment` 两个 mode → 复用同一 FiLM-WGAN 下游。
 3. **同协议跑**：与 Phase 1 相同 split / seed / test。
 4. **产出 Table RQ2-A**：`none < bow < sentiment < lp(LLM)` 的 test MAE 递进（期望单调）；附 LLM 内部子表 `lp/hd/concat`、`512D/1024D`。
