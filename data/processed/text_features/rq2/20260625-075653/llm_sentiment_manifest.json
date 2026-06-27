@@ -1,0 +1,28 @@
+{
+  "text_column": "LP",
+  "target_dim": 1024,
+  "row_count": 14900,
+  "model_id": "gpt-5.4-mini",
+  "prompt_version": "sun2026_zero_shot_chatgpt_v1",
+  "sentiment_dimensions": [
+    "macroeconomic_uncertainty",
+    "institutional_action",
+    "risk_off_intensity"
+  ],
+  "base_feature_dim": 3,
+  "representation": "sun2026_style_openai_chatgpt_multidimensional_sentiment",
+  "sentiment_source": "openai_chatgpt_sun2026_style:gpt-5.4-mini",
+  "max_output_tokens": 256,
+  "max_input_chars": 6000,
+  "reasoning_effort": "low",
+  "api_key_env": "OPENAI_API_KEY",
+  "cache_path": "data/processed/text_features/rq2/20260625-075653/openai_sentiment_cache.jsonl",
+  "max_retries": 10,
+  "retry_backoff_seconds": 10.0,
+  "continue_on_error": false,
+  "cache_hits": 13986,
+  "api_calls": 886,
+  "api_errors": 0,
+  "news_xlsx": "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx",
+  "feature_path": "data/processed/text_features/rq2/20260625-075653/llm_sentiment_features.xlsx"
+}

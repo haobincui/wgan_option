@@ -55,6 +55,19 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cache-path", default="", help="JSONL cache path. Defaults to <output-dir>/openai_sentiment_cache.jsonl.")
     parser.add_argument("--limit", type=int, default=None, help="Optional first-N article limit for smoke runs.")
     parser.add_argument("--sleep-seconds", type=float, default=0.0, help="Optional delay between uncached generations.")
+    parser.add_argument("--max-retries", type=int, default=5, help="Retries per uncached OpenAI request before failing.")
+    parser.add_argument(
+        "--retry-backoff-seconds",
+        type=float,
+        default=5.0,
+        help="Linear retry backoff base seconds; wait is base * attempt.",
+    )
+    parser.add_argument("--progress-every", type=int, default=100, help="Print progress every N rows; 0 disables.")
+    parser.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="After retries are exhausted, write a zero-vector api_error row and continue instead of failing.",
+    )
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -81,6 +94,10 @@ def main(argv: Iterable[str] | None = None) -> Path:
         cache_path=cache_path,
         limit=args.limit,
         sleep_seconds=float(args.sleep_seconds),
+        max_retries=int(args.max_retries),
+        retry_backoff_seconds=float(args.retry_backoff_seconds),
+        progress_every=int(args.progress_every),
+        continue_on_error=bool(args.continue_on_error),
     )
 
     feature_path = output_dir / "llm_sentiment_features.xlsx"

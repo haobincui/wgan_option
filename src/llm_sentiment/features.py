@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,23 +49,36 @@ class SentimentFeatureResult:
 
 
 def _sentiment_schema() -> dict[str, Any]:
+    schema = {
+        "type": "object",
+        "properties": {
+            dimension: {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "description": "A score from 0 to 1.",
+            }
+            for dimension in SENTIMENT_DIMENSIONS
+        },
+        "required": list(SENTIMENT_DIMENSIONS),
+        "additionalProperties": False,
+    }
     return {
         "type": "json_schema",
         "name": "sun2026_sentiment_scores",
         "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                dimension: {
-                    "type": "number",
-                    "minimum": 0.0,
-                    "maximum": 1.0,
-                    "description": "A score from 0 to 1.",
-                }
-                for dimension in SENTIMENT_DIMENSIONS
-            },
-            "required": list(SENTIMENT_DIMENSIONS),
-            "additionalProperties": False,
+        "schema": schema,
+    }
+
+
+def _chat_completion_response_format() -> dict[str, Any]:
+    response_schema = _sentiment_schema()
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": response_schema["name"],
+            "schema": response_schema["schema"],
+            "strict": response_schema["strict"],
         },
     }
 
@@ -100,6 +114,11 @@ class OpenAIChatGPTSentimentBackend:
         self.client = OpenAI(api_key=api_key)
 
     def generate(self, prompt: str) -> str:
+        if hasattr(self.client, "responses"):
+            return self._generate_with_responses(prompt)
+        return self._generate_with_chat_completions(prompt)
+
+    def _generate_with_responses(self, prompt: str) -> str:
         response = self.client.responses.create(
             model=self.model_id,
             reasoning={"effort": self.reasoning_effort},
@@ -120,6 +139,37 @@ class OpenAIChatGPTSentimentBackend:
         if output_text:
             return str(output_text)
         return _extract_response_text(response)
+
+    def _generate_with_chat_completions(self, prompt: str) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model_id,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a financial-news sentiment scorer for volatility forecasting. "
+                        "Return only the requested JSON object."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            reasoning_effort=self.reasoning_effort,
+            response_format=_chat_completion_response_format(),
+            max_completion_tokens=self.max_output_tokens,
+        )
+        choices = getattr(response, "choices", None)
+        if not choices and isinstance(response, dict):
+            choices = response.get("choices")
+        if not choices:
+            return ""
+        first = choices[0]
+        message = getattr(first, "message", None)
+        if message is None and isinstance(first, dict):
+            message = first.get("message")
+        content = getattr(message, "content", None)
+        if content is None and isinstance(message, dict):
+            content = message.get("content")
+        return str(content or "")
 
 
 def _extract_response_text(response: Any) -> str:
@@ -332,6 +382,35 @@ def _default_backend(
     )
 
 
+def _generate_with_retries(
+    backend: SentimentBackend,
+    prompt: str,
+    *,
+    max_retries: int,
+    retry_backoff_seconds: float,
+) -> str:
+    attempts = max(1, int(max_retries) + 1)
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return backend.generate(prompt)
+        except Exception as exc:  # noqa: BLE001 - keep long API jobs resumable across OpenAI timeout classes.
+            last_exc = exc
+            if attempt >= attempts:
+                break
+            wait_seconds = max(0.0, float(retry_backoff_seconds)) * float(attempt)
+            print(
+                f"OpenAI sentiment request failed on attempt {attempt}/{attempts}: "
+                f"{type(exc).__name__}: {exc}. Retrying in {wait_seconds:.1f}s.",
+                file=sys.stderr,
+                flush=True,
+            )
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
+    assert last_exc is not None
+    raise last_exc
+
+
 def fit_sentiment_features(
     news_df: pd.DataFrame,
     *,
@@ -345,6 +424,10 @@ def fit_sentiment_features(
     cache_path: str | Path | None = None,
     limit: int | None = None,
     sleep_seconds: float = 0.0,
+    max_retries: int = 5,
+    retry_backoff_seconds: float = 5.0,
+    progress_every: int = 100,
+    continue_on_error: bool = False,
     backend: SentimentBackend | None = None,
 ) -> SentimentFeatureResult:
     """Build fixed-width Sun-style ChatGPT sentiment vectors from news text."""
@@ -369,8 +452,12 @@ def fit_sentiment_features(
     vectors: list[np.ndarray] = []
     raw_responses: list[str] = []
     parse_statuses: list[str] = []
+    total_rows = int(len(news_df))
+    cache_hits = 0
+    api_calls = 0
+    api_errors = 0
 
-    for text in texts.tolist():
+    for row_idx, text in enumerate(texts.tolist(), start=1):
         clean_text = str(text or "").strip()
         if not clean_text:
             parsed = ParsedSentiment(scores=_empty_scores(), parse_status="empty_text")
@@ -384,27 +471,53 @@ def fit_sentiment_features(
             )
             cached = cache.get(key)
             if cached is not None:
+                cache_hits += 1
                 raw_response = str(cached.get("raw_response", ""))
                 parsed = parse_chatgpt_sentiment_response(raw_response)
                 parsed = ParsedSentiment(scores=parsed.scores, parse_status=f"cache_{parsed.parse_status}")
             else:
                 prompt = build_sun_prompt(clean_text, max_input_chars=int(max_input_chars))
-                raw_response = backend.generate(prompt)
-                parsed = parse_chatgpt_sentiment_response(raw_response)
-                record = {
-                    "cache_key": key,
-                    "model_id": resolved_model_id,
-                    "prompt_version": PROMPT_VERSION,
-                    "raw_response": raw_response,
-                    "parse_status": parsed.parse_status,
-                }
-                cache[key] = record
-                _append_cache_record(cache_path, record)
-                if sleep_seconds > 0:
-                    time.sleep(float(sleep_seconds))
+                try:
+                    raw_response = _generate_with_retries(
+                        backend,
+                        prompt,
+                        max_retries=int(max_retries),
+                        retry_backoff_seconds=float(retry_backoff_seconds),
+                    )
+                    api_calls += 1
+                    parsed = parse_chatgpt_sentiment_response(raw_response)
+                    record = {
+                        "cache_key": key,
+                        "model_id": resolved_model_id,
+                        "prompt_version": PROMPT_VERSION,
+                        "raw_response": raw_response,
+                        "parse_status": parsed.parse_status,
+                    }
+                    cache[key] = record
+                    _append_cache_record(cache_path, record)
+                    if sleep_seconds > 0:
+                        time.sleep(float(sleep_seconds))
+                except Exception as exc:  # noqa: BLE001 - preserve checkpoint and optionally keep going.
+                    api_errors += 1
+                    if not continue_on_error:
+                        raise RuntimeError(
+                            "OpenAI sentiment request failed after retries. "
+                            "Successful rows have already been cached; rerun the same command "
+                            "with the same --output-dir/--cache-path and --model to resume."
+                        ) from exc
+                    raw_response = f"{type(exc).__name__}: {exc}"
+                    parsed = ParsedSentiment(scores=_empty_scores(), parse_status="api_error")
         vectors.append(_align_vector(parsed.scores, target_dim=target_dim))
         raw_responses.append(raw_response)
         parse_statuses.append(parsed.parse_status)
+        progress_interval = int(progress_every)
+        if progress_interval > 0 and (row_idx % progress_interval == 0 or row_idx == total_rows):
+            print(
+                f"sentiment progress {row_idx}/{total_rows} "
+                f"(cache_hits={cache_hits}, api_calls={api_calls}, api_errors={api_errors})",
+                file=sys.stderr,
+                flush=True,
+            )
 
     frame = pd.DataFrame(
         {
@@ -437,6 +550,12 @@ def fit_sentiment_features(
             "reasoning_effort": str(reasoning_effort),
             "api_key_env": str(api_key_env),
             "cache_path": str(cache_path) if cache_path is not None else "",
+            "max_retries": int(max_retries),
+            "retry_backoff_seconds": float(retry_backoff_seconds),
+            "continue_on_error": bool(continue_on_error),
+            "cache_hits": int(cache_hits),
+            "api_calls": int(api_calls),
+            "api_errors": int(api_errors),
         },
     )
 
