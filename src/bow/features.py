@@ -1,10 +1,11 @@
-"""Build BoW/TF-IDF features for RQ2 traditional text baselines."""
+"""Build n-gram frequency BoW features for RQ2 traditional text baselines."""
 
 from __future__ import annotations
 
 import json
 import math
 import re
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,15 +13,15 @@ import numpy as np
 import pandas as pd
 
 _TOKEN_PATTERN = re.compile(r"[A-Za-z][A-Za-z'-]*")
+_REFERENCE_METHOD = "Manela_Moreira_2017_style_ngram_frequency"
 
 
 @dataclass(frozen=True)
 class BowFeatureResult:
-    """Feature frame plus fitted sklearn objects needed for reproducibility."""
+    """Feature frame plus fitted vocabulary needed for reproducibility."""
 
     frame: pd.DataFrame
-    vectorizer: Any | None
-    svd: Any | None
+    vocabulary: list[str]
     manifest: dict[str, Any]
 
 
@@ -47,117 +48,63 @@ def _text_series(frame: pd.DataFrame, text_column: str) -> pd.Series:
     return frame[text_column].fillna("").astype(str)
 
 
-def _zero_feature_frame(news_df: pd.DataFrame, *, target_dim: int) -> pd.DataFrame:
-    vector = _serialize_vector(np.zeros(int(target_dim), dtype=np.float32))
-    return pd.DataFrame(
-        {
-            "news_row_id": _ensure_news_row_id(news_df),
-            "article_id": _metadata_column(news_df, "ArticleID", "article_id"),
-            "source_file": _metadata_column(news_df, "SourceFile", "source_file"),
-            "bow_embedding": [vector] * len(news_df),
-            "bow_dim": [int(target_dim)] * len(news_df),
-        }
-    )
-
-
-def _dense_aligned_features(matrix: Any, *, target_dim: int, random_state: int) -> tuple[np.ndarray, Any | None]:
-    from sklearn.decomposition import TruncatedSVD
-
-    target_dim = int(target_dim)
-    if target_dim <= 0:
-        raise ValueError(f"target_dim must be positive, got {target_dim}")
-    n_features = int(matrix.shape[1])
-    if n_features <= 0:
-        return np.zeros((matrix.shape[0], target_dim), dtype=np.float32), None
-
-    n_components = min(target_dim, n_features)
-    if n_components == n_features:
-        dense = matrix.toarray().astype(np.float32)
-        svd = None
-    else:
-        svd = TruncatedSVD(n_components=n_components, random_state=int(random_state))
-        dense = svd.fit_transform(matrix).astype(np.float32)
-
-    aligned = np.zeros((matrix.shape[0], target_dim), dtype=np.float32)
-    aligned[:, : dense.shape[1]] = dense[:, :target_dim]
-    return aligned, svd
-
-
 def _tokens(text: str) -> list[str]:
     return [match.group(0).lower() for match in _TOKEN_PATTERN.finditer(str(text))]
 
 
-def _ngrams(tokens: list[str], ngram_range: tuple[int, int]) -> list[str]:
+def _normalize_ngram_range(ngram_range: tuple[int, int]) -> tuple[int, int]:
     ngram_min, ngram_max = tuple(int(value) for value in ngram_range)
+    if ngram_min <= 0 or ngram_max <= 0:
+        raise ValueError(f"ngram_range values must be positive, got: {ngram_range}")
+    if ngram_min > ngram_max:
+        raise ValueError(f"ngram_range minimum cannot exceed maximum, got: {ngram_range}")
+    return ngram_min, ngram_max
+
+
+def _ngrams(tokens: list[str], ngram_range: tuple[int, int]) -> list[str]:
+    ngram_min, ngram_max = _normalize_ngram_range(ngram_range)
     output: list[str] = []
     for ngram_size in range(ngram_min, ngram_max + 1):
-        if ngram_size <= 0 or len(tokens) < ngram_size:
+        if len(tokens) < ngram_size:
             continue
         output.extend(" ".join(tokens[idx : idx + ngram_size]) for idx in range(0, len(tokens) - ngram_size + 1))
     return output
 
 
-def _fit_tfidf_numpy(
-    texts: list[str],
-    *,
-    target_dim: int,
-    max_features: int,
-    ngram_range: tuple[int, int],
-) -> tuple[np.ndarray, dict[str, Any]]:
-    documents = [_ngrams(_tokens(text), ngram_range) for text in texts]
-    term_counts: dict[str, int] = {}
-    doc_freq: dict[str, int] = {}
+def _build_vocabulary(documents: list[list[str]], *, target_dim: int) -> list[str]:
+    corpus_counts: Counter[str] = Counter()
     for terms in documents:
-        seen = set()
-        for term in terms:
-            term_counts[term] = term_counts.get(term, 0) + 1
-            if term not in seen:
-                doc_freq[term] = doc_freq.get(term, 0) + 1
-                seen.add(term)
-
-    vocabulary = [
+        corpus_counts.update(terms)
+    return [
         term
-        for term, _count in sorted(term_counts.items(), key=lambda item: (-item[1], item[0]))[: int(max_features)]
+        for term, _count in sorted(corpus_counts.items(), key=lambda item: (-item[1], item[0]))[: int(target_dim)]
     ]
-    if not vocabulary:
-        return np.zeros((len(texts), int(target_dim)), dtype=np.float32), {
-            "backend": "numpy_fallback",
-            "vocabulary_size": 0,
-            "svd_components": 0,
-        }
 
+
+def _frequency_features(documents: list[list[str]], vocabulary: list[str], *, target_dim: int) -> np.ndarray:
+    features = np.zeros((len(documents), int(target_dim)), dtype=np.float32)
+    if not vocabulary:
+        return features
     term_to_idx = {term: idx for idx, term in enumerate(vocabulary)}
-    counts = np.zeros((len(documents), len(vocabulary)), dtype=np.float32)
     for row_idx, terms in enumerate(documents):
-        for term in terms:
+        row_counts = Counter(terms)
+        for term, count in row_counts.items():
             column_idx = term_to_idx.get(term)
             if column_idx is not None:
-                counts[row_idx, column_idx] += 1.0
-    row_sums = np.maximum(counts.sum(axis=1, keepdims=True), 1.0)
-    tf = counts / row_sums
-    idf = np.asarray(
-        [math.log((1.0 + len(documents)) / (1.0 + doc_freq.get(term, 0))) + 1.0 for term in vocabulary],
-        dtype=np.float32,
-    )
-    tfidf = tf * idf.reshape(1, -1)
+                features[row_idx, column_idx] = math.log1p(float(count))
+    return features
 
-    target_dim = int(target_dim)
-    if tfidf.shape[1] <= target_dim:
-        aligned = np.zeros((tfidf.shape[0], target_dim), dtype=np.float32)
-        aligned[:, : tfidf.shape[1]] = tfidf
-        svd_components = 0
-    else:
-        centered = tfidf - tfidf.mean(axis=0, keepdims=True)
-        u_matrix, singular_values, _v_transpose = np.linalg.svd(centered, full_matrices=False)
-        svd_components = min(target_dim, u_matrix.shape[1])
-        reduced = (u_matrix[:, :svd_components] * singular_values[:svd_components]).astype(np.float32)
-        aligned = np.zeros((tfidf.shape[0], target_dim), dtype=np.float32)
-        aligned[:, :svd_components] = reduced
-    return aligned, {
-        "backend": "numpy_fallback",
-        "vocabulary_size": int(len(vocabulary)),
-        "svd_components": int(svd_components),
-    }
+
+def _feature_frame(news_df: pd.DataFrame, *, features: np.ndarray, target_dim: int) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "news_row_id": _ensure_news_row_id(news_df),
+            "article_id": _metadata_column(news_df, "ArticleID", "article_id"),
+            "source_file": _metadata_column(news_df, "SourceFile", "source_file"),
+            "bow_embedding": [_serialize_vector(row) for row in features],
+            "bow_dim": [int(target_dim)] * len(news_df),
+        }
+    )
 
 
 def fit_bow_features(
@@ -169,79 +116,40 @@ def fit_bow_features(
     ngram_range: tuple[int, int] = (1, 2),
     random_state: int = 42,
 ) -> BowFeatureResult:
-    """Fit a TF-IDF/SVD BoW representation and return fixed-width features."""
+    """Fit a deterministic n-gram frequency BoW representation.
+
+    ``max_features`` and ``random_state`` are retained only for CLI/API
+    compatibility with earlier generated commands.
+    """
 
     target_dim = int(target_dim)
     if target_dim <= 0:
         raise ValueError(f"target_dim must be positive, got {target_dim}")
+    ngram_range = _normalize_ngram_range(ngram_range)
+
     texts = _text_series(news_df, text_column)
-    non_empty_texts = [text for text in texts.tolist() if text.strip()]
-    if not non_empty_texts:
-        frame = _zero_feature_frame(news_df, target_dim=target_dim)
-        return BowFeatureResult(
-            frame=frame,
-            vectorizer=None,
-            svd=None,
-            manifest={
-                "text_column": text_column,
-                "target_dim": target_dim,
-                "max_features": int(max_features),
-                "ngram_range": list(ngram_range),
-                "random_state": int(random_state),
-                "row_count": int(len(news_df)),
-                "fitted": False,
-                "reason": "all_text_empty",
-            },
-        )
+    documents = [_ngrams(_tokens(text), ngram_range) for text in texts.tolist()]
+    vocabulary = _build_vocabulary(documents, target_dim=target_dim)
+    features = _frequency_features(documents, vocabulary, target_dim=target_dim)
+    frame = _feature_frame(news_df, features=features, target_dim=target_dim)
 
-    try:
-        from sklearn.feature_extraction.text import TfidfVectorizer
-
-        vectorizer = TfidfVectorizer(
-            max_features=int(max_features),
-            ngram_range=tuple(int(value) for value in ngram_range),
-            lowercase=True,
-        )
-        tfidf = vectorizer.fit_transform(texts.tolist())
-        features, svd = _dense_aligned_features(tfidf, target_dim=target_dim, random_state=int(random_state))
-        backend_metadata = {
-            "backend": "sklearn",
-            "vocabulary_size": int(len(vectorizer.vocabulary_)),
-            "svd_components": int(0 if svd is None else svd.n_components),
-        }
-    except ModuleNotFoundError:
-        features, backend_metadata = _fit_tfidf_numpy(
-            texts.tolist(),
-            target_dim=target_dim,
-            max_features=int(max_features),
-            ngram_range=tuple(int(value) for value in ngram_range),
-        )
-        vectorizer = None
-        svd = None
-    frame = pd.DataFrame(
-        {
-            "news_row_id": _ensure_news_row_id(news_df),
-            "article_id": _metadata_column(news_df, "ArticleID", "article_id"),
-            "source_file": _metadata_column(news_df, "SourceFile", "source_file"),
-            "bow_embedding": [_serialize_vector(row) for row in features],
-            "bow_dim": [target_dim] * len(news_df),
-        }
-    )
-    return BowFeatureResult(
-        frame=frame,
-        vectorizer=vectorizer,
-        svd=svd,
-        manifest={
-            "text_column": text_column,
-            "target_dim": target_dim,
-            "max_features": int(max_features),
-            "ngram_range": list(ngram_range),
-            "random_state": int(random_state),
-            "row_count": int(len(news_df)),
-            "fitted": True,
-            **backend_metadata,
-        },
-    )
+    fitted = bool(vocabulary)
+    manifest = {
+        "text_column": text_column,
+        "target_dim": target_dim,
+        "max_features_deprecated_ignored": int(max_features),
+        "random_state_deprecated_ignored": int(random_state),
+        "ngram_range": list(ngram_range),
+        "row_count": int(len(news_df)),
+        "fitted": fitted,
+        "reason": "" if fitted else "all_text_empty",
+        "backend": "python_counter",
+        "representation": "ngram_frequency",
+        "weighting": "log1p_count",
+        "reference_method": _REFERENCE_METHOD,
+        "vocabulary_size": int(len(vocabulary)),
+    }
+    return BowFeatureResult(frame=frame, vocabulary=vocabulary, manifest=manifest)
 
 
 def build_bow_features(
@@ -252,7 +160,7 @@ def build_bow_features(
     max_features: int = 5000,
     ngram_range: tuple[int, int] = (1, 2),
 ) -> pd.DataFrame:
-    """Return only the BoW feature frame for callers that do not need fitted models."""
+    """Return only the BoW feature frame for callers that do not need metadata."""
 
     return fit_bow_features(
         news_df,

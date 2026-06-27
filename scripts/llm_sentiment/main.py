@@ -1,4 +1,4 @@
-"""CLI for building RQ2 dictionary sentiment text features."""
+"""CLI for building RQ2 Sun-style ChatGPT sentiment text features."""
 
 from __future__ import annotations
 
@@ -17,27 +17,56 @@ import scripts._path_setup  # noqa: F401
 
 import pandas as pd
 
-from llm_sentiment import fit_sentiment_features
+from llm_sentiment.features import DEFAULT_MODEL_ID, fit_sentiment_features
 
 
 DEFAULT_NEWS_XLSX = "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx"
 
 
 def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build dictionary sentiment features for RQ2 text baselines.")
+    parser = argparse.ArgumentParser(description="Build Sun-style ChatGPT sentiment features for RQ2 text baselines.")
     parser.add_argument("--news-xlsx", default=DEFAULT_NEWS_XLSX, help="Raw news workbook path.")
     parser.add_argument("--output-dir", required=True, help="Directory for llm_sentiment_features.xlsx.")
     parser.add_argument("--text-column", default="LP", help="Raw text column to featurize.")
     parser.add_argument("--target-dim", type=int, default=1024, help="Fixed output vector width.")
     parser.add_argument(
-        "--dictionary-path",
-        default="",
-        help="Optional Loughran-McDonald dictionary CSV. If set and missing, the CLI fails unless --allow-fallback is used.",
+        "--model",
+        "--model-id",
+        dest="model_id",
+        default=None,
+        help=f"OpenAI model id. Defaults to OPENAI_MODEL or {DEFAULT_MODEL_ID}.",
     )
     parser.add_argument(
-        "--allow-fallback",
+        "--max-output-tokens",
+        "--max-new-tokens",
+        dest="max_output_tokens",
+        type=int,
+        default=256,
+        help="Maximum generated tokens per article.",
+    )
+    parser.add_argument("--max-input-chars", type=int, default=6000, help="Maximum article characters sent to the model.")
+    parser.add_argument(
+        "--reasoning-effort",
+        default="low",
+        choices=["minimal", "low", "medium", "high"],
+        help="OpenAI reasoning effort for supported models.",
+    )
+    parser.add_argument("--api-key-env", default="OPENAI_API_KEY", help="Environment variable containing the OpenAI API key.")
+    parser.add_argument("--cache-path", default="", help="JSONL cache path. Defaults to <output-dir>/openai_sentiment_cache.jsonl.")
+    parser.add_argument("--limit", type=int, default=None, help="Optional first-N article limit for smoke runs.")
+    parser.add_argument("--sleep-seconds", type=float, default=0.0, help="Optional delay between uncached generations.")
+    parser.add_argument("--max-retries", type=int, default=5, help="Retries per uncached OpenAI request before failing.")
+    parser.add_argument(
+        "--retry-backoff-seconds",
+        type=float,
+        default=5.0,
+        help="Linear retry backoff base seconds; wait is base * attempt.",
+    )
+    parser.add_argument("--progress-every", type=int, default=100, help="Print progress every N rows; 0 disables.")
+    parser.add_argument(
+        "--continue-on-error",
         action="store_true",
-        help="Use the explicit builtin fallback lexicon when dictionary-path is missing.",
+        help="After retries are exhausted, write a zero-vector api_error row and continue instead of failing.",
     )
     return parser.parse_args(list(argv) if argv is not None else None)
 
@@ -48,19 +77,27 @@ def main(argv: Iterable[str] | None = None) -> Path:
     if not news_path.exists():
         raise FileNotFoundError(f"News workbook does not exist: {news_path}")
 
-    dictionary_path = str(args.dictionary_path).strip()
-    allow_builtin_fallback = bool(args.allow_fallback or not dictionary_path)
-
     output_dir = Path(args.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = Path(args.cache_path).expanduser() if str(args.cache_path).strip() else output_dir / "openai_sentiment_cache.jsonl"
 
     news_df = pd.read_excel(news_path, engine="openpyxl", dtype=object)
     result = fit_sentiment_features(
         news_df,
         text_column=str(args.text_column),
         target_dim=int(args.target_dim),
-        dictionary_path=dictionary_path or None,
-        allow_builtin_fallback=allow_builtin_fallback,
+        model_id=args.model_id,
+        max_output_tokens=int(args.max_output_tokens),
+        max_input_chars=int(args.max_input_chars),
+        reasoning_effort=str(args.reasoning_effort),
+        api_key_env=str(args.api_key_env),
+        cache_path=cache_path,
+        limit=args.limit,
+        sleep_seconds=float(args.sleep_seconds),
+        max_retries=int(args.max_retries),
+        retry_backoff_seconds=float(args.retry_backoff_seconds),
+        progress_every=int(args.progress_every),
+        continue_on_error=bool(args.continue_on_error),
     )
 
     feature_path = output_dir / "llm_sentiment_features.xlsx"

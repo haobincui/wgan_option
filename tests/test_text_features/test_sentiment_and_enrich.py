@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -13,7 +14,12 @@ if str(ROOT_DIR) not in sys.path:
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from llm_sentiment.features import fit_sentiment_features, load_sentiment_lexicon  # noqa: E402
+from llm_sentiment.features import (  # noqa: E402
+    OpenAIChatGPTSentimentBackend,
+    SENTIMENT_DIMENSIONS,
+    fit_sentiment_features,
+    parse_chatgpt_sentiment_response,
+)
 from scripts.rq2.enrich_merged_vol import enrich_workbook  # noqa: E402
 
 
@@ -22,42 +28,219 @@ def _parse_vector(value: str) -> list[float]:
 
 
 class TestSentimentFeatures(unittest.TestCase):
-    def test_sentiment_features_use_dictionary_and_fixed_width(self):
+    def test_chatgpt_sentiment_features_use_sun_dimensions_and_fixed_width(self):
+        class FakeBackend:
+            def __init__(self):
+                self.prompts = []
+
+            def generate(self, prompt: str) -> str:
+                self.prompts.append(prompt)
+                return json.dumps(
+                    {
+                        "macroeconomic_uncertainty": 0.7,
+                        "institutional_action": 0.2,
+                        "risk_off_intensity": 0.5,
+                    }
+                )
+
+        backend = FakeBackend()
+        news_df = pd.DataFrame(
+            {
+                "ArticleID": ["a1", "a2"],
+                "SourceFile": ["s1", "s2"],
+                "LP": ["central bank warns inflation risks may raise market volatility", ""],
+            }
+        )
+
+        result = fit_sentiment_features(news_df, target_dim=8, model_id="fixture-chatgpt", backend=backend)
+
+        self.assertEqual(result.manifest["sentiment_dimensions"], list(SENTIMENT_DIMENSIONS))
+        self.assertEqual(result.frame["sentiment_dim"].tolist(), [8, 8])
+        self.assertEqual(
+            result.frame["sentiment_dictionary_source"].tolist(),
+            ["openai_chatgpt_sun2026_style:fixture-chatgpt", "openai_chatgpt_sun2026_style:fixture-chatgpt"],
+        )
+        first_vector = _parse_vector(result.frame.loc[0, "sentiment_embedding"])
+        second_vector = _parse_vector(result.frame.loc[1, "sentiment_embedding"])
+        for actual, expected in zip(first_vector[:3], [0.7, 0.2, 0.5]):
+            self.assertAlmostEqual(actual, expected, places=6)
+        self.assertEqual(first_vector[3:], [0.0, 0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(second_vector, [0.0] * 8)
+        self.assertEqual(result.frame["sentiment_parse_status"].tolist(), ["json", "empty_text"])
+        self.assertEqual(len(backend.prompts), 1)
+        self.assertIn("macroeconomic uncertainty", backend.prompts[0])
+        self.assertIn("Do not mechanically", backend.prompts[0])
+
+    def test_response_parser_handles_fenced_json_regex_and_malformed_text(self):
+        fenced = parse_chatgpt_sentiment_response(
+            """
+            ```json
+            {"macroeconomic_uncertainty": 0.6, "institutional_action": 0.1, "risk_off_intensity": 0.4}
+            ```
+            """
+        )
+        self.assertEqual(fenced.parse_status, "json")
+        self.assertEqual(fenced.scores["macroeconomic_uncertainty"], 0.6)
+
+        regex = parse_chatgpt_sentiment_response(
+            "macroeconomic_uncertainty=75% institutional_action: 0.2 risk_off_intensity: 1.2"
+        )
+        self.assertEqual(regex.parse_status, "regex")
+        self.assertEqual(regex.scores["macroeconomic_uncertainty"], 0.75)
+        self.assertEqual(regex.scores["risk_off_intensity"], 1.0)
+
+        malformed = parse_chatgpt_sentiment_response("not a score")
+        self.assertEqual(malformed.parse_status, "parse_failed")
+        self.assertEqual(malformed.scores, {dimension: 0.0 for dimension in SENTIMENT_DIMENSIONS})
+
+    def test_cache_hit_does_not_call_backend_twice(self):
+        class FakeBackend:
+            def __init__(self):
+                self.calls = 0
+
+            def generate(self, prompt: str) -> str:
+                self.calls += 1
+                return (
+                    '{"macroeconomic_uncertainty": 0.9, '
+                    '"institutional_action": 0.3, "risk_off_intensity": 0.4}'
+                )
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            dictionary_path = Path(tmpdir) / "lm.csv"
-            pd.DataFrame(
-                {
-                    "Word": ["GAIN", "LOSS", "MAY"],
-                    "Positive": [2009, 0, 0],
-                    "Negative": [0, 2009, 0],
-                    "Uncertainty": [0, 0, 2009],
-                }
-            ).to_csv(dictionary_path, index=False)
-            news_df = pd.DataFrame(
-                {
-                    "ArticleID": ["a1", "a2"],
-                    "SourceFile": ["s1", "s2"],
-                    "LP": ["gain may follow policy news", ""],
-                }
+            backend = FakeBackend()
+            cache_path = Path(tmpdir) / "cache.jsonl"
+            news_df = pd.DataFrame({"LP": ["same text", "same text"]})
+
+            result = fit_sentiment_features(
+                news_df,
+                target_dim=4,
+                model_id="fixture-chatgpt",
+                cache_path=cache_path,
+                backend=backend,
             )
 
-            result = fit_sentiment_features(news_df, target_dim=20, dictionary_path=dictionary_path)
+            self.assertEqual(backend.calls, 1)
+            self.assertTrue(cache_path.exists())
+            self.assertEqual(result.frame["sentiment_parse_status"].tolist(), ["json", "cache_json"])
 
-            self.assertEqual(result.frame["sentiment_dim"].tolist(), [20, 20])
-            self.assertEqual(result.frame["sentiment_dictionary_source"].tolist(), [str(dictionary_path), str(dictionary_path)])
-            first_vector = _parse_vector(result.frame.loc[0, "sentiment_embedding"])
-            self.assertEqual(len(first_vector), 20)
-            self.assertGreater(first_vector[0], 0.0)
-            self.assertGreater(first_vector[2], 0.0)
+    def test_transient_api_error_retries_and_then_caches_success(self):
+        class FakeBackend:
+            def __init__(self):
+                self.calls = 0
 
-    def test_missing_dictionary_can_fail_fast_without_fallback(self):
+            def generate(self, prompt: str) -> str:
+                self.calls += 1
+                if self.calls == 1:
+                    raise TimeoutError("fixture timeout")
+                return (
+                    '{"macroeconomic_uncertainty": 0.2, '
+                    '"institutional_action": 0.3, "risk_off_intensity": 0.4}'
+                )
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            missing_path = Path(tmpdir) / "missing.csv"
-            with self.assertRaises(FileNotFoundError):
-                load_sentiment_lexicon(missing_path, allow_builtin_fallback=False)
+            backend = FakeBackend()
+            cache_path = Path(tmpdir) / "cache.jsonl"
+            news_df = pd.DataFrame({"LP": ["needs retry"]})
 
-    def test_sentiment_cli_writes_feature_artifacts_with_builtin_fallback(self):
+            result = fit_sentiment_features(
+                news_df,
+                target_dim=4,
+                model_id="fixture-chatgpt",
+                cache_path=cache_path,
+                backend=backend,
+                max_retries=2,
+                retry_backoff_seconds=0.0,
+                progress_every=0,
+            )
+
+            self.assertEqual(backend.calls, 2)
+            self.assertEqual(result.frame["sentiment_parse_status"].tolist(), ["json"])
+            self.assertEqual(len(cache_path.read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_api_error_can_continue_without_caching_failure(self):
+        class FakeBackend:
+            def __init__(self):
+                self.calls = 0
+
+            def generate(self, prompt: str) -> str:
+                self.calls += 1
+                raise TimeoutError("fixture timeout")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backend = FakeBackend()
+            cache_path = Path(tmpdir) / "cache.jsonl"
+            news_df = pd.DataFrame({"LP": ["will fail"]})
+
+            result = fit_sentiment_features(
+                news_df,
+                target_dim=4,
+                model_id="fixture-chatgpt",
+                cache_path=cache_path,
+                backend=backend,
+                max_retries=1,
+                retry_backoff_seconds=0.0,
+                progress_every=0,
+                continue_on_error=True,
+            )
+
+            self.assertEqual(backend.calls, 2)
+            self.assertEqual(result.frame["sentiment_parse_status"].tolist(), ["api_error"])
+            self.assertFalse(cache_path.exists())
+
+    def test_openai_backend_falls_back_to_chat_completions_without_responses_api(self):
+        class FakeCompletions:
+            def __init__(self):
+                self.kwargs = None
+
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+
+                class Message:
+                    content = (
+                        '{"macroeconomic_uncertainty": 0.3, '
+                        '"institutional_action": 0.4, "risk_off_intensity": 0.5}'
+                    )
+
+                class Choice:
+                    message = Message()
+
+                class Response:
+                    choices = [Choice()]
+
+                return Response()
+
+        class FakeChat:
+            def __init__(self):
+                self.completions = FakeCompletions()
+
+        class FakeClient:
+            def __init__(self, api_key):
+                self.api_key = api_key
+                self.chat = FakeChat()
+
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "fixture-key"}):
+            with patch("openai.OpenAI", FakeClient):
+                backend = OpenAIChatGPTSentimentBackend(model_id="fixture-chatgpt")
+                raw = backend.generate("score this article")
+
+        parsed = parse_chatgpt_sentiment_response(raw)
+        self.assertEqual(parsed.parse_status, "json")
+        self.assertEqual(parsed.scores["risk_off_intensity"], 0.5)
+        kwargs = backend.client.chat.completions.kwargs
+        self.assertEqual(kwargs["model"], "fixture-chatgpt")
+        self.assertIn("response_format", kwargs)
+
+    def test_sentiment_cli_writes_feature_artifacts_with_fake_openai_backend(self):
         from scripts.llm_sentiment.main import main as sentiment_main
+
+        class FakeBackend:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def generate(self, prompt: str) -> str:
+                return (
+                    '{"macroeconomic_uncertainty": 0.1, '
+                    '"institutional_action": 0.8, "risk_off_intensity": 0.2}'
+                )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             news_path = Path(tmpdir) / "news.xlsx"
@@ -70,22 +253,29 @@ class TestSentimentFeatures(unittest.TestCase):
                 }
             ).to_excel(news_path, index=False)
 
-            feature_path = sentiment_main(
-                [
-                    "--news-xlsx",
-                    str(news_path),
-                    "--output-dir",
-                    str(output_dir),
-                    "--target-dim",
-                    "8",
-                ]
-            )
+            with patch("llm_sentiment.features.OpenAIChatGPTSentimentBackend", FakeBackend):
+                feature_path = sentiment_main(
+                    [
+                        "--news-xlsx",
+                        str(news_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--target-dim",
+                        "8",
+                        "--model",
+                        "fixture-chatgpt",
+                    ]
+                )
 
             self.assertEqual(feature_path, output_dir / "llm_sentiment_features.xlsx")
             self.assertTrue(feature_path.exists())
             self.assertTrue((output_dir / "llm_sentiment_manifest.json").exists())
             features = pd.read_excel(feature_path)
-            self.assertEqual(features["sentiment_dictionary_source"].tolist(), ["fallback_builtin", "fallback_builtin"])
+            self.assertEqual(
+                features["sentiment_dictionary_source"].tolist(),
+                ["openai_chatgpt_sun2026_style:fixture-chatgpt", "openai_chatgpt_sun2026_style:fixture-chatgpt"],
+            )
+            self.assertIn("sentiment_raw_response", features.columns)
 
 
 class TestRQ2WorkbookEnrichment(unittest.TestCase):

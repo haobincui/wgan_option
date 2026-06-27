@@ -23,7 +23,7 @@ v2 把中心实验改成 **Δ_text =（no-text 误差）−（text 误差）**�
 
 | # | 决策项 | 选定 |
 | --- | --- | --- |
-| 1 | RQ2 路线 | **A**：实现 BoW+TF-IDF 与 Loughran-McDonald (LM) sentiment 两个 traditional text baseline，喂同一下游 |
+| 1 | RQ2 路线 | **A**：实现 n-gram frequency BoW 与 Loughran-McDonald (LM) sentiment 两个 traditional text baseline，喂同一下游 |
 | 2 | RQ4 路线 | **A**：真做 option pricing / hedging case study（用 generated surface 定价/对冲，对比 persistence） |
 | 3 | 主架构 | **FiLM WGAN 主线**，CNN WGAN 作复现 robustness |
 | 4 | 数据切分 | train/val/test = **70/15/15**（chronological，按 `news_timestamp_utc`），Phase 0 出样本量后微调 |
@@ -141,18 +141,20 @@ v2 把中心实验改成 **Δ_text =（no-text 误差）−（text 误差）**�
 
 ---
 
-## 8. Phase 2 — RQ2（路线 A）：traditional text baseline
+## 8. Phase 2 — RQ2（路线 A）：text representation baseline
 
-**目标**：回答"LLM embedding vs 传统 text-mining 的信息含量"，让 RQ2 真正成立。
+**目标**：回答"LLM embedding vs sparse text / LLM sentiment representation 的信息含量"，让 RQ2 真正成立。
 
 1. **特征构造**（新模块 `src/text_baselines/`）：
-   - **BoW + TF-IDF**：从原始 `LP` 文本（回源 `data/raw/text_embedding/`）构造 TF-IDF，可 SVD 降维到与 lp 可比维度。
-   - **LM sentiment**：用 Loughran-McDonald 金融词典算 positive/negative/uncertainty 等计数特征。
+   - **n-gram frequency BoW**：参考 Manela and Moreira 风格的传统文本表示，从原始 `LP` 文本（回源 `data/raw/text_embedding/`）构造 unigram/bigram frequency features，作为迁移到本文数据上的 sparse text baseline。
+   - **Sun-style ChatGPT sentiment**：参考 Sun (2026) 的 zero-shot multi-dimensional sentiment decomposition，用 OpenAI ChatGPT 按 `macroeconomic_uncertainty`、`institutional_action`、`risk_off_intensity` 三个维度给每条新闻打分。
 2. **集成点（保证"只换 text 表示，下游不变"）**：在 merge / 预处理阶段把这些特征写成与 `lp_embedding` 同构的列（如 `bow_embedding` / `sentiment_embedding`）→ `_parse_embedding` 加 `bow` / `sentiment` 两个 mode → 复用同一 FiLM-WGAN 下游。
 3. **同协议跑**：与 Phase 1 相同 split / seed / test。
 4. **产出 Table RQ2-A**：`none < bow < sentiment < lp(LLM)` 的 test MAE 递进（期望单调）；附 LLM 内部子表 `lp/hd/concat`、`512D/1024D`。
 
 > **512D vs 1024D 提醒**：`text-embedding-3-large` 支持 `dimensions` 参数。若只有 1024D 已生成，512D 需重新生成或 PCA 降维并在文中说明。
+>
+> **文献方法定位**：BoW baseline 只复用 Manela and Moreira 式的 n-gram / bag-of-words frequency text representation。它不复现原论文的 NVIX/SVR 下游，也不把原论文结果与本文结果直接比较；比较发生在本文数据、本文 split、同一 FiLM-WGAN 下游和同一 metrics 下。
 
 ---
 
@@ -238,7 +240,7 @@ outputs/training/<family>/<dataset>/<run_ts>/
 | 新 | `configs/film_wgan/train_film_text_lp.yaml`、`train_film_notext.yaml` | RQ1 双条件 | 7 |
 | 新 | `data/reference/fomc_events.csv` | event 日历 | 6 |
 | 新 | `scripts/analyze_announcement/`（或并入 `analyze_error`） | announcement 标注 + quality 审计 + event-study | 6/9 |
-| 新 | `src/text_baselines/`（BoW/TF-IDF + LM sentiment）+ merge 集成 | RQ2 路线 A | 8 |
+| 新 | `src/text_baselines/`（n-gram frequency BoW + LM sentiment）+ merge 集成 | RQ2 路线 A | 8 |
 | 新 | `scripts/pricing_case/` | RQ4 pricing/hedging | 10 |
 | 新 | linear/ridge baseline 小脚本 | Axis 4 下界 | 11 |
 | 新 | 统一统计脚本（bootstrap/DM/win-rate） | Phase 6 | 12 |
@@ -283,7 +285,7 @@ Phase 4（RQ4 pricing）→ Phase 5（5 轴 benchmark）→ Phase 6（统计回�
 - test 比例：暂定 70/15/15，Phase 0 出样本量后确认 test 是否够支撑显著性。
 - announcement 窗口 N：暂定 ±30min，Phase 3 做敏感性。
 - seeds：暂定 5 个（41–45），若方差大可增。
-- TF-IDF / embedding 降维目标维度：Phase 2 落地时定。
+- BoW / embedding 目标维度：Phase 2 落地时定。
 
 ---
 

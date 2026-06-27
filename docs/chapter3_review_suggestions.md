@@ -52,7 +52,7 @@ interim conclusion 是否被它引用的证据支撑、计划内部是否自洽�
 - **计划的逻辑问题**：§1.1 把 RQ2 重述为"LLM-based embeddings 与更传统 text representation / **no-text baseline** 的信息含量"。**no-text 不是 "traditional text representation"** —— 删掉文本和"用更弱的文本表示"是两回事。用 no-text 对比，回答的是 RQ1（text 有没有用），**根本没碰 RQ2（哪种 text 表示更好）**。
 - §3.2 自己也承认 BoW/sentiment 没实现。所以现状是：**RQ2 没有任何能回答它的实验。**
 - **二选一（必须现在决定，不能拖到写作）**：
-  - **(A) 补一个 traditional baseline**：BoW + TF-IDF，或 Loughran-McDonald 金融情感词典打分，喂进**同一个 forecasting head**（保持下游一致，只换 text 表示）。这样 RQ2 才真正成立。工作量中等。
+  - **(A) 补一个 traditional baseline**：n-gram frequency BoW，或 Loughran-McDonald 金融情感词典打分，喂进**同一个 forecasting head**（保持下游一致，只换 text 表示）。这样 RQ2 才真正成立。工作量中等。
   - **(B) 改 RQ2 的范围（若时间紧）**：把 RQ2 改成"LLM embedding 的**表示选择**"：`hd vs lp vs concat`、`512D vs 1024D`。但要在 limitation 明说"未与 BoW/sentiment 直接对比"。
   - 注意：(B) 下 `hd/lp/concat/512/1024` 都还是 LLM embedding 内部的变体，**不能**被包装成"LLM vs traditional"。措辞要诚实。
 
@@ -272,8 +272,8 @@ interim conclusion 是否被它引用的证据支撑、计划内部是否自洽�
 
 ### 7.3 Phase 2（RQ2）— text 表示对比 ✅ 路线 A（已定）
 
-**决策已定：走路线 A**——实现 **BoW + TF-IDF** 和 **Loughran-McDonald 金融情感打分** 两个 traditional text baseline，**喂进与 Phase 1 完全相同的 forecasting head**（只换 text 表示层，下游 FiLM-WGAN 架构、split、协议全部一致）。
-- Table RQ2-A：**no-text → BoW(TF-IDF) → sentiment(LM) → LLM-embedding** 的递进对比（同协议）。期望误差单调下降才支持"LLM embedding 信息含量更高"。
+**决策已定：走路线 A**——实现 **n-gram frequency BoW** 和 **Loughran-McDonald 金融情感打分** 两个 traditional text baseline，**喂进与 Phase 1 完全相同的 forecasting head**（只换 text 表示层，下游 FiLM-WGAN 架构、split、协议全部一致）。
+- Table RQ2-A：**no-text → BoW(frequency) → sentiment(LM) → LLM-embedding** 的递进对比（同协议）。期望误差单调下降才支持"LLM embedding 信息含量更高"。
 - 同时把 LLM 内部表示对比（`lp vs hd vs concat`、`512D vs 1024D`）作为 Axis 2 的子表，回答"哪种 LLM 表示最好"。
 - RQ2 这样才真正回答"LLM vs traditional text-mining"，chapter RQ2 措辞**不需要降级**。
 - 执行落点见 §8.3。
@@ -358,7 +358,7 @@ Phase 6（统计/robustness，横切回填各表）
 
 | # | 决策 | 状态 |
 | --- | --- | --- |
-| 1 | RQ2 路线 | ✅ **A**：补 BoW/TF-IDF + Loughran-McDonald sentiment baseline |
+| 1 | RQ2 路线 | ✅ **A**：补 n-gram frequency BoW + Loughran-McDonald sentiment baseline |
 | 2 | RQ4 路线 | ✅ **A**：真做 pricing / hedging case study |
 | 3 | main 架构 | ✅ **FiLM WGAN 主线**，CNN WGAN 作复现 robustness |
 | 4 | test 比例 | ⏳ 暂定 70/15/15（chronological），Phase 0 出样本量后再确认 |
@@ -430,7 +430,7 @@ Phase 6（统计/robustness，横切回填各表）
 ### 8.3 Phase 2 执行（RQ2 路线 A：traditional text baseline）
 
 1. **特征构造**（新模块，如 `src/text_baselines/`）：
-   - **BoW + TF-IDF**：从原始 `LP` 文本（news 工作簿里有原文；workbook 仅存 embedding 时需回源 `data/raw/text_embedding/`）构造 TF-IDF 向量，可 SVD 降维到与 lp 可比的维度。
+   - **n-gram frequency BoW**：参考 Manela and Moreira 风格，从原始 `LP` 文本（news 工作簿里有原文；workbook 仅存 embedding 时需回源 `data/raw/text_embedding/`）构造 unigram/bigram frequency features，作为 traditional sparse text baseline。
    - **Loughran-McDonald sentiment**：用 LM 金融词典算 positive/negative/uncertainty 等计数特征。
 2. **集成点**：在 merge 阶段或一个预处理步把这些特征写成与 `lp_embedding` 同构的列（如 `bow_embedding` / `sentiment_embedding`），这样 `_parse_embedding` 加两个 mode（`bow` / `sentiment`）即可复用**同一 FiLM-WGAN 下游**——保证"只换 text 表示，下游不变"。
 3. **跑同协议**：与 Phase 1 相同 split/seed/test。
@@ -479,7 +479,7 @@ Phase 6（统计/robustness，横切回填各表）
 | 新 | `configs/film_wgan/train_film_text_lp.yaml`、`train_film_notext.yaml` | RQ1 双条件 | 8.2 |
 | 新 | `data/reference/fomc_events.csv` | event 日历 | 8.1 |
 | 新 | `scripts/analyze_announcement/`（或并入 analyze_error） | announcement 标注 + quality 审计 + event-study | 8.1/8.4 |
-| 新 | `src/text_baselines/`（BoW/TF-IDF + LM sentiment）+ merge 集成 | RQ2 路线 A | 8.3 |
+| 新 | `src/text_baselines/`（n-gram frequency BoW + LM sentiment）+ merge 集成 | RQ2 路线 A | 8.3 |
 | 新 | `scripts/pricing_case/` | RQ4 pricing/hedging | 8.5 |
 | 新 | linear/ridge baseline（小脚本） | Axis 4 下界 | 8.6 |
 | 新 | 统一统计脚本（bootstrap/DM/win-rate） | Phase 6 | 8.7 |
