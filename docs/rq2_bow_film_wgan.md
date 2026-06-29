@@ -97,7 +97,7 @@ data/processed/svi-excel/20260410-174929/merged_vol_rq2_text.xlsx
 Launcher:
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 ./run_film_wgan_bow.sh
+CUDA_VISIBLE_DEVICES=1 bash scripts/rq2/run_film_wgan_bow.sh
 ```
 
 Resolved training config:

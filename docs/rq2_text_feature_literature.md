@@ -375,8 +375,8 @@ data/processed/svi-excel/20260410-174929/merged_vol_rq2_text.xlsx
 Current intended training scripts:
 
 ```bash
-./run_film_wgan_bow.sh
-./run_film_wgan_llm_sentiment.sh
+bash scripts/rq2/run_film_wgan_bow.sh
+bash scripts/rq2/run_film_wgan_llm_sentiment.sh
 ```
 
 Current output roots:

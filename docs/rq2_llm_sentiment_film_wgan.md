@@ -131,7 +131,7 @@ During FiLM WGAN loading, `src/film_wgan/data.py` maps both `sentiment` and `llm
 Launcher:
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 ./run_film_wgan_llm_sentiment.sh
+CUDA_VISIBLE_DEVICES=1 bash scripts/rq2/run_film_wgan_llm_sentiment.sh
 ```
 
 Resolved training config:
