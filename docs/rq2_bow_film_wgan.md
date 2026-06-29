@@ -1,6 +1,6 @@
-# RQ2 BoW / TF-IDF FiLM WGAN Baseline
+# RQ2 N-gram Log-count BoW FiLM WGAN Baseline
 
-This note documents the completed RQ2 BoW experiment. 目标是说明 BoW / TF-IDF text representation 如何计算、如何并入 `merged_vol` training workbook、如何训练 FiLM WGAN，以及本次 after-warmup comparison 的结论。This is a thesis-facing reproducibility record, not a new experiment proposal.
+This note documents the completed RQ2 BoW experiment. 目标是说明 BoW n-gram log-count text representation 如何计算、如何并入 `merged_vol` training workbook、如何训练 FiLM WGAN，以及本次 after-warmup comparison 的结论。This is a thesis-facing reproducibility record, not a new experiment proposal.
 
 ## 1. Research Role
 
@@ -8,7 +8,7 @@ RQ2 asks whether LLM-based text representations contain more useful information 
 
 - Downstream model is unchanged: same FiLM WGAN architecture, surface inputs, losses, split, and evaluation protocol.
 - Only the text representation changes: `text_embedding_mode=bow` reads `bow_embedding` instead of LP embedding.
-- The baseline therefore tests whether a high-dimensional TF-IDF/SVD representation of the same `LP` text can compete with the original LP-text FiLM WGAN.
+- The baseline therefore tests whether a high-dimensional unigram/bigram log-count representation of the same `LP` text can compete with the original LP-text FiLM WGAN.
 
 ## 2. Feature Calculation Logic
 
@@ -23,24 +23,25 @@ The BoW feature generation uses the `LP` text column:
 ```bash
 python scripts/generate_rq2_text_features.py \
   --news-xlsx data/raw/text_embedding/news_with_openai_embeddings_large.xlsx \
-  --output-dir data/processed/text_features/rq2/20260623-rq2 \
+  --output-dir data/processed/text_features/rq2/20260625-075653 \
   --text-column LP \
   --target-dim 1024 \
-  --dictionary-path data/reference/Loughran-McDonald_MasterDictionary_1993-2025.csv
+  --model gpt-5.4-mini
 ```
 
 BoW-specific implementation lives in `src/bow/features.py`:
 
-- Tokenization is delegated to `TfidfVectorizer` in the sklearn path.
-- `TfidfVectorizer(max_features=5000, ngram_range=(1, 2), lowercase=True)` builds unigram + bigram TF-IDF features.
-- If the TF-IDF matrix has more than `target_dim` columns, `TruncatedSVD(n_components=1024, random_state=42)` reduces the representation.
-- The dense output is aligned to exactly 1024 dimensions.
+- Tokenization uses the regex `[A-Za-z][A-Za-z'-]*`, lower-cased.
+- The representation uses unigram and bigram n-grams, `ngram_range=(1, 2)`.
+- The vocabulary is the top `target_dim=1024` n-grams by corpus frequency, tie-broken lexicographically.
+- Each feature value is `log1p(count)` for that n-gram in the article.
+- The output is aligned to exactly 1024 dimensions.
 - Each vector is serialized as JSON text in `bow_embedding`.
 
 Output artifact:
 
 ```text
-data/processed/text_features/rq2/20260623-rq2/bow_features.xlsx
+data/processed/text_features/rq2/20260625-075653/bow_features.xlsx
 ```
 
 Output columns:
@@ -58,19 +59,17 @@ Actual manifest facts from `bow_manifest.json`:
 ```text
 row_count       = 14900
 target_dim      = 1024
-max_features    = 5000
 ngram_range     = [1, 2]
-random_state    = 42
-backend         = sklearn
-vocabulary_size = 5000
-svd_components  = 1024
+backend         = python_counter
+representation  = ngram_frequency
+weighting       = log1p_count
+vocabulary_size = 1024
 ```
 
 The fitted preprocessing artifacts are also saved:
 
 ```text
-data/processed/text_features/rq2/20260623-rq2/tfidf_vectorizer.joblib
-data/processed/text_features/rq2/20260623-rq2/svd_model.joblib
+data/processed/text_features/rq2/20260625-075653/bow_vocabulary.json
 ```
 
 ## 3. Workbook Enrichment
@@ -80,8 +79,8 @@ The RQ2 feature workbook is merged into the vol-surface training workbook with:
 ```bash
 python scripts/rq2/enrich_merged_vol.py \
   --merged-vol data/processed/svi-excel/20260410-174929/merged_vol.xlsx \
-  --bow-features data/processed/text_features/rq2/20260623-rq2/bow_features.xlsx \
-  --sentiment-features data/processed/text_features/rq2/20260623-rq2/llm_sentiment_features.xlsx \
+  --bow-features data/processed/text_features/rq2/20260625-075653/bow_features.xlsx \
+  --sentiment-features data/processed/text_features/rq2/20260625-075653/llm_sentiment_features.xlsx \
   --output data/processed/svi-excel/20260410-174929/merged_vol_rq2_text.xlsx
 ```
 
@@ -332,7 +331,7 @@ BoW is not merely a weak traditional baseline in this run. Under the final after
 For thesis writing, the safest interpretation is:
 
 ```text
-BoW / TF-IDF captures useful lexical information and can outperform the LP embedding on aggregate surface metrics in this experiment, but its advantage is not uniform across out-of-sample short-end ATM diagnostics.
+N-gram log-count BoW captures useful lexical information and can outperform the LP embedding on aggregate surface metrics in this experiment, but its advantage is not uniform across out-of-sample short-end ATM diagnostics.
 ```
 
 This means RQ2 should not be framed as a simple monotonic ordering where LLM embedding always dominates traditional text-mining. The evidence supports a representation-dependent tradeoff: BoW is strong on broad aggregate metrics, while LP text remains competitive or better on the eval short-end ATM region.

@@ -1,10 +1,10 @@
-# RQ2 Loughran-McDonald Sentiment FiLM WGAN Baseline
+# RQ2 ChatGPT Sentiment FiLM WGAN Baseline
 
-This note documents the completed RQ2 LLM-sentiment experiment. Here `llm_sentiment` means a Loughran-McDonald dictionary sentiment feature baseline, not a generative LLM inference step. The purpose is to record the feature calculation logic, FiLM WGAN training process, checkpoint selection, generate-result procedure, and statistical comparison results.
+This note documents the completed RQ2 LLM-sentiment experiment. Here `llm_sentiment` means a Sun-style ChatGPT multi-dimensional sentiment score vector, not a Loughran-McDonald dictionary baseline. The purpose is to record the feature calculation logic, FiLM WGAN training process, checkpoint selection, generate-result procedure, and statistical comparison results.
 
 ## 1. Research Role
 
-The sentiment baseline is a traditional text-mining baseline for RQ2. It asks whether a compact financial dictionary sentiment representation can provide useful text signal compared with the original LP-text FiLM WGAN.
+The sentiment baseline is a compact LLM-scored text representation for RQ2. It asks whether three theory-driven ChatGPT sentiment dimensions provide useful text signal compared with the original LP-text FiLM WGAN.
 
 Controlled design:
 
@@ -27,10 +27,10 @@ Text column:
 LP
 ```
 
-Dictionary:
+Scoring model:
 
 ```text
-data/reference/Loughran-McDonald_MasterDictionary_1993-2025.csv
+gpt-5.4-mini
 ```
 
 Feature-generation command:
@@ -38,41 +38,31 @@ Feature-generation command:
 ```bash
 python scripts/generate_rq2_text_features.py \
   --news-xlsx data/raw/text_embedding/news_with_openai_embeddings_large.xlsx \
-  --output-dir data/processed/text_features/rq2/20260623-rq2 \
+  --output-dir data/processed/text_features/rq2/20260625-075653 \
   --text-column LP \
   --target-dim 1024 \
-  --dictionary-path data/reference/Loughran-McDonald_MasterDictionary_1993-2025.csv
+  --model gpt-5.4-mini
 ```
 
-Sentiment implementation lives in `src/llm_sentiment/features.py`. It tokenizes each `LP` text with the regex:
+Sentiment implementation lives in `src/llm_sentiment/features.py`. It builds a prompt for each `LP` text and asks ChatGPT to return a JSON object with three scores.
+
+The Sun-style dimensions are:
 
 ```text
-[A-Za-z][A-Za-z'-]*
+macroeconomic_uncertainty
+institutional_action
+risk_off_intensity
 ```
 
-The Loughran-McDonald-style categories are:
+For each text, the base vector has 3 dimensions:
 
 ```text
-positive
-negative
-uncertainty
-litigious
-strong_modal
-weak_modal
-constraining
+macroeconomic_uncertainty score in [0, 1]
+institutional_action score in [0, 1]
+risk_off_intensity score in [0, 1]
 ```
 
-For each text, the base vector has 17 dimensions:
-
-```text
-7 category counts
-7 category shares = counts / token_count
-net_positive = positive_count - negative_count
-polarity = net_positive / max(1, positive_count + negative_count)
-token_count
-```
-
-The 17-dimensional base vector is zero-padded to the shared text-feature width:
+The 3-dimensional base vector is zero-padded to the shared text-feature width:
 
 ```text
 target_dim = 1024
@@ -81,7 +71,7 @@ target_dim = 1024
 Output artifact:
 
 ```text
-data/processed/text_features/rq2/20260623-rq2/llm_sentiment_features.xlsx
+data/processed/text_features/rq2/20260625-075653/llm_sentiment_features.xlsx
 ```
 
 Output columns:
@@ -93,15 +83,25 @@ source_file
 sentiment_embedding
 sentiment_dim
 sentiment_dictionary_source
+sentiment_model_id
+sentiment_prompt_version
+sentiment_parse_status
+sentiment_raw_response
 ```
 
 Actual manifest facts from `llm_sentiment_manifest.json`:
 
 ```text
-row_count       = 14900
-target_dim      = 1024
-base_feature_dim = 17
-dictionary_source = data/reference/Loughran-McDonald_MasterDictionary_1993-2025.csv
+row_count        = 14900
+target_dim       = 1024
+base_feature_dim = 3
+model_id         = gpt-5.4-mini
+prompt_version   = sun2026_zero_shot_chatgpt_v1
+representation   = sun2026_style_openai_chatgpt_multidimensional_sentiment
+sentiment_source = openai_chatgpt_sun2026_style:gpt-5.4-mini
+cache_hits       = 13986
+api_calls        = 886
+api_errors       = 0
 ```
 
 ## 3. Workbook Enrichment
@@ -111,8 +111,8 @@ The sentiment feature workbook is merged into the RQ2 training workbook together
 ```bash
 python scripts/rq2/enrich_merged_vol.py \
   --merged-vol data/processed/svi-excel/20260410-174929/merged_vol.xlsx \
-  --bow-features data/processed/text_features/rq2/20260623-rq2/bow_features.xlsx \
-  --sentiment-features data/processed/text_features/rq2/20260623-rq2/llm_sentiment_features.xlsx \
+  --bow-features data/processed/text_features/rq2/20260625-075653/bow_features.xlsx \
+  --sentiment-features data/processed/text_features/rq2/20260625-075653/llm_sentiment_features.xlsx \
   --output data/processed/svi-excel/20260410-174929/merged_vol_rq2_text.xlsx
 ```
 
@@ -281,7 +281,7 @@ Lower is better for all MAE and gap metrics. For gap metrics, more negative mean
 | all | atm7_abs_err | 0.023866 | 0.021965 | 0.023902 | -0.001901 | 0.000037 | bow |
 | all | atm7_gap | -0.001022 | -0.002922 | -0.000985 | -0.001901 | 0.000037 | bow |
 
-The Loughran-McDonald sentiment baseline is strongest on the eval split for:
+The ChatGPT-style sentiment baseline is strongest on the eval split for:
 
 - `short_atm_mae`
 - `atm7_abs_err`
@@ -357,7 +357,7 @@ The statistical evidence is mixed:
 
 ## 9. Thesis Interpretation
 
-The Loughran-McDonald sentiment representation is much more compressed than BoW or LP embeddings: only 17 base sentiment/count features are non-zero before zero padding to 1024 dimensions. It therefore tests a narrower hypothesis: whether dictionary-based financial sentiment categories alone capture enough information for volatility-surface forecasting.
+The ChatGPT-style sentiment representation is much more compressed than BoW or LP embeddings: only 3 base scores are non-zero before zero padding to 1024 dimensions. It therefore tests a narrower hypothesis: whether theory-driven LLM sentiment dimensions alone capture enough information for volatility-surface forecasting.
 
 The result is not uniformly favorable:
 
@@ -368,7 +368,7 @@ LLM sentiment is useful for eval 7d ATM error, but it does not outperform LP tex
 For thesis writing, the safest interpretation is:
 
 ```text
-Dictionary sentiment captures a targeted short-end ATM signal in the eval window, but it loses too much lexical and semantic detail to dominate the LP text representation across the full surface.
+ChatGPT-style sentiment captures a targeted short-end ATM signal in the eval window, but it loses too much lexical and semantic detail to dominate the LP text representation across the full surface.
 ```
 
-This supports using Loughran-McDonald sentiment as a traditional text-mining baseline, but not as a replacement for richer text embeddings in the main FiLM WGAN model.
+This supports using compact ChatGPT sentiment scores as an RQ2 representation baseline, but not as a replacement for richer text embeddings in the main FiLM WGAN model.
