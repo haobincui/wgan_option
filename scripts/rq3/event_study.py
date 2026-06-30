@@ -26,6 +26,46 @@ METRIC_COLUMNS = [
     "short_atm_mae_gap_vs_current",
     "atm_short_pure_mae_gap_vs_current",
 ]
+WORKBOOK_EVENT_TEST_METRICS = [
+    "surface_jump_mae",
+    "surface_jump_rmse",
+    "surface_jump_max_abs",
+    "atm_short_abs_jump",
+    "atm_short_signed_jump",
+]
+BOOTSTRAP_ITERATIONS = 10000
+BOOTSTRAP_SEED = 20260625
+
+
+def resolve_event_window(
+    *,
+    window_minutes: float = 30.0,
+    pre_window_minutes: float | None = None,
+    post_window_minutes: float | None = None,
+) -> dict[str, float | str]:
+    """Resolve symmetric or explicitly asymmetric event-window bounds."""
+    if pre_window_minutes is None and post_window_minutes is None:
+        half_width = abs(float(window_minutes))
+        return {
+            "window_mode": "symmetric",
+            "window_minutes": float(window_minutes),
+            "pre_window_minutes": half_width,
+            "post_window_minutes": half_width,
+        }
+    if pre_window_minutes is None or post_window_minutes is None:
+        raise ValueError(
+            "For an asymmetric event window, provide both pre_window_minutes and post_window_minutes."
+        )
+    pre = float(pre_window_minutes)
+    post = float(post_window_minutes)
+    if pre < 0.0 or post < 0.0:
+        raise ValueError("pre_window_minutes and post_window_minutes must be non-negative.")
+    return {
+        "window_mode": "asymmetric",
+        "window_minutes": float(window_minutes),
+        "pre_window_minutes": pre,
+        "post_window_minutes": post,
+    }
 
 
 def timestamp_string() -> str:
@@ -103,7 +143,7 @@ def surface_jump_metrics(
     }
 
 
-def load_events(events_csv: str | Path) -> pd.DataFrame:
+def load_events(events_csv: str | Path, *, allow_empty: bool = False) -> pd.DataFrame:
     path = Path(events_csv).expanduser()
     if not path.exists():
         raise FileNotFoundError(
@@ -114,6 +154,11 @@ def load_events(events_csv: str | Path) -> pd.DataFrame:
     missing = [column for column in ["event_id", "event_time_utc"] if column not in frame.columns]
     if missing:
         raise ValueError(f"Event calendar {path} is missing required columns: {missing}")
+    if frame.empty and not bool(allow_empty):
+        raise ValueError(
+            f"Event calendar {path} has no event rows. "
+            "Paper-facing RQ3 requires a non-empty event calendar; use --allow-zero-announcement only for diagnostics."
+        )
     for column in EVENT_COLUMNS:
         if column not in frame.columns:
             frame[column] = ""
@@ -122,18 +167,41 @@ def load_events(events_csv: str | Path) -> pd.DataFrame:
     return frame
 
 
+def validate_announcement_count(
+    labeled: pd.DataFrame,
+    *,
+    allow_zero_announcement: bool = False,
+    context: str = "RQ3 analysis",
+) -> None:
+    announcement_count = int(labeled["is_announcement_window"].sum()) if "is_announcement_window" in labeled.columns else 0
+    if announcement_count == 0 and not bool(allow_zero_announcement):
+        raise ValueError(
+            f"{context} produced zero announcement-window samples. "
+            "Check the event calendar, split, timestamps, or window_minutes. "
+            "Use --allow-zero-announcement only for quiet-only diagnostics."
+        )
+
+
 def label_rows_by_event(
     frame: pd.DataFrame,
     events: pd.DataFrame,
     *,
     timestamp_column: str = "news_timestamp_utc",
     window_minutes: float = 30.0,
+    pre_window_minutes: float | None = None,
+    post_window_minutes: float | None = None,
 ) -> pd.DataFrame:
     if timestamp_column not in frame.columns:
         raise ValueError(f"Input frame is missing timestamp column: {timestamp_column}")
     labeled = frame.copy()
     timestamps = labeled[timestamp_column].map(lambda value: parse_timestamp_utc(value, field_name=timestamp_column))
-    window_seconds = abs(float(window_minutes)) * 60.0
+    window = resolve_event_window(
+        window_minutes=window_minutes,
+        pre_window_minutes=pre_window_minutes,
+        post_window_minutes=post_window_minutes,
+    )
+    pre_window_seconds = float(window["pre_window_minutes"]) * 60.0
+    post_window_seconds = float(window["post_window_minutes"]) * 60.0
 
     event_ids: list[str] = []
     event_names: list[str] = []
@@ -149,7 +217,7 @@ def label_rows_by_event(
         for record in event_records:
             delta_seconds = float((timestamp - record["event_time"]).total_seconds())
             abs_delta_seconds = abs(delta_seconds)
-            if abs_delta_seconds <= window_seconds and (
+            if -pre_window_seconds <= delta_seconds <= post_window_seconds and (
                 best_delta_seconds is None or abs_delta_seconds < abs(best_delta_seconds)
             ):
                 best_record = record
@@ -176,6 +244,9 @@ def label_rows_by_event(
     labeled["event_type"] = event_types
     labeled["event_time_utc"] = event_times
     labeled["event_time_delta_minutes"] = event_deltas
+    labeled["event_window_mode"] = str(window["window_mode"])
+    labeled["event_pre_window_minutes"] = float(window["pre_window_minutes"])
+    labeled["event_post_window_minutes"] = float(window["post_window_minutes"])
     return labeled
 
 
@@ -220,7 +291,8 @@ def build_workbook_sample_metrics(
     _require_columns(workbook_frame, required, source="Workbook sheet")
     frame = workbook_frame.copy()
     if "training_candidate_flag" in frame.columns:
-        filtered = frame[frame["training_candidate_flag"].fillna(0).astype(int) == 1].copy()
+        candidate_flags = pd.to_numeric(frame["training_candidate_flag"], errors="coerce").fillna(0).astype(int)
+        filtered = frame[candidate_flags == 1].copy()
         if not filtered.empty:
             frame = filtered
     frame["_rq3_original_index"] = range(len(frame))
@@ -327,6 +399,149 @@ def quality_audit(labeled: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _welch_t_test(left: np.ndarray, right: np.ndarray) -> dict[str, float]:
+    left_var = float(np.var(left, ddof=1))
+    right_var = float(np.var(right, ddof=1))
+    left_n = float(left.size)
+    right_n = float(right.size)
+    se_sq = left_var / left_n + right_var / right_n
+    if se_sq <= 0:
+        return {
+            "t_stat": float("nan"),
+            "welch_df": float("nan"),
+            "p_two_sided": float("nan"),
+            "p_event_greater": float("nan"),
+        }
+    t_stat = float((np.mean(left) - np.mean(right)) / math.sqrt(se_sq))
+    numerator = se_sq * se_sq
+    denominator = 0.0
+    if left_n > 1:
+        denominator += (left_var / left_n) ** 2 / (left_n - 1.0)
+    if right_n > 1:
+        denominator += (right_var / right_n) ** 2 / (right_n - 1.0)
+    if denominator <= 0:
+        return {
+            "t_stat": t_stat,
+            "welch_df": float("nan"),
+            "p_two_sided": float("nan"),
+            "p_event_greater": float("nan"),
+        }
+    df = float(numerator / denominator)
+    from scipy import stats
+
+    p_event_greater = float(stats.t.sf(t_stat, df))
+    return {
+        "t_stat": t_stat,
+        "welch_df": df,
+        "p_two_sided": float(min(1.0, 2.0 * min(p_event_greater, 1.0 - p_event_greater))),
+        "p_event_greater": p_event_greater,
+    }
+
+
+def _bootstrap_mean_difference_ci(
+    announcement: np.ndarray,
+    quiet: np.ndarray,
+    *,
+    iterations: int = BOOTSTRAP_ITERATIONS,
+    seed: int = BOOTSTRAP_SEED,
+) -> tuple[float, float]:
+    rng = np.random.default_rng(int(seed))
+    announcement_size = int(announcement.size)
+    quiet_size = int(quiet.size)
+    diffs = np.empty(int(iterations), dtype=np.float64)
+    for idx in range(int(iterations)):
+        announcement_sample = announcement[rng.integers(0, announcement_size, size=announcement_size)]
+        quiet_sample = quiet[rng.integers(0, quiet_size, size=quiet_size)]
+        diffs[idx] = float(np.mean(announcement_sample) - np.mean(quiet_sample))
+    low, high = np.percentile(diffs, [2.5, 97.5])
+    return float(low), float(high)
+
+
+def event_vs_quiet_tests(
+    labeled: pd.DataFrame,
+    *,
+    metrics: Sequence[str] = WORKBOOK_EVENT_TEST_METRICS,
+    bootstrap_iterations: int = BOOTSTRAP_ITERATIONS,
+    bootstrap_seed: int = BOOTSTRAP_SEED,
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    announcement_frame = labeled[labeled["event_group"] == "announcement"]
+    quiet_frame = labeled[labeled["event_group"] == "quiet"]
+    for metric in metrics:
+        row: dict[str, Any] = {
+            "metric": str(metric),
+            "difference": "announcement_minus_quiet",
+            "interpretation_positive": "announcement window has larger IVS jump",
+            "interpretation_negative": "quiet window has larger IVS jump",
+            "bootstrap_iterations": int(bootstrap_iterations),
+            "bootstrap_seed": int(bootstrap_seed),
+        }
+        if metric not in labeled.columns:
+            row.update(
+                {
+                    "announcement_n": 0,
+                    "quiet_n": 0,
+                    "announcement_mean": float("nan"),
+                    "quiet_mean": float("nan"),
+                    "announcement_median": float("nan"),
+                    "quiet_median": float("nan"),
+                    "announcement_minus_quiet_mean": float("nan"),
+                    "t_stat": float("nan"),
+                    "welch_df": float("nan"),
+                    "p_two_sided": float("nan"),
+                    "p_event_greater": float("nan"),
+                    "bootstrap_ci95_low": float("nan"),
+                    "bootstrap_ci95_high": float("nan"),
+                }
+            )
+            rows.append(row)
+            continue
+        announcement = pd.to_numeric(announcement_frame[metric], errors="coerce").dropna().to_numpy(dtype=np.float64)
+        quiet = pd.to_numeric(quiet_frame[metric], errors="coerce").dropna().to_numpy(dtype=np.float64)
+        row.update(
+            {
+                "announcement_n": int(announcement.size),
+                "quiet_n": int(quiet.size),
+                "announcement_mean": float(np.mean(announcement)) if announcement.size else float("nan"),
+                "quiet_mean": float(np.mean(quiet)) if quiet.size else float("nan"),
+                "announcement_median": float(np.median(announcement)) if announcement.size else float("nan"),
+                "quiet_median": float(np.median(quiet)) if quiet.size else float("nan"),
+            }
+        )
+        if announcement.size < 2 or quiet.size < 2:
+            row.update(
+                {
+                    "announcement_minus_quiet_mean": float("nan"),
+                    "t_stat": float("nan"),
+                    "welch_df": float("nan"),
+                    "p_two_sided": float("nan"),
+                    "p_event_greater": float("nan"),
+                    "bootstrap_ci95_low": float("nan"),
+                    "bootstrap_ci95_high": float("nan"),
+                }
+            )
+            rows.append(row)
+            continue
+        diff_mean = float(np.mean(announcement) - np.mean(quiet))
+        test_values = _welch_t_test(announcement, quiet)
+        ci_low, ci_high = _bootstrap_mean_difference_ci(
+            announcement,
+            quiet,
+            iterations=int(bootstrap_iterations),
+            seed=int(bootstrap_seed),
+        )
+        row.update(
+            {
+                "announcement_minus_quiet_mean": diff_mean,
+                **test_values,
+                "bootstrap_ci95_low": ci_low,
+                "bootstrap_ci95_high": ci_high,
+            }
+        )
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def write_event_template(output_path: str | Path) -> Path:
     output = Path(output_path).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -390,24 +605,44 @@ def analyze_workbook(
     output_dir: str | Path,
     sheet_name: str = GAN_SHEET,
     window_minutes: float = 30.0,
+    pre_window_minutes: float | None = None,
+    post_window_minutes: float | None = None,
     split: str = "val",
     train_ratio: float = 0.8,
     save_plots: bool = True,
     max_case_events: int = 3,
+    allow_zero_announcement: bool = False,
 ) -> Path:
     workbook_path = Path(merged_vol_path).expanduser()
     if not workbook_path.exists():
         raise FileNotFoundError(f"Merged-vol workbook does not exist: {workbook_path}")
-    events = load_events(events_csv)
+    events = load_events(events_csv, allow_empty=allow_zero_announcement)
     workbook_frame = pd.read_excel(workbook_path, sheet_name=sheet_name, dtype=object)
     sample_metrics = build_workbook_sample_metrics(workbook_frame, split=split, train_ratio=train_ratio)
-    labeled = label_rows_by_event(sample_metrics, events, window_minutes=window_minutes)
+    window = resolve_event_window(
+        window_minutes=window_minutes,
+        pre_window_minutes=pre_window_minutes,
+        post_window_minutes=post_window_minutes,
+    )
+    labeled = label_rows_by_event(
+        sample_metrics,
+        events,
+        window_minutes=window_minutes,
+        pre_window_minutes=pre_window_minutes,
+        post_window_minutes=post_window_minutes,
+    )
+    validate_announcement_count(
+        labeled,
+        allow_zero_announcement=allow_zero_announcement,
+        context="RQ3 workbook analysis",
+    )
 
     output = Path(output_dir).expanduser()
     output.mkdir(parents=True, exist_ok=True)
     _write_csv(labeled, output / "rq3_labeled_samples.csv")
     _write_csv(summarize_groups(labeled), output / "rq3_group_summary.csv")
     _write_csv(summarize_events(labeled), output / "rq3_event_summary.csv")
+    _write_csv(event_vs_quiet_tests(labeled), output / "rq3_event_vs_quiet_tests.csv")
     _write_csv(quality_audit(labeled), output / "rq3_quality_audit.csv")
     plot_paths = plot_event_cases(labeled, output, max_events=max_case_events) if save_plots else []
     _write_json(
@@ -418,10 +653,19 @@ def analyze_workbook(
             "output_dir": str(output),
             "sheet_name": str(sheet_name),
             "window_minutes": float(window_minutes),
+            "window_mode": str(window["window_mode"]),
+            "pre_window_minutes": float(window["pre_window_minutes"]),
+            "post_window_minutes": float(window["post_window_minutes"]),
+            "event_window_definition": (
+                f"[-{float(window['pre_window_minutes'])}, +{float(window['post_window_minutes'])}] "
+                "minutes around event_time_utc"
+            ),
             "split": str(split),
             "train_ratio": float(train_ratio),
             "sample_count": int(len(labeled)),
+            "event_count": int(len(events)),
             "announcement_count": int(labeled["is_announcement_window"].sum()) if not labeled.empty else 0,
+            "allow_zero_announcement": bool(allow_zero_announcement),
             "plot_paths": plot_paths,
         },
         output / "rq3_run_manifest.json",
@@ -483,10 +727,29 @@ def analyze_results(
     events_csv: str | Path,
     output_dir: str | Path,
     window_minutes: float = 30.0,
+    pre_window_minutes: float | None = None,
+    post_window_minutes: float | None = None,
+    allow_zero_announcement: bool = False,
 ) -> Path:
-    events = load_events(events_csv)
+    events = load_events(events_csv, allow_empty=allow_zero_announcement)
     results = load_result_summaries(result_specs)
-    labeled = label_rows_by_event(results, events, window_minutes=window_minutes)
+    window = resolve_event_window(
+        window_minutes=window_minutes,
+        pre_window_minutes=pre_window_minutes,
+        post_window_minutes=post_window_minutes,
+    )
+    labeled = label_rows_by_event(
+        results,
+        events,
+        window_minutes=window_minutes,
+        pre_window_minutes=pre_window_minutes,
+        post_window_minutes=post_window_minutes,
+    )
+    validate_announcement_count(
+        labeled,
+        allow_zero_announcement=allow_zero_announcement,
+        context="RQ3 result analysis",
+    )
     output = Path(output_dir).expanduser()
     output.mkdir(parents=True, exist_ok=True)
     _write_csv(labeled, output / "rq3_result_labeled_samples.csv")
@@ -498,8 +761,17 @@ def analyze_results(
             "events_csv": str(Path(events_csv).expanduser()),
             "output_dir": str(output),
             "window_minutes": float(window_minutes),
+            "window_mode": str(window["window_mode"]),
+            "pre_window_minutes": float(window["pre_window_minutes"]),
+            "post_window_minutes": float(window["post_window_minutes"]),
+            "event_window_definition": (
+                f"[-{float(window['pre_window_minutes'])}, +{float(window['post_window_minutes'])}] "
+                "minutes around event_time_utc"
+            ),
             "sample_count": int(len(labeled)),
+            "event_count": int(len(events)),
             "announcement_count": int(labeled["is_announcement_window"].sum()) if not labeled.empty else 0,
+            "allow_zero_announcement": bool(allow_zero_announcement),
             "metric_columns": [column for column in METRIC_COLUMNS if column in labeled.columns],
         },
         output / "rq3_result_manifest.json",

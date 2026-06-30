@@ -5,7 +5,10 @@ __pycache__/
 *.egg-info/
 
 # Project data: raw inputs, processed data, generated outputs
-/data/
+/data/*
+!/data/reference/
+/data/reference/*
+!/data/reference/*.csv
 /outputs/
 /logs/
 /training_result_images/

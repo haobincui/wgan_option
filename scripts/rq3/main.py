@@ -39,22 +39,56 @@ def build_parser() -> argparse.ArgumentParser:
     workbook.add_argument("--events-csv", required=True, help="Event calendar CSV path.")
     workbook.add_argument("--output-dir", default="", help="Output directory. Defaults to outputs/rq3/rq3_<timestamp>.")
     workbook.add_argument("--sheet-name", default=GAN_SHEET, help=f"Workbook sheet name (default: {GAN_SHEET}).")
-    workbook.add_argument("--window-minutes", type=float, default=30.0, help="Event window half-width in minutes.")
+    workbook.add_argument("--window-minutes", type=float, default=30.0, help="Symmetric event-window half-width in minutes.")
+    workbook.add_argument(
+        "--pre-window-minutes",
+        type=float,
+        default=None,
+        help="Asymmetric pre-event window in minutes. Provide with --post-window-minutes.",
+    )
+    workbook.add_argument(
+        "--post-window-minutes",
+        type=float,
+        default=None,
+        help="Asymmetric post-event window in minutes. Vergote-style main RQ3 uses 0 and 10.",
+    )
     workbook.add_argument("--split", choices=["train", "val", "all"], default="val", help="Chronological split to analyze.")
     workbook.add_argument("--train-ratio", type=float, default=0.8, help="Chronological train split ratio.")
     workbook.add_argument("--max-case-events", type=int, default=3, help="Maximum event case plots to write.")
     workbook.add_argument("--no-plots", action="store_true", help="Disable event case plot generation.")
+    workbook.add_argument(
+        "--allow-zero-announcement",
+        action="store_true",
+        help="Allow quiet-only diagnostic runs when no sample falls inside an event window.",
+    )
 
     result = subparsers.add_parser("result", help="Split generate_result summary CSV rows into event/quiet groups.")
     result.add_argument("--events-csv", required=True, help="Event calendar CSV path.")
     result.add_argument("--output-dir", default="", help="Output directory. Defaults to outputs/rq3/rq3_results_<timestamp>.")
-    result.add_argument("--window-minutes", type=float, default=30.0, help="Event window half-width in minutes.")
+    result.add_argument("--window-minutes", type=float, default=30.0, help="Symmetric event-window half-width in minutes.")
+    result.add_argument(
+        "--pre-window-minutes",
+        type=float,
+        default=None,
+        help="Asymmetric pre-event window in minutes. Provide with --post-window-minutes.",
+    )
+    result.add_argument(
+        "--post-window-minutes",
+        type=float,
+        default=None,
+        help="Asymmetric post-event window in minutes. Vergote-style main RQ3 uses 0 and 10.",
+    )
     result.add_argument(
         "--result",
         action="append",
         default=[],
         metavar="LABEL=PATH",
         help="Result summary CSV with a model label. Repeat for multiple models.",
+    )
+    result.add_argument(
+        "--allow-zero-announcement",
+        action="store_true",
+        help="Allow quiet-only diagnostic runs when no sample falls inside an event window.",
     )
     return parser
 
@@ -75,10 +109,13 @@ def main(argv: Iterable[str] | None = None) -> Path:
             output_dir=output_dir,
             sheet_name=args.sheet_name,
             window_minutes=float(args.window_minutes),
+            pre_window_minutes=args.pre_window_minutes,
+            post_window_minutes=args.post_window_minutes,
             split=args.split,
             train_ratio=float(args.train_ratio),
             save_plots=not bool(args.no_plots),
             max_case_events=int(args.max_case_events),
+            allow_zero_announcement=bool(args.allow_zero_announcement),
         )
         print(f"RQ3 workbook analysis written to {output}")
         return output
@@ -89,6 +126,9 @@ def main(argv: Iterable[str] | None = None) -> Path:
             events_csv=args.events_csv,
             output_dir=output_dir,
             window_minutes=float(args.window_minutes),
+            pre_window_minutes=args.pre_window_minutes,
+            post_window_minutes=args.post_window_minutes,
+            allow_zero_announcement=bool(args.allow_zero_announcement),
         )
         print(f"RQ3 result analysis written to {output}")
         return output

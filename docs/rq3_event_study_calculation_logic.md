@@ -35,11 +35,27 @@ python scripts/rq3/main.py result ...
 
 ## 2. Event Calendar
 
-RQ3 不在代码中硬编码 FOMC 或 policy events。事件由 CSV 文件提供，推荐路径是：
+RQ3 不在代码中硬编码 FOMC 或 policy events。事件由 CSV 文件提供。
+
+论文主口径使用 FOMC press release / policy statement release time，推荐路径是：
+
+```text
+data/reference/fomc_press_release_events.csv
+```
+
+该文件保存 2022-2023 FOMC statement release 的 UTC 时间，`event_type` 为：
+
+```text
+FOMC_PRESS_RELEASE
+```
+
+旧的模板兼容路径仍保留为：
 
 ```text
 data/reference/fomc_events.csv
 ```
+
+`fomc_events.csv` 可用于后续合并其他 FOMC-related events，但不是当前 paper-facing RQ3 主输入。
 
 固定 schema 是：
 
@@ -73,14 +89,34 @@ python scripts/rq3/main.py write-event-template \
 
 然后手工填入真实 event time。所有时间都应使用 UTC，并写成 ISO format，例如 `2022-11-02T18:00:00Z`。
 
+从当前版本开始，paper-facing RQ3 默认要求 event calendar 非空，并且要求至少一个样本落入 announcement window。如果只是做 quiet-only diagnostic，可以显式增加：
+
+```bash
+--allow-zero-announcement
+```
+
 ## 3. Event Window Labeling
 
 RQ3 使用 `news_timestamp_utc` 作为样本时间，与 event calendar 中的 `event_time_utc` 比较。
 
-默认 window 是：
+论文主口径采用 Nakamura and Steinsson (2018, QJE) 的 high-frequency monetary policy event-study 思路：围绕 FOMC statement / press release 使用 30-minute window，从 release 前 10 分钟到 release 后 20 分钟。因此 FOMC press release 的 paper-facing 主窗口是：
 
 ```text
-window_minutes = 30
+[-10, +20] minutes around event_time_utc
+```
+
+对应 CLI 参数：
+
+```bash
+--pre-window-minutes 10 --post-window-minutes 20
+```
+
+代码仍然保留其他窗口作为 robustness / sensitivity analysis：
+
+```text
+--pre-window-minutes 0 --post-window-minutes 10  =>  Vergote-style post-release 10 minutes
+--window-minutes 30  =>  [-30, +30] minutes
+--window-minutes 3   =>  [-3, +3] minutes
 ```
 
 对每个样本，代码计算：
@@ -89,7 +125,19 @@ window_minutes = 30
 delta_minutes = (news_timestamp_utc - event_time_utc) in minutes
 ```
 
-如果存在某个 event 满足：
+如果使用 Nakamura-Steinsson-style asymmetric window，则 event 条件是：
+
+```text
+-10 <= delta_minutes <= 20
+```
+
+一般化写法是：
+
+```text
+-pre_window_minutes <= delta_minutes <= post_window_minutes
+```
+
+如果没有提供 `--pre-window-minutes` / `--post-window-minutes`，则回退为旧的 symmetric window：
 
 ```text
 abs(delta_minutes) <= window_minutes
@@ -117,6 +165,9 @@ event_name
 event_type
 event_time_utc
 event_time_delta_minutes
+event_window_mode
+event_pre_window_minutes
+event_post_window_minutes
 ```
 
 ## 4. Chronological Split
@@ -285,6 +336,7 @@ outputs/rq3/rq3_<UTC timestamp>/
 rq3_labeled_samples.csv
 rq3_group_summary.csv
 rq3_event_summary.csv
+rq3_event_vs_quiet_tests.csv
 rq3_quality_audit.csv
 rq3_run_manifest.json
 plots/rq3_atm_short_event_cases/*.png
@@ -359,6 +411,26 @@ surface_jump_mae_mean
 atm_short_abs_jump_mean
 ```
 
+### `rq3_event_vs_quiet_tests.csv`
+
+对 announcement-window 和 quiet samples 做事件窗口差异检验。输出指标包括：
+
+```text
+surface_jump_mae
+surface_jump_rmse
+surface_jump_max_abs
+atm_short_abs_jump
+atm_short_signed_jump
+```
+
+方向固定为：
+
+```text
+announcement_minus_quiet > 0
+```
+
+含义是 announcement window 的 IVS jump 更大。表中包括 group sample counts、mean/median、Welch t-test p-value、one-sided event-greater p-value，以及 bootstrap percentile CI。
+
 ### `rq3_quality_audit.csv`
 
 用于检查 quality filter 是否系统性排除 announcement 样本。它按：
@@ -403,9 +475,10 @@ Target ATM-short IV
 
 ```bash
 python scripts/rq3/main.py result \
-  --events-csv data/reference/fomc_events.csv \
+  --events-csv data/reference/fomc_press_release_events.csv \
   --output-dir outputs/rq3/rq3_results_$(date -u +%Y%m%d-%H%M%S) \
-  --window-minutes 30 \
+  --pre-window-minutes 10 \
+  --post-window-minutes 20 \
   --result text=outputs/.../summary.csv \
   --result notext=outputs/.../summary.csv
 ```
@@ -465,14 +538,15 @@ python scripts/rq3/main.py write-event-template \
   --output data/reference/fomc_events.csv
 ```
 
-填好真实 events 后，运行 workbook mode：
+填好真实 events 后，运行 paper-facing workbook mode。主窗口采用 Nakamura-Steinsson-style `[-10,+20]` minutes：
 
 ```bash
 python scripts/rq3/main.py workbook \
   --merged-vol data/processed/svi-excel/20260410-174929/merged_vol_rq2_text.xlsx \
-  --events-csv data/reference/fomc_events.csv \
-  --output-dir outputs/rq3/rq3_$(date -u +%Y%m%d-%H%M%S) \
-  --window-minutes 30 \
+  --events-csv data/reference/fomc_press_release_events.csv \
+  --output-dir outputs/rq3/rq3_fomc_press_release_ns30_$(date -u +%Y%m%d-%H%M%S) \
+  --pre-window-minutes 10 \
+  --post-window-minutes 20 \
   --split val \
   --train-ratio 0.8
 ```
@@ -481,9 +555,10 @@ python scripts/rq3/main.py workbook \
 
 ```bash
 python scripts/rq3/main.py result \
-  --events-csv data/reference/fomc_events.csv \
-  --output-dir outputs/rq3/rq3_results_$(date -u +%Y%m%d-%H%M%S) \
-  --window-minutes 30 \
+  --events-csv data/reference/fomc_press_release_events.csv \
+  --output-dir outputs/rq3/rq3_results_fomc_press_release_ns30_$(date -u +%Y%m%d-%H%M%S) \
+  --pre-window-minutes 10 \
+  --post-window-minutes 20 \
   --result text=outputs/training/film_wgan/svi-excel/20260417_180233/generate_result/film_wgan_best/summary.csv
 ```
 
@@ -492,9 +567,11 @@ python scripts/rq3/main.py result \
 - RQ3 当前是 post-processing pipeline，不训练模型。
 - `workbook` mode 测试的是真实 current -> target IVS jump，不是 prediction error。
 - `result` mode 才用于模型误差和 text/no-text 分组比较。
-- Event calendar 必须由外部 CSV 提供；代码不会自动知道 FOMC 时间。
+- Event calendar 必须由外部 CSV 提供；代码不会自动知道 FOMC 时间。当前主文件是 `data/reference/fomc_press_release_events.csv`。
+- 空 event calendar 或零 announcement 命中默认会报错；`--allow-zero-announcement` 只用于 diagnostic，不用于论文主结果。
 - 当前默认 `split=val`，对应代码层面的 chronological validation holdout；论文中如称 test，需要说明 split 语义。
-- 默认 window 是 `±30min`，后续可以用不同 `--window-minutes` 做 sensitivity。
+- Paper-facing 主窗口是 FOMC press release 的 `[-10,+20]min`，对应 Nakamura and Steinsson (2018, QJE) 的 30-minute high-frequency event-study 思路。
+- Vergote-style `[0,+10]min`、`--window-minutes 3` 和 `--window-minutes 30` 是 robustness，不是当前主口径。
 - 当前 ATM-short jump 是 nearest-ATM / shortest-maturity 单点，不是 weighted ATM-short band。
 - 如果 `training_candidate_flag` 存在，workbook mode 会优先保留 `training_candidate_flag == 1` 的样本。
 - `rq3_quality_audit.csv` 必须和 RQ3 结论一起看，避免 announcement 样本因 quality filter 被系统性筛掉而导致 selection bias。
