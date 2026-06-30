@@ -401,6 +401,10 @@ class TestMergeVol(unittest.TestCase):
             self.assertEqual(usable["target_snapshot_time_utc"], "2022-12-30T13:33:00Z")
             self.assertTrue(bool(usable["current_has_svi"]))
             self.assertTrue(bool(usable["target_has_svi"]))
+            self.assertTrue(bool(usable["current_has_surface"]))
+            self.assertTrue(bool(usable["target_has_surface"]))
+            self.assertEqual(int(usable["current_surface_slice_count"]), 1)
+            self.assertEqual(int(usable["target_surface_slice_count"]), 1)
             self.assertEqual(usable["pair_quality_label"], "usable")
             self.assertEqual(int(usable["training_candidate_flag"]), 1)
             self.assertEqual(usable["surface_shape"], "[16, 16]")
@@ -434,6 +438,8 @@ class TestMergeVol(unittest.TestCase):
 
             current_back = side_df[(side_df["news_row_id"] == 1) & (side_df["side"] == "current_back")].iloc[0]
             self.assertEqual(current_back["source_direction"], "backward")
+            self.assertTrue(bool(current_back["has_surface"]))
+            self.assertEqual(int(current_back["surface_slice_count"]), 1)
             self.assertEqual(current_back["side_quality_label"], "usable")
             self.assertEqual(int(current_back["raw_point_pass_count"]), 2)
             self.assertAlmostEqual(float(current_back["exact_slice_point_ratio"]), 0.5, places=8)
@@ -557,7 +563,10 @@ class TestMergeVol(unittest.TestCase):
 
             self.assertEqual(audit.loc[0, "surface_model"], "raw")
             self.assertEqual(audit.loc[0, "pair_quality_label"], "usable")
+            self.assertTrue(bool(audit.loc[0, "current_has_surface"]))
+            self.assertTrue(bool(audit.loc[0, "target_has_surface"]))
             self.assertEqual(side.loc[0, "surface_model"], "raw")
+            self.assertTrue(bool(side.loc[0, "has_surface"]))
 
             surface_flat = json.loads(side.loc[0, "surface_flat"])
             self.assertEqual(len(surface_flat), 256)

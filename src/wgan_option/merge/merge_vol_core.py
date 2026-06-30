@@ -73,6 +73,10 @@ PAIR_AUDIT_HEADERS = [
     "strike_grid",
     "maturity_days_grid",
     "surface_shape",
+    "current_has_surface",
+    "target_has_surface",
+    "current_surface_slice_count",
+    "target_surface_slice_count",
     "current_has_svi",
     "target_has_svi",
     "current_svi_slice_count",
@@ -110,6 +114,8 @@ SIDE_DETAIL_HEADERS = [
     "matched_snapshot_time_utc",
     "json_target_timestamp_utc",
     "surface_model",
+    "has_surface",
+    "surface_slice_count",
     "has_svi",
     "svi_slice_count",
     "svi_business_days_list",
@@ -144,6 +150,10 @@ GAN_HEADERS = [
     "current_snapshot_time_utc",
     "target_snapshot_time_utc",
     "surface_model",
+    "current_has_surface",
+    "target_has_surface",
+    "current_surface_slice_count",
+    "target_surface_slice_count",
     "hd_embedding",
     "lp_embedding",
     "hd_dim",
@@ -211,14 +221,15 @@ def _surface_stats(surface_flat: Sequence[float]) -> Tuple[Optional[float], Opti
 
 def _side_quality_label(
     *,
-    has_svi: bool,
+    surface_model: str,
+    has_surface: bool,
     placeholder_flag: int,
     raw_point_pass_count: int,
     exact_slice_point_ratio: float,
     weighted_iv_rmse: Optional[float],
 ) -> str:
-    if not has_svi:
-        return "no_svi"
+    if not has_surface:
+        return "no_svi" if surface_model == "svi" else "no_surface"
     if placeholder_flag:
         return "placeholder"
     if raw_point_pass_count == 0:
@@ -230,11 +241,20 @@ def _side_quality_label(
     return "usable"
 
 
+def _missing_surface_label(prefix: str, surface_model: str) -> str:
+    suffix = "svi" if surface_model == "svi" else "surface"
+    return f"no_{prefix}_{suffix}"
+
+
 def _pair_quality_label(current_metrics: Mapping[str, Any], target_metrics: Mapping[str, Any]) -> Tuple[str, str]:
-    if not bool(current_metrics["has_svi"]):
-        return "no_current_svi", "no_current_svi"
-    if not bool(target_metrics["has_svi"]):
-        return "no_target_svi", "no_target_svi"
+    current_model = str(current_metrics.get("surface_model") or "svi")
+    target_model = str(target_metrics.get("surface_model") or current_model or "svi")
+    if not bool(current_metrics["has_surface"]):
+        label = _missing_surface_label("current", current_model)
+        return label, label
+    if not bool(target_metrics["has_surface"]):
+        label = _missing_surface_label("target", target_model)
+        return label, label
     if int(current_metrics["placeholder_flag"]) == 1:
         return "current_placeholder", "current_placeholder"
     if int(target_metrics["placeholder_flag"]) == 1:
@@ -371,7 +391,8 @@ def _evaluate_side(
     placeholder_flag = int(bool(slices) and all(is_placeholder_surface_slice(surface_model, slice_row) for slice_row in slices))
     boundary_flag = int(bool(slices) and any(is_boundary_surface_slice(surface_model, slice_row) for slice_row in slices))
     side_ql = _side_quality_label(
-        has_svi=has_surface,
+        surface_model=surface_model,
+        has_surface=has_surface,
         placeholder_flag=placeholder_flag,
         raw_point_pass_count=raw_point_pass_count,
         exact_slice_point_ratio=exact_slice_point_ratio,
@@ -405,6 +426,8 @@ def _evaluate_side(
         "matched_snapshot_time_utc": normalize_optional_text(matched_snapshot),
         "json_target_timestamp_utc": json_target_timestamp,
         "surface_model": surface_model,
+        "has_surface": has_surface,
+        "surface_slice_count": len(slices),
         "has_svi": has_surface,
         "svi_slice_count": len(slices),
         "svi_business_days_list": serialize_list(surface_business_days) if slices else "",
@@ -433,6 +456,8 @@ def _evaluate_side(
         "matched_snapshot_time_utc": side_row["matched_snapshot_time_utc"],
         "json_target_timestamp_utc": json_target_timestamp,
         "surface_model": surface_model,
+        "has_surface": has_surface,
+        "surface_slice_count": len(slices),
         "has_svi": has_surface,
         "svi_slice_count": len(slices),
         "surface_flat": side_row["surface_flat"],
@@ -539,6 +564,10 @@ def build_vol_workbook_frames(
                 "current_json_target_timestamp_utc": current_metrics["json_target_timestamp_utc"],
                 "target_json_target_timestamp_utc": target_metrics["json_target_timestamp_utc"],
                 "surface_model": current_metrics["surface_model"] or target_metrics["surface_model"],
+                "current_has_surface": current_metrics["has_surface"],
+                "target_has_surface": target_metrics["has_surface"],
+                "current_surface_slice_count": current_metrics["surface_slice_count"],
+                "target_surface_slice_count": target_metrics["surface_slice_count"],
                 "strike_grid": strike_grid_text,
                 "maturity_days_grid": maturity_grid_text,
                 "surface_shape": surface_shape_text,

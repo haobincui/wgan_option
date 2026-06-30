@@ -16,6 +16,8 @@ from quantlib.calendar.daycount import DayCountBusN
 from quantlib.calendar.holidays import embedded_calendar
 from quantlib.vol_surface.algo.raw_surface import RawVolSurface
 from quantlib.vol_surface.surface import ImpliedVolSurface
+from wgan_option.merge_support import build_surface_from_params
+from wgan_option.surface_generation.model.raw import RAW_SURFACE_PARAM_KEYS, build_raw_surface_params
 
 
 def _add_business_days(calendar, start: date, business_days: int) -> date:
@@ -117,6 +119,43 @@ class TestRawVolSurface(unittest.TestCase):
             expected_vol,
             delta=1e-12,
         )
+
+    def test_surface_averages_duplicate_strikes_and_ignores_invalid_points(self):
+        surface = RawVolSurface(
+            valuation_date=self.valuation_date,
+            vols=[[0.2, 0.4, -1.0, 0.3]],
+            percent_strikes=[[1.0, 1.0, 1.1, float("nan")]],
+            business_days=[21],
+            vol_daycount=self.daycount,
+        )
+        expiration_date = _add_business_days(self.calendar, self.valuation_date, 21)
+
+        self.assertAlmostEqual(
+            surface.implied_vol(forward=1.0, strike=1.0, expiration_date=expiration_date),
+            0.3,
+            delta=1e-12,
+        )
+
+    def test_raw_surface_param_schema_and_builder_are_model_aware(self):
+        params = build_raw_surface_params(
+            valuation_date=self.valuation_date,
+            vols=[[0.2, 0.25, 0.3]],
+            percent_strikes=[[0.9, 1.0, 1.1]],
+            business_days_list=[21],
+            vol_daycount=self.daycount,
+            stats={},
+        )
+
+        self.assertEqual(tuple(params.keys()), RAW_SURFACE_PARAM_KEYS)
+        rebuilt = build_surface_from_params(
+            surface_model="raw",
+            surface_params=params,
+            valuation_date=self.valuation_date,
+            days_in_year=250,
+        )
+        grid = rebuilt.implied_vol_surface(percent_strikes=[0.9, 1.0, 1.1], business_days=[21])
+        self.assertEqual(len(grid), 1)
+        self.assertEqual(len(grid[0]), 3)
 
     def test_surface_is_implied_vol_surface_and_spot_alias_matches(self):
         surface = RawVolSurface(

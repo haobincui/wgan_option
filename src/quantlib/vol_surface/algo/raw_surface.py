@@ -41,6 +41,14 @@ def _sorted_unique_slice(
 
 @dataclass
 class RawVolSurface(ImpliedVolSurface):
+    """Non-parametric IV surface reconstructed from raw implied-vol points.
+
+    For each maturity slice, duplicate percent-strike observations are averaged
+    and queried values are linearly interpolated in percent-strike space with
+    boundary clamping. Across maturities, the interpolation is linear in total
+    variance, then converted back to implied volatility.
+    """
+
     vols: List[List[float]]
     percent_strikes: List[List[float]]
     business_days: List[int]

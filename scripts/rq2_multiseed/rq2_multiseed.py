@@ -191,8 +191,14 @@ def _parse_seeds(seed_text: str | None) -> list[int]:
     return [int(item.strip()) for item in seed_text.split(",") if item.strip()]
 
 
-def _split_for_index(global_index: int) -> str:
-    return "train" if int(global_index) < TRAIN_COUNT else "eval"
+def _path_arg(value: str | Path, default: Path) -> Path:
+    text = str(value or "").strip()
+    path = Path(text) if text else default
+    return path if path.is_absolute() else REPO_ROOT / path
+
+
+def _split_for_index(global_index: int, train_count: int) -> str:
+    return "train" if int(global_index) < int(train_count) else "eval"
 
 
 def _normalise_for_compare(value: Any) -> Any:
@@ -224,6 +230,10 @@ def _config_diff(left: dict[str, Any], right: dict[str, Any]) -> set[str]:
 
 def prepare_experiment(args: argparse.Namespace) -> None:
     exp_root = Path(args.exp_root).resolve()
+    original_config = _path_arg(getattr(args, "original_config", ""), ORIGINAL_TEXT_CONFIG)
+    frozen_config = _path_arg(getattr(args, "frozen_config", ""), FROZEN_CONFIG)
+    data_path = _path_arg(getattr(args, "data_path", ""), ENRICHED_WORKBOOK)
+    feature_dir = _path_arg(getattr(args, "feature_dir", ""), FEATURE_DIR)
     manifest_rows: list[dict[str, Any]] = []
 
     for rel_dir in [
@@ -250,7 +260,7 @@ def prepare_experiment(args: argparse.Namespace) -> None:
 
     manifest_rows.append(
         _copy_file(
-            ORIGINAL_TEXT_CONFIG,
+            original_config,
             exp_root / "inputs/configs/original_text_training_resolved_config.yaml",
             category="config",
             notes="Original LP text resolved config used as controlled-experiment base.",
@@ -258,16 +268,16 @@ def prepare_experiment(args: argparse.Namespace) -> None:
     )
     manifest_rows.append(
         _copy_file(
-            FROZEN_CONFIG,
-            exp_root / "inputs/configs/train_rq2_multiseed_textbase.yaml",
+            frozen_config,
+            exp_root / "inputs/configs" / frozen_config.name,
             category="config",
             notes="Frozen multi-seed textbase config.",
         )
     )
     manifest_rows.append(
         _copy_file(
-            ENRICHED_WORKBOOK,
-            exp_root / "inputs/data/merged_vol_rq2_text.xlsx",
+            data_path,
+            exp_root / "inputs/data" / data_path.name,
             category="data",
             notes="Shared enriched workbook for all four input representations.",
         )
@@ -284,7 +294,7 @@ def prepare_experiment(args: argparse.Namespace) -> None:
     for name in feature_targets:
         manifest_rows.append(
             _copy_file(
-                FEATURE_DIR / name,
+                feature_dir / name,
                 exp_root / f"inputs/text_features/{name}",
                 category="text_features",
                 notes="RQ2 feature artifact snapshot.",
@@ -359,14 +369,16 @@ def prepare_experiment(args: argparse.Namespace) -> None:
     protocol.write_text(
         "\n".join(
             [
-                "# RQ2 Multi-Seed Controlled Experiment",
+                f"# {getattr(args, 'experiment_title', 'RQ2 Multi-Seed Controlled Experiment')}",
                 "",
                 "This archive is prepared for the thesis-facing FiLM WGAN RQ2 multi-seed experiment.",
                 "",
                 "Controlled rule:",
                 "",
                 "```text",
-                "base config = outputs/training/film_wgan/svi-excel/20260417_131244/metrics/training_resolved_config.yaml",
+                f"base config = {_repo_rel(original_config)}",
+                f"training config = {_repo_rel(frozen_config)}",
+                f"data workbook = {_repo_rel(data_path)}",
                 "same model across seeds: seed-only change",
                 "same seed across models: text representation-only change",
                 "paper-facing checkpoint: epoch > 10, lowest val_mae_gap_vs_current",
@@ -429,7 +441,7 @@ def _find_run_dir(exp_root: Path, model: str, seed: int) -> Path | None:
     return sorted(candidates, key=lambda p: (p.stat().st_mtime, p.name))[-1]
 
 
-def _validate_run_config(path: Path, model: str, seed: int) -> tuple[bool, str]:
+def _validate_run_config(path: Path, model: str, seed: int, data_path: Path) -> tuple[bool, str]:
     if not path.exists():
         return False, "missing resolved config"
     config = _read_yaml(path)
@@ -437,8 +449,11 @@ def _validate_run_config(path: Path, model: str, seed: int) -> tuple[bool, str]:
     problems = []
     if int(config.get("seed", -1)) != int(seed):
         problems.append(f"seed={config.get('seed')} expected {seed}")
-    if str(config.get("data_path")) != str(ENRICHED_WORKBOOK.relative_to(REPO_ROOT)):
-        problems.append(f"data_path={config.get('data_path')} expected {_repo_rel(ENRICHED_WORKBOOK)}")
+    actual_data_path = Path(str(config.get("data_path", "")))
+    if not actual_data_path.is_absolute():
+        actual_data_path = REPO_ROOT / actual_data_path
+    if actual_data_path.resolve() != data_path.resolve():
+        problems.append(f"data_path={config.get('data_path')} expected {_repo_rel(data_path)}")
     if str(config.get("text_embedding_mode")) != expected["text_embedding_mode"]:
         problems.append(
             f"text_embedding_mode={config.get('text_embedding_mode')} expected {expected['text_embedding_mode']}"
@@ -472,6 +487,7 @@ def _ranking_for_metrics(metrics_csv: Path) -> pd.DataFrame:
 def collect_run_registry(args: argparse.Namespace) -> None:
     exp_root = Path(args.exp_root).resolve()
     seeds = _parse_seeds(args.seeds)
+    data_path = _path_arg(getattr(args, "data_path", ""), ENRICHED_WORKBOOK)
     run_rows: list[dict[str, Any]] = []
     ranking_rows: list[dict[str, Any]] = []
     selected_rows: list[dict[str, Any]] = []
@@ -512,7 +528,7 @@ def collect_run_registry(args: argparse.Namespace) -> None:
             resolved_config = run_dir / "metrics/training_resolved_config.yaml"
             metrics_csv = run_dir / "metrics/training_metrics.csv"
             checkpoint_path = run_dir / "checkpoints" / SELECTED_CHECKPOINT_NAME
-            config_ok, config_notes = _validate_run_config(resolved_config, model, seed)
+            config_ok, config_notes = _validate_run_config(resolved_config, model, seed, data_path)
             status = "ok" if config_ok and metrics_csv.exists() else "invalid"
             run_rows.append(
                 {
@@ -617,7 +633,16 @@ def _load_run_records(exp_root: Path) -> list[RunRecord]:
     return records
 
 
-def _sample_metrics_from_json(path: Path, *, model: str, seed: int) -> dict[str, Any]:
+def _infer_expected_sample_count(records: list[RunRecord]) -> int:
+    if not records:
+        return EXPECTED_SAMPLE_COUNT
+    sample_dir = records[0].run_dir / "after10_val_mae_all_json/samples"
+    if not sample_dir.exists():
+        return EXPECTED_SAMPLE_COUNT
+    return len(sorted(sample_dir.glob("*.json")))
+
+
+def _sample_metrics_from_json(path: Path, *, model: str, seed: int, train_count: int) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     generated = np.asarray(payload["generated_surface"], dtype=float)
     target = np.asarray(payload.get("target_surface", payload.get("real_surface")), dtype=float)
@@ -652,7 +677,7 @@ def _sample_metrics_from_json(path: Path, *, model: str, seed: int) -> dict[str,
     current_atm7_abs_err = abs(current_atm7 - target_atm7)
 
     global_index = int(payload["global_index"])
-    split = _split_for_index(global_index)
+    split = _split_for_index(global_index, train_count)
     return {
         "model": model,
         "seed": seed,
@@ -677,19 +702,27 @@ def _sample_metrics_from_json(path: Path, *, model: str, seed: int) -> dict[str,
     }
 
 
-def _collect_sample_metrics(records: list[RunRecord]) -> pd.DataFrame:
+def _collect_sample_metrics(
+    records: list[RunRecord],
+    *,
+    expected_sample_count: int,
+    train_count: int,
+) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for record in records:
         sample_dir = record.run_dir / "after10_val_mae_all_json/samples"
         if not sample_dir.exists():
             raise FileNotFoundError(f"Missing generate-result samples: {sample_dir}")
         json_paths = sorted(sample_dir.glob("*.json"))
-        if len(json_paths) != EXPECTED_SAMPLE_COUNT:
+        if len(json_paths) != expected_sample_count:
             raise ValueError(
                 f"{record.model} seed {record.seed} has {len(json_paths)} JSON samples; "
-                f"expected {EXPECTED_SAMPLE_COUNT}: {sample_dir}"
+                f"expected {expected_sample_count}: {sample_dir}"
             )
-        rows.extend(_sample_metrics_from_json(path, model=record.model, seed=record.seed) for path in json_paths)
+        rows.extend(
+            _sample_metrics_from_json(path, model=record.model, seed=record.seed, train_count=train_count)
+            for path in json_paths
+        )
     frame = pd.DataFrame(rows)
     frame = frame.sort_values(["model", "seed", "global_index", "sample_id"]).reset_index(drop=True)
     return frame
@@ -991,6 +1024,73 @@ def _build_final_tables(summary_by_seed: pd.DataFrame, seed_tests: pd.DataFrame)
     return thesis_eval, text_vs
 
 
+def _build_best_seed_eval_tables(
+    summary_by_seed: pd.DataFrame,
+    sample_metrics: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    eval_summary = summary_by_seed[summary_by_seed["split"] == "eval"].copy()
+    best_rows: list[dict[str, Any]] = []
+    best_lookup: dict[tuple[str, str], int] = {}
+    for model, group in eval_summary.groupby("model", sort=True):
+        for metric in MAIN_METRICS:
+            ordered = group.sort_values([f"{metric}_mean", "seed"], ascending=[True, True])
+            best = ordered.iloc[0]
+            seed = int(best["seed"])
+            best_lookup[(model, metric)] = seed
+            best_rows.append(
+                {
+                    "model": model,
+                    "split": "eval",
+                    "metric": metric,
+                    "best_seed": seed,
+                    "best_seed_mean_error": float(best[f"{metric}_mean"]),
+                    "best_seed_gap_vs_current": float(best[f"{metric}_gap_mean"]),
+                    "best_seed_win_rate_vs_current": float(best[f"{metric}_win_rate_vs_current"]),
+                    "n_samples": int(best["n_samples"]),
+                    "selection_rule": "lowest eval mean MAE for this model and metric",
+                }
+            )
+
+    pair_rows: list[dict[str, Any]] = []
+    eval_samples = sample_metrics[sample_metrics["split"] == "eval"].copy()
+    for baseline in ("no_text", "bow", "llm_sentiment"):
+        for metric in MAIN_METRICS:
+            text_seed = best_lookup.get(("text", metric))
+            baseline_seed = best_lookup.get((baseline, metric))
+            if text_seed is None or baseline_seed is None:
+                continue
+            subset = eval_samples[
+                ((eval_samples["model"] == "text") & (eval_samples["seed"] == text_seed))
+                | ((eval_samples["model"] == baseline) & (eval_samples["seed"] == baseline_seed))
+            ][["model", "sample_id", "global_index", metric]].copy()
+            pivot = subset.pivot_table(
+                index=["global_index", "sample_id"], columns="model", values=metric, aggfunc="first"
+            ).reset_index()
+            if "text" not in pivot or baseline not in pivot:
+                continue
+            pivot = pivot.dropna(subset=["text", baseline])
+            diff = pivot[baseline].to_numpy(dtype=float) - pivot["text"].to_numpy(dtype=float)
+            test = _ttest_1samp(diff)
+            pair_rows.append(
+                {
+                    "left_model": "text",
+                    "right_model": baseline,
+                    "split": "eval",
+                    "metric": metric,
+                    "text_best_seed": int(text_seed),
+                    "baseline_best_seed": int(baseline_seed),
+                    "difference": "baseline_minus_text",
+                    "interpretation_positive": "LP text lower eval MAE / better",
+                    "interpretation_negative": "baseline lower eval MAE / better",
+                    "text_mean": float(pivot["text"].mean()),
+                    "baseline_mean": float(pivot[baseline].mean()),
+                    "baseline_minus_text_mean": float(diff.mean()) if len(diff) else math.nan,
+                    **test,
+                }
+            )
+    return pd.DataFrame(best_rows), pd.DataFrame(pair_rows)
+
+
 def _write_manifest(exp_root: Path) -> None:
     rows: list[dict[str, Any]] = []
     for path in sorted(exp_root.rglob("*")):
@@ -1019,6 +1119,13 @@ def build_comparison_archive(args: argparse.Namespace) -> None:
             f"Expected {len(MODELS) * len(seeds)} collected runs, found {len(records)}. "
             "Run collect_run_registry.sh after all training runs finish."
         )
+    expected_sample_count = int(getattr(args, "expected_sample_count", 0) or 0)
+    if expected_sample_count <= 0:
+        expected_sample_count = _infer_expected_sample_count(records)
+    train_count = int(getattr(args, "train_count", 0) or 0)
+    if train_count <= 0:
+        train_count = int(math.floor(expected_sample_count * 0.8))
+    eval_count = max(expected_sample_count - train_count, 0)
 
     config_failures = _validate_config_consistency(records, exp_root)
     validation: dict[str, Any] = {
@@ -1027,6 +1134,9 @@ def build_comparison_archive(args: argparse.Namespace) -> None:
         "expected_seeds": seeds,
         "expected_run_count": len(MODELS) * len(seeds),
         "collected_run_count": len(records),
+        "expected_sample_count": expected_sample_count,
+        "train_count": train_count,
+        "eval_count": eval_count,
         "config_consistency_ok": bool(config_failures.empty),
     }
     if not config_failures.empty:
@@ -1045,7 +1155,11 @@ def build_comparison_archive(args: argparse.Namespace) -> None:
         and _as_bool_series(ok_selected["selected_epoch_gt_10"]).all()
     )
 
-    sample_metrics = _collect_sample_metrics(records)
+    sample_metrics = _collect_sample_metrics(
+        records,
+        expected_sample_count=expected_sample_count,
+        train_count=train_count,
+    )
     _atomic_write_dataframe(
         sample_metrics, exp_root / "comparisons/sample_metrics_all_models_all_seeds.csv"
     )
@@ -1063,7 +1177,7 @@ def build_comparison_archive(args: argparse.Namespace) -> None:
     validation["sample_count_by_model_seed"] = all_counts.to_dict(orient="records")
     validation["split_count_by_model_seed"] = counts.to_dict(orient="records")
     validation["sample_metrics_row_count"] = int(len(sample_metrics))
-    validation["sample_metrics_expected_row_count"] = int(len(MODELS) * len(seeds) * EXPECTED_SAMPLE_COUNT)
+    validation["sample_metrics_expected_row_count"] = int(len(MODELS) * len(seeds) * expected_sample_count)
 
     summary_by_seed = _metric_summary_by_seed(sample_metrics)
     _atomic_write_dataframe(summary_by_seed, exp_root / "comparisons/model_metric_summary_by_seed.csv")
@@ -1082,6 +1196,12 @@ def build_comparison_archive(args: argparse.Namespace) -> None:
     thesis_eval, thesis_text_vs = _build_final_tables(summary_by_seed, seed_tests)
     _atomic_write_dataframe(thesis_eval, exp_root / "final_tables/thesis_eval_main_metrics.csv")
     _atomic_write_dataframe(thesis_text_vs, exp_root / "final_tables/thesis_text_vs_baselines.csv")
+    best_seed_by_metric, best_seed_pairs = _build_best_seed_eval_tables(summary_by_seed, sample_metrics)
+    _atomic_write_dataframe(best_seed_by_metric, exp_root / "final_tables/best_seed_by_model_metric_eval.csv")
+    _atomic_write_dataframe(
+        best_seed_pairs,
+        exp_root / "final_tables/best_seed_pairwise_text_vs_baselines_eval_p_values.csv",
+    )
 
     validation["pairwise_seed_test_rows"] = int(len(seed_tests))
     validation["expected_pairwise_seed_test_rows"] = len(FULL_PAIRS) * 3 * len(MAIN_METRICS)
@@ -1089,6 +1209,8 @@ def build_comparison_archive(args: argparse.Namespace) -> None:
     validation["expected_sample_level_test_rows"] = len(FULL_PAIRS) * len(seeds) * 3 * len(MAIN_METRICS)
     validation["final_eval_rows"] = int(len(thesis_eval))
     validation["final_text_vs_rows"] = int(len(thesis_text_vs))
+    validation["best_seed_rows"] = int(len(best_seed_by_metric))
+    validation["best_seed_pair_rows"] = int(len(best_seed_pairs))
     validation["status"] = "ok"
     _write_json(validation, exp_root / "validation_summary.json")
 
@@ -1105,16 +1227,24 @@ def build_parser() -> argparse.ArgumentParser:
     common_help = f"default: {_repo_rel(DEFAULT_EXP_ROOT)}"
     prepare = subparsers.add_parser("prepare", help="Create experiment root and snapshot inputs.")
     prepare.add_argument("--exp-root", default=str(DEFAULT_EXP_ROOT), help=common_help)
+    prepare.add_argument("--original-config", default=str(ORIGINAL_TEXT_CONFIG))
+    prepare.add_argument("--frozen-config", default=str(FROZEN_CONFIG))
+    prepare.add_argument("--data-path", default=str(ENRICHED_WORKBOOK))
+    prepare.add_argument("--feature-dir", default=str(FEATURE_DIR))
+    prepare.add_argument("--experiment-title", default="RQ2 Multi-Seed Controlled Experiment")
     prepare.set_defaults(func=prepare_experiment)
 
     collect = subparsers.add_parser("collect", help="Collect run registry and after-10 checkpoint rankings.")
     collect.add_argument("--exp-root", default=str(DEFAULT_EXP_ROOT), help=common_help)
     collect.add_argument("--seeds", default=",".join(str(seed) for seed in DEFAULT_SEEDS))
+    collect.add_argument("--data-path", default=str(ENRICHED_WORKBOOK))
     collect.set_defaults(func=collect_run_registry)
 
     build = subparsers.add_parser("build-comparison", help="Build sample metrics, tests, and final tables.")
     build.add_argument("--exp-root", default=str(DEFAULT_EXP_ROOT), help=common_help)
     build.add_argument("--seeds", default=",".join(str(seed) for seed in DEFAULT_SEEDS))
+    build.add_argument("--expected-sample-count", type=int, default=EXPECTED_SAMPLE_COUNT)
+    build.add_argument("--train-count", type=int, default=TRAIN_COUNT)
     build.set_defaults(func=build_comparison_archive)
     return parser
 
