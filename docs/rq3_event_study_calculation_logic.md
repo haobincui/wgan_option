@@ -575,3 +575,95 @@ python scripts/rq3/main.py result \
 - 当前 ATM-short jump 是 nearest-ATM / shortest-maturity 单点，不是 weighted ATM-short band。
 - 如果 `training_candidate_flag` 存在，workbook mode 会优先保留 `training_candidate_flag == 1` 的样本。
 - `rq3_quality_audit.csv` 必须和 RQ3 结论一起看，避免 announcement 样本因 quality filter 被系统性筛掉而导致 selection bias。
+
+## 10. General News-Arrival vs No-News Quiet Extension
+
+除了 scheduled FOMC announcement study，RQ3 还支持一个更宽的后处理实验：
+
+```text
+news_event = all usable news-row samples
+quiet      = no-news samples on a 5-minute surface time grid
+```
+
+这个扩展不是 Nakamura-Steinsson-style causal identification。它回答的是 predictive contrast：
+
+```text
+text conditioning 的边际预测价值是否在有新闻到达时高于无新闻 quiet period？
+```
+
+Quiet 样本定义为：
+
+```text
+quiet grid = 5 minutes
+target horizon = 5 minutes
+news buffer = 60 minutes
+```
+
+也就是说，quiet candidate timestamp `t` 必须满足：
+
+```text
+t and t + 5min both have reconstructed surfaces
+distance(t, any news timestamp) >= 60min
+```
+
+Quiet 样本没有真实新闻文本。本轮后处理实验采用：
+
+```text
+quiet text embeddings = zero vectors
+```
+
+并且不重新训练模型。因此这一结果需要明确写作 limitation：quiet evaluation 对 text-conditioned checkpoints 可能是 out-of-distribution，不等价于包含 no-news samples 的重新训练实验。
+
+构造 news/quiet workbook：
+
+```bash
+python scripts/rq3/main.py build-news-quiet-workbook \
+  --source-merged-vol data/processed/svi-excel/20260410-174929/merged_vol_rq2_text.xlsx \
+  --surface-all-json data/processed/svi-all/<run_ts>/surface-svi-all.json \
+  --news-xlsx data/raw/text_embedding/news_with_openai_embeddings_large.xlsx \
+  --output-workbook outputs/rq3/news_quiet_svi_<run_ts>/news_quiet_eval_workbook.xlsx \
+  --horizon-minutes 5 \
+  --quiet-grid-minutes 5 \
+  --quiet-buffer-minutes 60
+```
+
+注意：`--surface-all-json` 必须是真正的 `data_range=all` output。`surface-*-excel.json` / window payload 只能覆盖 news target windows，不能定义 no-news quiet samples。
+
+分析 workbook 的真实 IVS jump：
+
+```bash
+python scripts/rq3/main.py news-quiet-workbook \
+  --workbook outputs/rq3/news_quiet_svi_<run_ts>/news_quiet_eval_workbook.xlsx \
+  --output-dir outputs/rq3/news_quiet_svi_<run_ts>/workbook_analysis \
+  --split all
+```
+
+对已有 model generate-result summary 做分组：
+
+```bash
+python scripts/rq3/main.py news-quiet-result \
+  --output-dir outputs/rq3/news_quiet_svi_<run_ts>/model_result_analysis \
+  --text-label text_seed404 \
+  --result text_seed404=<text_summary.csv> \
+  --result no_text_seed101=<no_text_summary.csv> \
+  --result bow_seed404=<bow_summary.csv> \
+  --result llm_sentiment_seed303=<llm_summary.csv>
+```
+
+核心统计方向：
+
+```text
+text_advantage = baseline_error - text_error
+DiD = text_advantage(news_event) - text_advantage(quiet)
+DiD > 0 means LP text has larger marginal value during news-event samples
+```
+
+主要输出：
+
+```text
+rq3_news_quiet_group_summary.csv
+rq3_news_quiet_tests.csv
+rq3_news_quiet_result_group_metrics.csv
+rq3_news_quiet_text_vs_baselines.csv
+rq3_news_quiet_text_advantage_did.csv
+```

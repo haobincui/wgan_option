@@ -260,6 +260,11 @@ def load_film_wgan_samples(config: FilmWGANTrainConfig | FilmWGANSampleConfig) -
                     "pair_quality_label": str(getattr(row, "pair_quality_label", "")),
                     "current_weighted_iv_rmse": getattr(row, "current_weighted_iv_rmse", None),
                     "target_weighted_iv_rmse": getattr(row, "target_weighted_iv_rmse", None),
+                    "event_group": getattr(row, "event_group", ""),
+                    "has_news": getattr(row, "has_news", ""),
+                    "news_cluster_id": getattr(row, "news_cluster_id", ""),
+                    "quiet_buffer_minutes": getattr(row, "quiet_buffer_minutes", ""),
+                    "quiet_grid_minutes": getattr(row, "quiet_grid_minutes", ""),
                 },
             )
         )

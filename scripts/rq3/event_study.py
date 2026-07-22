@@ -314,6 +314,15 @@ def build_workbook_sample_metrics(
             "split": str(row.get("split", split)),
             "_rq3_ordered_index": int(row.get("_rq3_ordered_index", len(rows))),
         }
+        for metadata_column in (
+            "event_group",
+            "has_news",
+            "news_cluster_id",
+            "quiet_buffer_minutes",
+            "quiet_grid_minutes",
+        ):
+            if metadata_column in row.index:
+                output_row[metadata_column] = row.get(metadata_column)
         output_row.update(surface_jump_metrics(current, target, strike_grid, maturity_days_grid))
         rows.append(output_row)
     return pd.DataFrame(rows)
