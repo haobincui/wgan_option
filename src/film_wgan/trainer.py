@@ -25,7 +25,7 @@ from .config import (
 )
 from .data import FilmWGANDataBundle, create_train_val_bundle, denormalize_tensor, normalize_surface_tensor
 from .inference import FilmWGANSampler, build_sample_payload, normalization_stats_to_tensors
-from .io import config_payload, save_checkpoint, write_csv, write_json
+from .io import config_payload, load_checkpoint, save_checkpoint, write_csv, write_json
 from .losses import (
     atm_short_pure_mae,
     build_atm_short_mask,
@@ -40,6 +40,7 @@ from .losses import (
     weighted_surface_mae,
 )
 from .models import FilmWGANCritic, FilmWGANGenerator, reconstruct_future_surface
+from .text_transform import sha256_file
 from .training_plots import plot_training_curves
 from wgan_option.config_parsing import load_yaml_mapping
 
@@ -85,6 +86,9 @@ class FilmWGANTrainer(BaseTrainer):
         self._gp_warmup_steps: int = 200
         self._grad_clip: float = 5.0
         self._lr_min_ratio: float = 0.1
+        self._parent_checkpoint_path: str = ""
+        self._parent_checkpoint_sha256: str = ""
+        self._backbone_frozen: bool = False
 
     def _set_seed(self) -> None:
         random.seed(int(self.config.seed))
@@ -116,6 +120,109 @@ class FilmWGANTrainer(BaseTrainer):
         normalized = normalize_surface_tensor(surface_flat, self.normalization.current_log_mean, self.normalization.current_log_std)
         return normalized.view(surface_flat.size(0), 1, height, width)
 
+    def _load_initial_generator_checkpoint(self) -> None:
+        assert self.generator is not None
+        assert self.bundle is not None
+        checkpoint_value = str(self.config.initial_generator_checkpoint_path).strip()
+        if not checkpoint_value:
+            return
+        checkpoint_path = Path(checkpoint_value)
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(f"initial_generator_checkpoint_path does not exist: {checkpoint_path}")
+        checkpoint = load_checkpoint(checkpoint_path, self.device)
+        parent_shape = tuple(int(value) for value in checkpoint.get("surface_shape", ()))
+        if parent_shape != tuple(self.bundle.surface_shape):
+            raise ValueError(
+                f"Parent generator surface shape mismatch: expected {self.bundle.surface_shape}, "
+                f"found {parent_shape}."
+            )
+        if int(checkpoint.get("embedding_dim", -1)) != int(self.bundle.embedding_dim):
+            raise ValueError(
+                f"Parent generator embedding dimension mismatch: expected {self.bundle.embedding_dim}, "
+                f"found {checkpoint.get('embedding_dim')}."
+            )
+        parent_mode = str(
+            checkpoint.get(
+                "conditioning_mode",
+                (checkpoint.get("config") or {}).get("conditioning_mode", "film"),
+            )
+        ).strip().lower()
+        if parent_mode != "residual_film":
+            raise ValueError(
+                "Paired initialization requires a residual_film parent checkpoint; "
+                f"found conditioning_mode={parent_mode!r}."
+            )
+        parent_transform_sha = str(checkpoint.get("text_transform_sha256", ""))
+        if (
+            parent_transform_sha
+            and self.bundle.text_transform_sha256
+            and parent_transform_sha != self.bundle.text_transform_sha256
+        ):
+            raise ValueError(
+                "Parent generator text-transform SHA256 does not match the current fold artifact."
+            )
+        try:
+            self.generator.load_state_dict(checkpoint["generator_state_dict"], strict=True)
+        except RuntimeError as exc:
+            raise ValueError(
+                f"Parent generator state is incompatible with the current architecture: {checkpoint_path}"
+            ) from exc
+        self._parent_checkpoint_path = str(checkpoint_path.resolve())
+        self._parent_checkpoint_sha256 = sha256_file(checkpoint_path)
+        freeze_epochs = max(0, int(self.config.freeze_backbone_epochs))
+        if freeze_epochs > 0:
+            self.generator.set_backbone_trainable(False)
+            self._backbone_frozen = True
+        self.logger.info(
+            "Loaded paired parent generator: %s (sha256=%s, freeze_backbone_epochs=%d)",
+            checkpoint_path,
+            self._parent_checkpoint_sha256,
+            freeze_epochs,
+        )
+
+    def _build_generator_optimizer(self) -> Adam:
+        assert self.generator is not None
+        betas = (float(self.config.beta_1), float(self.config.beta_2))
+        if self.generator.conditioning_mode == "residual_film" and self._parent_checkpoint_path:
+            backbone = list(self.generator.backbone_parameters())
+            adapter = list(self.generator.text_adapter_parameters())
+            return Adam(
+                [
+                    {
+                        "params": backbone,
+                        "lr": float(self.config.backbone_learning_rate),
+                        "name": "surface_backbone",
+                    },
+                    {
+                        "params": adapter,
+                        "lr": float(self.config.text_adapter_learning_rate),
+                        "name": "text_adapter",
+                    },
+                ],
+                betas=betas,
+            )
+        return Adam(
+            (parameter for parameter in self.generator.parameters() if parameter.requires_grad),
+            lr=float(self.config.generator_learning_rate),
+            betas=betas,
+        )
+
+    def _update_backbone_freeze_state(self, epoch: int) -> None:
+        if self.generator is None:
+            return
+        if not self._parent_checkpoint_path or self.generator.conditioning_mode != "residual_film":
+            return
+        should_freeze = int(epoch) <= max(0, int(self.config.freeze_backbone_epochs))
+        if should_freeze == self._backbone_frozen:
+            return
+        self.generator.set_backbone_trainable(not should_freeze)
+        self._backbone_frozen = should_freeze
+        self.logger.info(
+            "Surface backbone %s at epoch %d.",
+            "frozen" if should_freeze else "unfrozen",
+            int(epoch),
+        )
+
     def setup(self) -> None:
         self._set_seed()
         assert self.checkpoints_dir is not None
@@ -125,6 +232,7 @@ class FilmWGANTrainer(BaseTrainer):
         self.logger.info("Standalone FiLM WGAN outputs: %s", self.run_dir)
         self.logger.info("Loading merged-vol workbook from %s (%s)", self.config.data_path, self.config.sheet_name)
         self.bundle = create_train_val_bundle(self.config)
+        self.bundle.split_manifest.to_csv(self.metrics_dir / "split_manifest_resolved.csv", index=False)
         self.normalization = normalization_stats_to_tensors(self.bundle.normalization_stats, self.device)
         self._strike_grid = torch.tensor(self.bundle.strike_grid, dtype=torch.float32, device=self.device)
         self._maturity_days_grid = torch.tensor(self.bundle.maturity_days_grid, dtype=torch.float32, device=self.device)
@@ -145,59 +253,69 @@ class FilmWGANTrainer(BaseTrainer):
         )
         self._atm_short_mask_flat = self._atm_short_mask_surface.reshape(-1)
         surface_height, surface_width = self.bundle.surface_shape
+        deterministic = str(self.config.forecast_mode).strip().lower() == "deterministic"
+        generator_noise_dim = 0 if deterministic else int(self.config.noise_dim)
         self.generator = FilmWGANGenerator(
             surface_height=surface_height,
             surface_width=surface_width,
             embedding_dim=self.bundle.embedding_dim,
-            noise_dim=self.config.noise_dim,
+            noise_dim=generator_noise_dim,
             base_channels=self.config.gen_base_channels,
             res_blocks=self.config.gen_res_blocks,
             text_hidden_dim=self.config.text_hidden_dim,
             text_out_dim=self.config.text_out_dim,
             fusion_hidden_dim=self.config.fusion_hidden_dim,
+            conditioning_mode=self.config.conditioning_mode,
+            text_dropout=float(self.config.text_dropout),
+            text_gate_initial_value=float(self.config.text_gate_initial_value),
         ).to(self.device)
-        self.critic = FilmWGANCritic(
-            surface_height=surface_height,
-            surface_width=surface_width,
-            embedding_dim=self.bundle.embedding_dim,
-            base_channels=self.config.disc_base_channels,
-            res_blocks=self.config.disc_res_blocks,
-            text_hidden_dim=self.config.text_hidden_dim,
-            text_out_dim=self.config.text_out_dim,
-            fusion_hidden_dim=self.config.fusion_hidden_dim,
-        ).to(self.device)
-        self.generator_optimizer = Adam(
-            self.generator.parameters(),
-            lr=float(self.config.generator_learning_rate),
-            betas=(float(self.config.beta_1), float(self.config.beta_2)),
-        )
-        self.critic_optimizer = Adam(
-            self.critic.parameters(),
-            lr=float(self.config.discriminator_learning_rate),
-            betas=(float(self.config.beta_1), float(self.config.beta_2)),
-        )
+        self._load_initial_generator_checkpoint()
+        if not deterministic:
+            self.critic = FilmWGANCritic(
+                surface_height=surface_height,
+                surface_width=surface_width,
+                embedding_dim=self.bundle.embedding_dim,
+                base_channels=self.config.disc_base_channels,
+                res_blocks=self.config.disc_res_blocks,
+                text_hidden_dim=self.config.text_hidden_dim,
+                text_out_dim=self.config.text_out_dim,
+                fusion_hidden_dim=self.config.fusion_hidden_dim,
+                conditioning_mode=self.config.conditioning_mode,
+                critic_conditioning_mode=self.config.critic_conditioning_mode,
+                text_dropout=float(self.config.text_dropout),
+            ).to(self.device)
+        self.generator_optimizer = self._build_generator_optimizer()
+        if self.critic is not None:
+            self.critic_optimizer = Adam(
+                (parameter for parameter in self.critic.parameters() if parameter.requires_grad),
+                lr=float(self.config.discriminator_learning_rate),
+                betas=(float(self.config.beta_1), float(self.config.beta_2)),
+            )
         total_epochs = max(1, int(self.config.num_epochs))
         self.generator_scheduler = CosineAnnealingLR(
             self.generator_optimizer,
             T_max=total_epochs,
-            eta_min=float(self.config.generator_learning_rate) * self._lr_min_ratio,
+            eta_min=min(float(group["lr"]) for group in self.generator_optimizer.param_groups)
+            * self._lr_min_ratio,
         )
-        self.critic_scheduler = CosineAnnealingLR(
-            self.critic_optimizer,
-            T_max=total_epochs,
-            eta_min=float(self.config.discriminator_learning_rate) * self._lr_min_ratio,
-        )
+        if self.critic_optimizer is not None:
+            self.critic_scheduler = CosineAnnealingLR(
+                self.critic_optimizer,
+                T_max=total_epochs,
+                eta_min=float(self.config.discriminator_learning_rate) * self._lr_min_ratio,
+            )
         self.logger.info(
-            "Dataset ready: train_samples=%s, val_samples=%s, surface_shape=%s, embedding_dim=%s",
+            "Dataset ready: train_samples=%s, val_samples=%s, test_samples=%s, surface_shape=%s, embedding_dim=%s",
             self.bundle.train_samples,
             self.bundle.val_samples,
+            self.bundle.test_samples,
             self.bundle.surface_shape,
             self.bundle.embedding_dim,
         )
         self.logger.info(
             "Model initialized: G params=%s, C params=%s",
             parameter_count(self.generator.parameters()),
-            parameter_count(self.critic.parameters()),
+            parameter_count(self.critic.parameters()) if self.critic is not None else 0,
         )
         self.logger.info(
             "Reconstruction weighting: mode=%s atm_range=%.4f short_end_max_days=%.1f atm_multiplier=%.3f",
@@ -228,6 +346,7 @@ class FilmWGANTrainer(BaseTrainer):
         text_features: torch.Tensor,
         current_flat: torch.Tensor,
         target_flat: torch.Tensor,
+        has_text: torch.Tensor,
     ) -> dict[str, float]:
         assert self.generator is not None
         assert self.critic is not None
@@ -235,9 +354,14 @@ class FilmWGANTrainer(BaseTrainer):
         assert self.normalization is not None
 
         self.critic_optimizer.zero_grad(set_to_none=True)
-        noise = torch.randn(current_features.size(0), int(self.config.noise_dim), device=self.device, dtype=torch.float32)
+        noise = torch.randn(current_features.size(0), self.generator.noise_dim, device=self.device, dtype=torch.float32)
         with torch.no_grad():
-            fake_delta_norm = self.generator(current_features, text_features, noise=noise)
+            fake_delta_norm = self.generator(
+                current_features,
+                text_features,
+                noise=noise,
+                has_text=has_text,
+            )
             fake_delta = (
                 denormalize_tensor(fake_delta_norm, self.normalization.delta_mean, self.normalization.delta_std)
                 if self.config.normalize_target_delta
@@ -247,8 +371,38 @@ class FilmWGANTrainer(BaseTrainer):
         fake_future_surface = self._normalize_surface_flat(fake_future_flat)
         real_future_surface = self._normalize_surface_flat(target_flat)
 
-        fake_scores = self.critic(fake_future_surface, current_features, text_features)
-        real_scores = self.critic(real_future_surface, current_features, text_features)
+        fake_scores = self.critic(
+            fake_future_surface,
+            current_features,
+            text_features,
+            has_text=has_text,
+        )
+        real_scores = self.critic(
+            real_future_surface,
+            current_features,
+            text_features,
+            has_text=has_text,
+        )
+        mismatch_loss = torch.zeros((), device=self.device, dtype=real_scores.dtype)
+        mismatch_scores = None
+        mismatch_enabled = (
+            self.critic.conditioning_mode == "projection"
+            and float(self.config.lambda_mismatch) > 0.0
+            and current_features.size(0) > 1
+            and bool(torch.any(has_text > 0.0))
+        )
+        if mismatch_enabled:
+            donor_indices = torch.roll(
+                torch.arange(current_features.size(0), device=self.device),
+                shifts=1,
+            )
+            mismatch_scores = self.critic(
+                real_future_surface,
+                current_features,
+                text_features[donor_indices],
+                has_text=has_text[donor_indices],
+            )
+            mismatch_loss = mismatch_scores.mean()
         self._disc_step_count += 1
         warmup_factor = min(1.0, self._disc_step_count / max(1, self._gp_warmup_steps))
         effective_lambda_gp = float(self.config.lambda_gp) * warmup_factor
@@ -259,8 +413,16 @@ class FilmWGANTrainer(BaseTrainer):
             current_surface=current_features,
             text_embedding=text_features,
             lambda_gp=effective_lambda_gp,
+            has_text=has_text,
         )
-        disc_loss = critic_wgan_loss(real_scores, fake_scores) + gp
+        if mismatch_scores is None:
+            adversarial_disc_loss = critic_wgan_loss(real_scores, fake_scores)
+        else:
+            mismatch_weight = float(self.config.lambda_mismatch)
+            adversarial_disc_loss = (
+                fake_scores.mean() + mismatch_weight * mismatch_loss
+            ) / (1.0 + mismatch_weight) - real_scores.mean()
+        disc_loss = adversarial_disc_loss + gp
         disc_loss.backward()
         if torch.isfinite(disc_loss):
             torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=self._grad_clip)
@@ -272,6 +434,7 @@ class FilmWGANTrainer(BaseTrainer):
             "d_total": float(disc_loss.detach().cpu()),
             "d_real": float(real_scores.mean().detach().cpu()),
             "d_fake": float(fake_scores.mean().detach().cpu()),
+            "d_mismatch": float(mismatch_loss.detach().cpu()),
             "gp": float(gp.detach().cpu()),
         }
 
@@ -281,9 +444,9 @@ class FilmWGANTrainer(BaseTrainer):
         text_features: torch.Tensor,
         current_flat: torch.Tensor,
         target_flat: torch.Tensor,
+        has_text: torch.Tensor,
     ) -> dict[str, float]:
         assert self.generator is not None
-        assert self.critic is not None
         assert self.generator_optimizer is not None
         assert self.bundle is not None
         assert self.normalization is not None
@@ -292,8 +455,20 @@ class FilmWGANTrainer(BaseTrainer):
         assert self._recon_weights_flat is not None
 
         self.generator_optimizer.zero_grad(set_to_none=True)
-        noise = torch.randn(current_features.size(0), int(self.config.noise_dim), device=self.device, dtype=torch.float32)
-        fake_delta_norm = self.generator(current_features, text_features, noise=noise)
+        noise = None
+        if self.generator.noise_dim > 0:
+            noise = torch.randn(
+                current_features.size(0),
+                self.generator.noise_dim,
+                device=self.device,
+                dtype=torch.float32,
+            )
+        fake_delta_norm = self.generator(
+            current_features,
+            text_features,
+            noise=noise,
+            has_text=has_text,
+        )
         fake_delta = (
             denormalize_tensor(fake_delta_norm, self.normalization.delta_mean, self.normalization.delta_std)
             if self.config.normalize_target_delta
@@ -301,11 +476,19 @@ class FilmWGANTrainer(BaseTrainer):
         )
         fake_future_flat = reconstruct_future_surface(current_flat, fake_delta)
         fake_future_surface = self._normalize_surface_flat(fake_future_flat)
-        fake_scores = self.critic(fake_future_surface, current_features, text_features)
+        if self.critic is not None:
+            fake_scores = self.critic(
+                fake_future_surface,
+                current_features,
+                text_features,
+                has_text=has_text,
+            )
+            adv_loss = generator_wgan_loss(fake_scores)
+        else:
+            adv_loss = torch.zeros((), device=fake_future_flat.device, dtype=fake_future_flat.dtype)
 
         future_surface_level = fake_future_flat.view(current_features.size(0), self.bundle.surface_shape[0], self.bundle.surface_shape[1])
         future_log_surface = torch.log(torch.clamp(future_surface_level, min=1e-4))
-        adv_loss = generator_wgan_loss(fake_scores)
         calendar_penalty = calendar_arbitrage_penalty(future_surface_level, self._strike_grid, self._maturity_days_grid).mean()
         butterfly_penalty = butterfly_arbitrage_penalty(future_surface_level, self._strike_grid, self._maturity_days_grid).mean()
         smooth_penalty = strike_smoothness_penalty(future_log_surface, self._strike_grid) + maturity_smoothness_penalty(
@@ -320,7 +503,7 @@ class FilmWGANTrainer(BaseTrainer):
             atm_short_penalty = torch.zeros((), device=fake_future_flat.device, dtype=fake_future_flat.dtype)
 
         adv_warmup_epochs = max(0, int(self.config.adv_warmup_epochs))
-        if self._current_epoch <= adv_warmup_epochs:
+        if self.critic is None or self._current_epoch <= adv_warmup_epochs:
             effective_lambda_adv = 0.0
         else:
             effective_lambda_adv = float(self.config.lambda_adv)
@@ -336,6 +519,9 @@ class FilmWGANTrainer(BaseTrainer):
             total_loss = total_loss + float(self.config.lambda_recon) * recon_penalty_weighted
         if self.config.use_atm_short_loss:
             total_loss = total_loss + float(self.config.lambda_atm_short) * atm_short_penalty
+        film_penalty = self.generator.film_regularization()
+        if float(self.config.lambda_film) > 0.0:
+            total_loss = total_loss + float(self.config.lambda_film) * film_penalty
         total_loss.backward()
         if torch.isfinite(total_loss):
             torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=self._grad_clip)
@@ -353,6 +539,7 @@ class FilmWGANTrainer(BaseTrainer):
             "g_recon": float(recon_penalty.detach().cpu()),
             "g_recon_weighted": float(recon_penalty_weighted.detach().cpu()),
             "g_atm_short": float(atm_short_penalty.detach().cpu()),
+            "g_film": float(film_penalty.detach().cpu()),
         }
 
     def _evaluate(self) -> dict[str, float]:
@@ -390,7 +577,7 @@ class FilmWGANTrainer(BaseTrainer):
                 generator=self.generator,
                 sample=sample,
                 normalization=self.normalization,
-                noise_dim=int(self.config.noise_dim),
+                noise_dim=int(self.generator.noise_dim),
                 mc_samples=int(self.config.eval_mc_samples),
                 seed=int(self.config.seed),
                 device=self.device,
@@ -398,6 +585,8 @@ class FilmWGANTrainer(BaseTrainer):
                 reweight_beta=float(self.config.eval_reweight_beta),
                 aggregation_mode=self.config.eval_aggregation_mode,
                 quantiles=(),
+                calibration_levels=self.config.eval_calibration_levels,
+                arbitrage_violation_tolerance=float(self.config.arbitrage_violation_tolerance),
                 checkpoint_path="",
                 split="val",
                 selection_mode="all",
@@ -483,8 +672,15 @@ class FilmWGANTrainer(BaseTrainer):
     def _checkpoint_payload(self) -> dict[str, object]:
         assert self.bundle is not None
         assert self.generator is not None
-        assert self.critic is not None
         return {
+            "checkpoint_schema_version": 3,
+            "architecture_version": "pair_text_residual_film_v1"
+            if self.generator.conditioning_mode == "residual_film"
+            else "film_wgan_legacy_v2",
+            "epoch": int(self._current_epoch),
+            "forecast_mode": str(self.config.forecast_mode),
+            "conditioning_mode": str(self.config.conditioning_mode),
+            "critic_conditioning_mode": str(self.config.critic_conditioning_mode),
             "config": config_payload(self.config),
             "surface_shape": list(self.bundle.surface_shape),
             "strike_grid": self.bundle.strike_grid.astype(float).tolist(),
@@ -499,7 +695,14 @@ class FilmWGANTrainer(BaseTrainer):
                 "text_std": self.bundle.normalization_stats.text_std.astype(float).tolist(),
             },
             "generator_state_dict": self.generator.state_dict(),
-            "critic_state_dict": self.critic.state_dict(),
+            "critic_state_dict": self.critic.state_dict() if self.critic is not None else None,
+            "generator_parameter_count": parameter_count(self.generator.parameters()),
+            "critic_parameter_count": parameter_count(self.critic.parameters()) if self.critic is not None else 0,
+            "parent_generator_checkpoint_path": self._parent_checkpoint_path,
+            "parent_generator_checkpoint_sha256": self._parent_checkpoint_sha256,
+            "text_transform_path": self.bundle.text_transform_path,
+            "text_transform_sha256": self.bundle.text_transform_sha256,
+            "backbone_frozen": bool(self._backbone_frozen),
         }
 
     def _save_loss_curves(self, metrics_rows: list[dict[str, float]]) -> None:
@@ -587,10 +790,12 @@ class FilmWGANTrainer(BaseTrainer):
 
         for epoch in range(1, int(self.config.num_epochs) + 1):
             self._current_epoch = epoch
+            self._update_backbone_freeze_state(epoch)
             running: dict[str, list[float]] = {
                 "d_total": [],
                 "d_real": [],
                 "d_fake": [],
+                "d_mismatch": [],
                 "gp": [],
                 "g_total": [],
                 "g_adv": [],
@@ -601,19 +806,52 @@ class FilmWGANTrainer(BaseTrainer):
                 "g_recon": [],
                 "g_recon_weighted": [],
                 "g_atm_short": [],
+                "g_film": [],
             }
-            for current_features, text_features, _real_delta_norm, current_flat, target_flat in self.bundle.train_loader:
+            for batch in self.bundle.train_loader:
+                if len(batch) == 6:
+                    (
+                        current_features,
+                        text_features,
+                        _real_delta_norm,
+                        current_flat,
+                        target_flat,
+                        has_text,
+                    ) = batch
+                else:
+                    (
+                        current_features,
+                        text_features,
+                        _real_delta_norm,
+                        current_flat,
+                        target_flat,
+                    ) = batch
+                    has_text = torch.ones(current_features.size(0), dtype=torch.float32)
                 current_features = self._to_device(current_features)
                 text_features = self._to_device(text_features)
                 current_flat = self._to_device(current_flat)
                 target_flat = self._to_device(target_flat)
+                has_text = self._to_device(has_text)
 
-                for _ in range(max(1, int(self.config.critic_iter))):
-                    d_metrics = self._discriminator_step(current_features, text_features, current_flat, target_flat)
-                    for key, value in d_metrics.items():
-                        running[key].append(float(value))
+                if self.critic is not None:
+                    for _ in range(max(1, int(self.config.critic_iter))):
+                        d_metrics = self._discriminator_step(
+                            current_features,
+                            text_features,
+                            current_flat,
+                            target_flat,
+                            has_text,
+                        )
+                        for key, value in d_metrics.items():
+                            running[key].append(float(value))
 
-                g_metrics = self._generator_step(current_features, text_features, current_flat, target_flat)
+                g_metrics = self._generator_step(
+                    current_features,
+                    text_features,
+                    current_flat,
+                    target_flat,
+                    has_text,
+                )
                 for key, value in g_metrics.items():
                     running[key].append(float(value))
 
@@ -622,6 +860,7 @@ class FilmWGANTrainer(BaseTrainer):
                 "d_total": float(np.mean(running["d_total"])) if running["d_total"] else 0.0,
                 "d_real": float(np.mean(running["d_real"])) if running["d_real"] else 0.0,
                 "d_fake": float(np.mean(running["d_fake"])) if running["d_fake"] else 0.0,
+                "d_mismatch": float(np.mean(running["d_mismatch"])) if running["d_mismatch"] else 0.0,
                 "gp": float(np.mean(running["gp"])) if running["gp"] else 0.0,
                 "g_total": float(np.mean(running["g_total"])) if running["g_total"] else 0.0,
                 "g_adv": float(np.mean(running["g_adv"])) if running["g_adv"] else 0.0,
@@ -634,6 +873,11 @@ class FilmWGANTrainer(BaseTrainer):
                 "g_recon": float(np.mean(running["g_recon"])) if running["g_recon"] else 0.0,
                 "g_recon_weighted": float(np.mean(running["g_recon_weighted"])) if running["g_recon_weighted"] else 0.0,
                 "g_atm_short": float(np.mean(running["g_atm_short"])) if running["g_atm_short"] else 0.0,
+                "g_film": float(np.mean(running["g_film"])) if running["g_film"] else 0.0,
+                "text_gate": float(torch.tanh(self.generator.text_gate).detach().cpu())
+                if self.generator is not None and self.generator.conditioning_mode == "residual_film"
+                else 0.0,
+                "backbone_frozen": 1.0 if self._backbone_frozen else 0.0,
             }
             row.update(self._evaluate())
             if self.generator_scheduler is not None:

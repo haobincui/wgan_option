@@ -24,13 +24,22 @@ def gradient_penalty(
     current_surface: torch.Tensor,
     text_embedding: torch.Tensor,
     lambda_gp: float,
+    has_text: torch.Tensor | None = None,
 ) -> torch.Tensor:
     batch_size = real_future_surface.size(0)
     alpha = torch.rand(batch_size, 1, 1, 1, device=real_future_surface.device)
     interpolated = alpha * real_future_surface + (1.0 - alpha) * fake_future_surface
     interpolated.requires_grad_(True)
 
-    interpolated_scores = critic(interpolated, current_surface, text_embedding)
+    if has_text is None:
+        interpolated_scores = critic(interpolated, current_surface, text_embedding)
+    else:
+        interpolated_scores = critic(
+            interpolated,
+            current_surface,
+            text_embedding,
+            has_text=has_text,
+        )
     grad_outputs = torch.ones_like(interpolated_scores, device=real_future_surface.device)
     gradients = autograd.grad(
         outputs=interpolated_scores,

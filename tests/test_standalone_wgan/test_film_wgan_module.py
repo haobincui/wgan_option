@@ -8,6 +8,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 import torch
 import yaml
@@ -20,8 +21,19 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from film_wgan.config import FilmWGANSampleConfig, FilmWGANTrainConfig, load_train_config  # noqa: E402
-from film_wgan.data import create_train_val_bundle, denormalize_tensor, normalize_surface_tensor  # noqa: E402
-from film_wgan.inference import FilmWGANSampler, normalization_stats_to_tensors  # noqa: E402
+from film_wgan.data import (  # noqa: E402
+    build_text_permutation_mapping,
+    create_train_val_bundle,
+    denormalize_tensor,
+    normalize_surface_tensor,
+    write_split_manifest,
+)
+from film_wgan.inference import (  # noqa: E402
+    FilmWGANSampler,
+    energy_score,
+    normalization_stats_to_tensors,
+    summarize_surface_scenarios,
+)
 from film_wgan.losses import (  # noqa: E402
     build_reconstruction_weight_template,
     gradient_penalty,
@@ -116,6 +128,36 @@ def _write_vol_workbook(tmpdir: str) -> Path:
     )
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         dataframe.to_excel(writer, sheet_name="gan_input_ready", index=False)
+    return path
+
+
+def _write_grouped_vol_workbook(tmpdir: str) -> Path:
+    path = Path(tmpdir) / "grouped_vol.xlsx"
+    strike_grid = [0.80, 1.02, 1.20]
+    maturity_grid = [7, 30]
+    rows = []
+    for index in range(8):
+        timestamp = pd.Timestamp("2022-12-30T13:30:00Z") + pd.Timedelta(minutes=index * 10)
+        repeats = 2 if index == 2 else 1
+        for repeat in range(repeats):
+            rows.append(
+                {
+                    "sample_id": f"news_{index}_{repeat}",
+                    "news_timestamp_utc": timestamp.isoformat(),
+                    "current_snapshot_time_utc": timestamp.isoformat(),
+                    "target_snapshot_time_utc": (timestamp + pd.Timedelta(minutes=5)).isoformat(),
+                    "hd_embedding": _json_text([float(index), float(repeat)]),
+                    "lp_embedding": _json_text([float(index + 1), float(index + 2), float(index + 3)]),
+                    "strike_grid": _json_text(strike_grid),
+                    "maturity_days_grid": _json_text(maturity_grid),
+                    "current_surface_flat": _json_text(_surface_values(float(index + 1), 6)),
+                    "target_surface_flat": _json_text(_surface_values(float(index + 2), 6)),
+                    "pair_quality_label": "usable",
+                    "training_candidate_flag": 1,
+                }
+            )
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        pd.DataFrame(rows).to_excel(writer, sheet_name="gan_input_ready", index=False)
     return path
 
 
@@ -379,6 +421,185 @@ class TestFilmWGANConfiguration(unittest.TestCase):
                 self.assertEqual(int(text_features.shape[1]), expected_dim)
                 self.assertFalse(torch.isnan(text_features).any())
 
+    def test_grouped_split_keeps_duplicate_surface_pairs_together(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = _write_grouped_vol_workbook(tmpdir)
+            manifest_path = Path(tmpdir) / "split_manifest.csv"
+            config = FilmWGANTrainConfig(
+                data_path=str(workbook_path),
+                split_strategy="grouped_chronological",
+                train_ratio=0.5,
+                val_ratio=0.25,
+                test_ratio=0.25,
+                batch_size=8,
+                cuda=False,
+            )
+            write_split_manifest(config, manifest_path)
+            bundle = create_train_val_bundle(replace(config, split_manifest_path=str(manifest_path)))
+
+            self.assertEqual((bundle.train_samples, bundle.val_samples, bundle.test_samples), (5, 2, 2))
+            expected_train_log_mean = np.mean(
+                np.stack(
+                    [np.log(np.clip(sample.current_surface.reshape(-1), 1e-4, None)) for sample in bundle.train_items]
+                ),
+                axis=0,
+            )
+            np.testing.assert_allclose(bundle.normalization_stats.current_log_mean, expected_train_log_mean)
+            pair_splits = bundle.split_manifest.groupby("surface_pair_id")["split"].nunique()
+            self.assertEqual(int(pair_splits.max()), 1)
+            duplicated = bundle.split_manifest.groupby("surface_pair_id").size()
+            duplicate_pair = str(duplicated[duplicated == 2].index[0])
+            duplicate_rows = bundle.split_manifest[bundle.split_manifest.surface_pair_id == duplicate_pair]
+            self.assertEqual(int(duplicate_rows["split"].nunique()), 1)
+
+            tampered = pd.read_csv(manifest_path)
+            tampered["source_sha256"] = "0" * 64
+            tampered.to_csv(manifest_path, index=False)
+            with self.assertRaisesRegex(ValueError, "SHA256 mismatch"):
+                create_train_val_bundle(replace(config, split_manifest_path=str(manifest_path)))
+
+    def test_zero_lp_preserves_lp_dimension_and_model_parameter_count(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = _write_vol_workbook(tmpdir)
+            text = create_train_val_bundle(
+                FilmWGANTrainConfig(data_path=str(workbook_path), text_embedding_mode="lp", train_ratio=2 / 3)
+            )
+            no_text = create_train_val_bundle(
+                FilmWGANTrainConfig(
+                    data_path=str(workbook_path),
+                    text_embedding_mode="zero_lp",
+                    normalize_text_embedding=False,
+                    train_ratio=2 / 3,
+                )
+            )
+            self.assertEqual(text.embedding_dim, no_text.embedding_dim)
+            self.assertEqual(no_text.embedding_dim, 3)
+            self.assertTrue(torch.all(next(iter(no_text.train_loader))[1] == 0.0))
+            kwargs = dict(
+                surface_height=2,
+                surface_width=3,
+                embedding_dim=text.embedding_dim,
+                noise_dim=4,
+                base_channels=8,
+                res_blocks=1,
+                text_hidden_dim=16,
+                text_out_dim=8,
+                fusion_hidden_dim=32,
+            )
+            text_model = FilmWGANGenerator(**kwargs)
+            no_text_model = FilmWGANGenerator(**kwargs)
+            self.assertEqual(
+                sum(parameter.numel() for parameter in text_model.parameters()),
+                sum(parameter.numel() for parameter in no_text_model.parameters()),
+            )
+
+    def test_permuted_text_is_reproducible_and_never_uses_same_pair(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = _write_grouped_vol_workbook(tmpdir)
+            config = FilmWGANTrainConfig(
+                data_path=str(workbook_path),
+                split_strategy="grouped_chronological",
+                train_ratio=0.5,
+                val_ratio=0.25,
+                test_ratio=0.25,
+                text_alignment_mode="permuted",
+                text_permutation_seed=123,
+                batch_size=8,
+                cuda=False,
+            )
+            first = create_train_val_bundle(config)
+            second = create_train_val_bundle(config)
+            mapping = build_text_permutation_mapping(first.split_manifest, seed=123)
+            self.assertEqual(len(mapping), len(first.split_manifest))
+            self.assertFalse(
+                bool((mapping["target_surface_pair_id"] == mapping["donor_surface_pair_id"]).any())
+            )
+            for first_items, second_items in (
+                (first.train_items, second.train_items),
+                (first.val_items, second.val_items),
+                (first.test_items, second.test_items),
+            ):
+                for left, right in zip(first_items, second_items):
+                    self.assertEqual(left.metadata["text_source_sample_id"], right.metadata["text_source_sample_id"])
+                    self.assertNotEqual(left.surface_pair_id, left.metadata["text_source_surface_pair_id"])
+
+
+class TestFilmWGANRQ1ModelModes(unittest.TestCase):
+    def test_concat_mode_skips_film_layers(self):
+        generator = FilmWGANGenerator(
+            surface_height=2,
+            surface_width=3,
+            embedding_dim=3,
+            noise_dim=4,
+            base_channels=8,
+            res_blocks=1,
+            text_hidden_dim=16,
+            text_out_dim=8,
+            fusion_hidden_dim=32,
+            conditioning_mode="concat",
+        )
+        with patch.object(generator.film1, "forward", wraps=generator.film1.forward) as film_forward:
+            generator(torch.randn(2, 1, 2, 3), torch.randn(2, 3), noise=torch.randn(2, 4))
+        film_forward.assert_not_called()
+
+    def test_deterministic_trainer_has_no_critic_or_noise(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = _write_vol_workbook(tmpdir)
+            config = FilmWGANTrainConfig(
+                data_path=str(workbook_path),
+                train_ratio=2 / 3,
+                forecast_mode="deterministic",
+                lambda_adv=0.0,
+                noise_dim=4,
+                gen_base_channels=8,
+                disc_base_channels=8,
+                gen_res_blocks=1,
+                disc_res_blocks=1,
+                text_hidden_dim=16,
+                text_out_dim=8,
+                fusion_hidden_dim=32,
+                batch_size=2,
+                cuda=False,
+                output_root=str(Path(tmpdir) / "outputs"),
+            )
+            trainer = FilmWGANTrainer(config)
+            trainer.dry_run()
+            self.assertIsNone(trainer.critic)
+            self.assertIsNone(trainer.critic_optimizer)
+            self.assertIsNotNone(trainer.generator)
+            self.assertEqual(int(trainer.generator.noise_dim), 0)
+
+            current, text, *_rest = next(iter(trainer.bundle.train_loader))
+            with torch.no_grad():
+                first = trainer.generator(current, text)
+                second = trainer.generator(current, text)
+            self.assertTrue(torch.equal(first, second))
+
+    def test_energy_score_matches_degenerate_rmse(self):
+        target = np.asarray([[1.0, 2.0], [3.0, 4.0]])
+        prediction = np.asarray([[2.0, 2.0], [3.0, 6.0]])
+        expected = float(np.sqrt(np.mean((prediction - target) ** 2)))
+        actual = energy_score(prediction[None, ...], target, np.asarray([1.0]))
+        self.assertAlmostEqual(actual, expected, places=10)
+
+    def test_degenerate_distribution_reports_zero_width_and_spread(self):
+        surface = np.full((2, 3), 0.2, dtype=np.float32)
+        summary = summarize_surface_scenarios(
+            surface_stack=surface[None, ...],
+            current_surface=surface,
+            target_surface=surface + 0.01,
+            strike_grid=[0.8, 1.0, 1.2],
+            maturity_days_grid=[7.0, 30.0],
+            reweight_beta_mode="fixed",
+            reweight_beta=0.0,
+            aggregation_mode="weighted_mean",
+            calibration_levels=[0.5, 0.8, 0.9],
+        )
+        metrics = summary["probabilistic_metrics"]
+        self.assertEqual(metrics["scenario_spread"], 0.0)
+        self.assertEqual(metrics["interval_width_90"], 0.0)
+        self.assertIn("calendar_violation_rate", summary["arbitrage_metrics"])
+
 
 class TestFilmWGANGenerateResultATMOutputs(unittest.TestCase):
     def test_extract_atm_short_value_uses_nearest_atm_and_shortest_maturity(self):
@@ -577,6 +798,7 @@ class TestFilmWGANGenerateResultATMOutputs(unittest.TestCase):
                 output_dir=str(sample_run_dir),
                 save_json=False,
                 save_plots=False,
+                save_full_atm_timeseries=False,
             )
 
             run_dir = FilmWGANSampler(config).sample()
@@ -599,6 +821,10 @@ class TestFilmWGANGenerateResultATMOutputs(unittest.TestCase):
             self.assertEqual(float(row["win_flag_vs_current"]), 0.0)
             self.assertEqual(float(row["short_atm_weighted_win_flag_vs_current"]), 0.0)
             self.assertEqual(float(row["atm_short_pure_win_flag_vs_current"]), 0.0)
+            metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["selected_samples"], 1)
+            self.assertEqual(metadata["full_samples"], 0)
+            self.assertEqual(metadata["available_samples"], 3)
 
 
 class TestFilmWGANTrainerMetrics(unittest.TestCase):

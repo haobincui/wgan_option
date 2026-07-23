@@ -89,7 +89,12 @@ def build_generate_arg_parser(*, description: str, default_config_path: str) -> 
     )
     parser.add_argument("--checkpoint", type=str, default=None, help="Explicit checkpoint path override.")
     parser.add_argument("--output-dir", type=str, default=None, help="Override generate_result subdirectory.")
-    parser.add_argument("--split", choices=["train", "val", "all"], default=None, help="Which split to sample.")
+    parser.add_argument(
+        "--split",
+        choices=["train", "val", "test", "all"],
+        default=None,
+        help="Which split to sample.",
+    )
     parser.add_argument(
         "--selection-mode",
         choices=["all", "head", "tail"],

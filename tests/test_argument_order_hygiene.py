@@ -116,19 +116,22 @@ class TestArgumentOrderHygiene(unittest.TestCase):
     def test_compatibility_cleanup_rules(self):
         violations = []
 
-        config_utils_text = (ROOT_DIR / "scripts/generate_surface/common/config_utils.py").read_text(encoding="utf-8")
+        config_utils_path = ROOT_DIR / "src/wgan_option/surface_generation/common/config_utils.py"
+        config_utils_text = config_utils_path.read_text(encoding="utf-8")
         if 'raw_data.get("surface_builder", raw_data)' in config_utils_text:
             violations.append(
-                "scripts/generate_surface/common/config_utils.py: flat-root `surface_builder` fallback is not allowed"
+                "src/wgan_option/surface_generation/common/config_utils.py: "
+                "flat-root `surface_builder` fallback is not allowed"
             )
         if "if section is None:\n        defaults = dict(root_supported)" in config_utils_text:
             violations.append(
-                "scripts/generate_surface/common/config_utils.py: missing section must not fall back to root-supported defaults"
+                "src/wgan_option/surface_generation/common/config_utils.py: "
+                "missing section must not fall back to root-supported defaults"
             )
 
         strict_bool_files = [
             ROOT_DIR / "src/wgan_option/config_parsing.py",
-            ROOT_DIR / "scripts/generate_surface/common/config_utils.py",
+            config_utils_path,
         ]
         banned_alias_tokens = ('"yes"', '"no"', '"on"', '"off"', '"1"', '"0"', '"y"', '"n"')
         for path in strict_bool_files:

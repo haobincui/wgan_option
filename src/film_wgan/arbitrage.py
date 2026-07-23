@@ -36,6 +36,38 @@ def butterfly_arbitrage_penalty(surface: torch.Tensor, strike_grid: torch.Tensor
     return torch.relu(-second_diff).mean(dim=(1, 2))
 
 
+def calendar_arbitrage_violation_rate(
+    surface: torch.Tensor,
+    strike_grid: torch.Tensor,
+    maturity_days_grid: torch.Tensor,
+    *,
+    tolerance: float = 1e-8,
+) -> torch.Tensor:
+    """Return the fraction of adjacent maturity constraints that are violated."""
+
+    call_prices = relative_call_prices(surface, strike_grid, maturity_days_grid)
+    if call_prices.size(1) < 2:
+        return torch.zeros(call_prices.size(0), device=call_prices.device)
+    violations = call_prices[:, :-1, :] - call_prices[:, 1:, :]
+    return (violations > float(tolerance)).to(dtype=surface.dtype).mean(dim=(1, 2))
+
+
+def butterfly_arbitrage_violation_rate(
+    surface: torch.Tensor,
+    strike_grid: torch.Tensor,
+    maturity_days_grid: torch.Tensor,
+    *,
+    tolerance: float = 1e-8,
+) -> torch.Tensor:
+    """Return the fraction of discrete strike-convexity constraints violated."""
+
+    call_prices = relative_call_prices(surface, strike_grid, maturity_days_grid)
+    if call_prices.size(2) < 3:
+        return torch.zeros(call_prices.size(0), device=call_prices.device)
+    second_diff = call_prices[:, :, 2:] - 2.0 * call_prices[:, :, 1:-1] + call_prices[:, :, :-2]
+    return (second_diff < -float(tolerance)).to(dtype=surface.dtype).mean(dim=(1, 2))
+
+
 def total_arbitrage_penalty(surface: torch.Tensor, strike_grid: torch.Tensor, maturity_days_grid: torch.Tensor) -> torch.Tensor:
     return calendar_arbitrage_penalty(surface, strike_grid, maturity_days_grid) + butterfly_arbitrage_penalty(
         surface,

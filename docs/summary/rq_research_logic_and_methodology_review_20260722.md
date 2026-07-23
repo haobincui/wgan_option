@@ -694,3 +694,486 @@ RQ3: When semantic text information matters most
 ```
 
 This sequence keeps `text embedding + FiLM-WGAN` as the methodological center of the chapter while assigning RQ1-RQ3 the progressive roles of **whether it works, why it works, and when it matters most**.
+
+## RQ1 Text/No-Text Input Diagnosis and Modification Plan (2026-07-23)
+
+### Purpose
+
+The strict RQ1 experiment shows that the current matched LP-text FiLM-WGAN
+does not achieve lower full-surface MAE than the same-architecture no-text
+model. The purpose of this section is to identify input-processing mechanisms
+that can explain this result and define a defensible modification plan.
+
+The objective is not to tune the model until a preferred conclusion appears.
+The objective is to give text a statistically and economically coherent input
+representation, then test its incremental value on data that have not been
+used to design these modifications.
+
+### Current Text and No-Text Input Paths
+
+Both models use the same:
+
+```text
+workbook
+surface rows
+surface-pair split manifest
+current and target surfaces
+forecast horizon
+generator and critic architecture
+random-seed set
+```
+
+Their input differences are:
+
+| Component | Text | No-text |
+|---|---|---|
+| `text_embedding_mode` | `lp` | `zero_lp` |
+| Raw text input | 1024-dimensional `lp_embedding` | `zeros_like(lp_embedding)` |
+| Text normalization | train-only coordinate-wise z-score | disabled |
+| Alignment | matched | not applicable |
+| Generator parameters | 40,484,000 | 40,484,000 |
+| Critic parameters | 15,885,457 | 15,885,457 |
+
+The `zero_lp` mode reads the LP column to recover its dimension and then
+returns a 1024-dimensional zero vector. This avoids the historical one-
+dimensional `none` control and ensures that text and no-text have the same
+formal architecture and parameter count.
+
+For the text model, train-only statistics are computed as:
+
+```text
+z_j = (embedding_j - train_mean_j) / train_std_j
+```
+
+The resulting vector enters the text encoders of both the generator and
+critic. It modulates convolution and residual features through FiLM and is
+also concatenated at the final generator/critic fusion layers.
+
+For the no-text model, the raw zero vector is not normalized. It passes through
+the same text encoder, producing a learned constant conditioning
+representation. Functionally, this acts like an unconditional model with
+additional learnable biases.
+
+The audit did not find a split, surface, dimensionality, or parameter-count
+mismatch between text and no-text. The main concerns are therefore the
+statistical meaning and preprocessing of the text input.
+
+### Empirical Input Diagnostics
+
+The current strict split contains:
+
+```text
+train = 2639 article rows / 2039 unique surface pairs
+val   =  533 article rows /  437 unique surface pairs
+test  =  539 article rows /  437 unique surface pairs
+```
+
+Within the training split:
+
+```text
+477 surface pairs contain multiple article rows
+1077 rows belong to these multi-article pairs
+600 rows are duplicates relative to a one-row-per-pair dataset
+```
+
+Across the full dataset:
+
+```text
+628 surface pairs contain multiple article rows
+624 of those pairs contain more than one distinct LP embedding
+maximum distinct texts for one surface pair = 7
+```
+
+The current model therefore receives relationships of the form:
+
+```text
+text_A -> target_surface_Y
+text_B -> target_surface_Y
+text_C -> target_surface_Y
+```
+
+The observed surface movement can reflect the joint information set, but each
+article is currently treated as an independent conditional input. This creates
+conflicting conditional examples for the text model. The no-text model sees
+duplicated copies of the same surface transition but does not receive
+conflicting conditioning vectors.
+
+The LP embeddings are already approximately unit-normalized:
+
+```text
+raw embedding L2 norm mean = 1.0
+```
+
+After coordinate-wise z-scoring:
+
+```text
+train normalized norm mean = 31.82
+val normalized norm mean   = 32.26
+test normalized norm mean  = 32.37
+```
+
+Coordinate-wise standardization equalizes high- and low-variance embedding
+dimensions and can distort the cosine geometry encoded by the upstream
+embedding model. This transformation affects text but not the all-zero
+no-text control.
+
+Finally, the model estimates a 1024-to-768-to-384 text encoder and a
+40.5-million-parameter generator from only 2039 independent training surface
+pairs. The no-text model has the same formal size, but its constant input makes
+its effective conditional complexity much lower.
+
+### Interpretation of the Existing RQ1 Evidence
+
+The current test evidence should be interpreted jointly:
+
+```text
+text vs no-text surface MAE:
+  no_text_minus_text = -0.000201
+  cluster-bootstrap 95% CI = [-0.000395, 0.000023]
+
+text vs no-text short-ATM MAE:
+  no_text_minus_text = -0.000307
+  Holm-adjusted p = 0.013
+
+text vs shuffled-text short-ATM MAE:
+  shuffled_minus_matched = +0.000171
+  Holm-adjusted p = 0.041
+```
+
+Matched text beating shuffled text in the short-ATM region indicates that
+correct text-surface alignment contains localized predictive information.
+However, text remaining worse than no-text indicates that the current
+representation and conditioning path introduce more noise or estimation error
+than the localized signal can offset.
+
+The appropriate diagnosis is therefore:
+
+```text
+text is not entirely uninformative;
+the current input unit, normalization, and conditioning strength are inefficient.
+```
+
+### Priority 0: One Surface Pair, One Text Input
+
+The first modification should change the training unit from article row to
+unique surface pair.
+
+For each `surface_pair_id`:
+
+1. Retain one current and target surface.
+2. Deduplicate articles using `article_id` or a stable text hash.
+3. Collect all text embeddings known by the current forecast timestamp.
+4. Pool the embeddings into one pair-level representation.
+5. Store `news_count`, `has_news`, article IDs, and pooling weights for audit.
+
+The first reproducible pooling baseline should be:
+
+```text
+pooled_text
+= L2_normalize(mean(L2_normalize(article_embedding_i)))
+```
+
+An attention or time-decay pooling method may be added later, but fixed mean
+pooling should remain the transparent baseline.
+
+The new effective split should contain:
+
+```text
+train = 2039 surface-pair samples
+val   =  437 surface-pair samples
+test  =  437 surface-pair samples
+```
+
+This aligns the training loss, normalization statistics, checkpoint metric,
+and final statistical unit.
+
+### Priority 1: Preserve Embedding Geometry
+
+Add explicit text preprocessing modes:
+
+```yaml
+text_preprocessing_mode: raw_l2 | train_pca | coordinate_zscore
+text_pca_components: 128
+text_pca_whiten: false
+```
+
+Recommended primary representation:
+
+```text
+pair-level pooled LP embedding
+-> train-only PCA
+-> 128 dimensions
+-> no whitening
+-> LayerNorm inside the text encoder
+```
+
+Candidate PCA dimensions:
+
+```text
+64, 128, 256
+```
+
+They must be selected using validation or inner rolling-origin folds only.
+PCA must be fitted on train pairs and archived with its mean, components,
+explained variance, input SHA256, and training pair IDs.
+
+The no-text control must use an all-zero vector in the same transformed output
+dimension. It should not fit or access a separate PCA transformation.
+
+### Priority 2: Nested Residual Text Conditioning
+
+The current text and no-text models are trained independently. A cleaner
+incremental-information design is:
+
+```text
+base_delta = no_text_backbone(current_surface, noise)
+text_delta = text_adapter(current_surface, pooled_text)
+forecast_delta = base_delta + gate * text_delta
+```
+
+The text adapter and gate should use zero initialization:
+
+```text
+initial text_delta = 0
+initial gate       = 0
+initial text forecast = no-text forecast
+```
+
+This makes the text model nested within the no-text model. Text must learn an
+incremental correction instead of relearning the entire surface dynamics.
+
+FiLM should initially be limited to:
+
+```text
+surface bottleneck
+decoder or output residual block
+```
+
+It should not modulate every encoder and residual layer in the first revised
+specification. A regularization term should constrain the conditioning:
+
+```text
+lambda_film * (||gamma||^2 + ||beta||^2)
+```
+
+An optional strike/maturity gate can allow the model to concentrate text
+effects in the short-ATM region, where the matched-versus-shuffled evidence is
+strongest, while retaining a global residual path for discovery.
+
+### Priority 3: Reduce Conditional Capacity
+
+Recommended initial configuration:
+
+```yaml
+text_pca_components: 128
+text_hidden_dim: 256
+text_out_dim: 64
+text_dropout: 0.30
+text_weight_decay: 1.0e-4
+film_locations:
+  - bottleneck
+  - decoder
+film_gate_initial_value: 0.0
+```
+
+This reduces the ratio of text parameters to independent training pairs. The
+same architecture, optimizer budget, and model-selection rule must be used for
+matched-text and shuffled-text variants.
+
+### Priority 4: Paired Two-Stage Training
+
+For each seed:
+
+1. Train the no-text backbone.
+2. Initialize the text model from that seed's no-text checkpoint.
+3. Freeze the surface backbone and train only the text adapter for 5-10 epochs.
+4. Jointly fine-tune with separate learning rates:
+
+   ```text
+   backbone learning rate = 2e-6
+   text adapter rate      = 2e-5
+   ```
+
+5. Select the checkpoint using validation surface MAE and report secondary
+   short-ATM and 7d ATM metrics without best-seed selection.
+
+This paired initialization reduces optimization noise and gives
+`no_text_error - text_error` a more direct interpretation as the value of the
+incremental text module.
+
+### Priority 5: Timestamp and Information-Set Audit
+
+Before retraining, verify for every pair:
+
+```text
+article publication time <= current forecast information cutoff
+current surface uses no post-cutoff option observations
+target surface starts after the cutoff
+no target-window news is included in the input
+```
+
+If multiple articles arrive in a short cluster, the pooling window must be
+pre-specified. Suggested diagnostics are:
+
+```text
+exact timestamp cluster
+previous 5-minute news set
+previous 15-minute news set
+```
+
+The five-minute forecast remains primary. Longer horizons may be reported as
+pre-specified robustness checks because semantic information may require more
+than five minutes to be reflected in a sparsely traded option surface.
+
+### Code Modification Map
+
+Reusable behavior belongs in `src/film_wgan/`:
+
+```text
+data.py
+  pair-level sample aggregation
+  article deduplication
+  pooling
+  train-only PCA transformation
+  has_text/news_count fields
+
+config.py
+  text preprocessing, pooling, PCA, gate, dropout, and staged-training fields
+
+models.py
+  zero-initialized residual text adapter
+  selective FiLM locations
+  explicit post-encoder text mask
+
+trainer.py
+  no-text checkpoint initialization
+  freeze/unfreeze schedule
+  separate optimizer groups
+  FiLM regularization and audit metrics
+
+inference.py
+  archived PCA loading
+  pair-level metadata passthrough
+  counterfactual matched/zero/shuffled diagnostics
+```
+
+Experiment orchestration belongs in `scripts/rq1/`:
+
+```text
+prepare pair-level workbook and manifests
+fit/archive train-only text transformer
+launch controlled variant matrix
+collect validation-selected checkpoints
+generate untouched outer-test forecasts
+build dependence-aware comparison tables
+```
+
+Tests must cover:
+
+```text
+one output row per surface pair
+no duplicate article in pooled text
+pooling uses only information available at forecast time
+PCA is fitted on train pairs only
+text and no-text transformed dimensions are identical
+no-text remains zero after preprocessing and post-encoder masking
+zero-gated text model initially reproduces the no-text model
+split manifests contain no pair overlap
+```
+
+### Controlled Development Matrix
+
+The development sequence should isolate each proposed change:
+
+| Variant | Pair-level pooling | Text preprocessing | Conditioning |
+|---|---|---|---|
+| A | No | coordinate z-score | current full FiLM |
+| B | Yes | raw L2 | current full FiLM |
+| C | Yes | PCA-128 | current full FiLM |
+| D | Yes | PCA-128 | reduced gated FiLM |
+| E | Yes | PCA-128 | no-text initialized residual FiLM |
+
+The primary controlled comparisons remain:
+
+```text
+matched text vs zero text
+matched text vs shuffled text
+gated FiLM vs concat
+stochastic model vs deterministic mean model
+```
+
+All five fixed seeds must be reported. Variant selection must use validation
+or inner rolling-origin folds rather than choosing the seed or configuration
+with the lowest final test MAE.
+
+### Required Validation Reset
+
+The `20260722-145823` test results have now been inspected and used to design
+these modifications. That test period can no longer serve as untouched
+confirmatory evidence for the revised model.
+
+The revised model requires one of:
+
+```text
+preferred: new later-period option and news data as a final holdout
+alternative: nested rolling-origin evaluation with untouched outer folds
+```
+
+The existing test can be retained as development evidence and for regression
+testing, but the paper must not claim that improvements found on this same
+period are independent out-of-sample confirmation.
+
+### Success Criteria and Claim Boundary
+
+The preregistered primary quantity remains:
+
+```text
+Delta_text = no_text_error - text_error
+```
+
+The revised text model supports the broad RQ1 claim only if:
+
+```text
+mean Delta_text > 0 for surface MAE
+dependence-aware confidence interval supports the improvement
+the direction is reasonably stable across seeds and outer time folds
+```
+
+If improvement appears only for short-ATM or 7d ATM metrics, the conclusion
+must be narrowed to localized text value rather than full-surface superiority.
+
+These modifications are designed to improve the chance that useful semantic
+information reduces MAE, but they do not guarantee that text will outperform
+no-text. A null or negative result after pair-level aggregation, geometry-
+preserving preprocessing, and nested conditioning would be evidence that the
+incremental five-minute text signal is too weak for the available sample and
+surface quality, not a reason to continue selecting configurations until the
+desired sign appears.
+
+## RQ1 Pair-Level Residual Implementation Status (2026-07-23 UTC)
+
+The pair-level LP + PCA-128 + residual FiLM design has now been implemented.
+The complete implementation record, verified fold counts, file map, commands,
+and claim boundary are in:
+
+```text
+docs/summary/20260723-133014/rq1_pair_text_residual_film_implementation.md
+```
+
+Two scope details supersede the earlier development notes above:
+
+```text
+development workflow:
+  4 rolling 2023 outer folds
+  seeds = 42, 202, 404
+  6 variants
+  total = 72 runs
+
+future confirmation:
+  new 2024+ news and option data
+  seeds = 42, 101, 202, 303, 404
+```
+
+The new workflow is isolated under `scripts/rq1_pair/`; the prior
+`scripts/rq1/` strict-split workflow and
+`rq1_incremental_text_20260722-145823` evidence remain unchanged for audit.

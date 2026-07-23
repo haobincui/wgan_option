@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -11,7 +12,12 @@ import numpy as np
 import torch
 
 from utils.training_paths import generate_result_dir, infer_run_dir_from_checkpoint
-from .arbitrage import reweight_scenarios, total_arbitrage_penalty
+from .arbitrage import (
+    butterfly_arbitrage_violation_rate,
+    calendar_arbitrage_violation_rate,
+    reweight_scenarios,
+    total_arbitrage_penalty,
+)
 from .config import FilmWGANSampleConfig, FilmWGANTrainConfig
 from .data import (
     FilmWGANNormalizationStats,
@@ -119,13 +125,24 @@ def generate_surface_scenarios(
         normalize_text_embedding=normalize_text_embedding,
     )
     height, width = sample.surface_shape
+    has_text = torch.tensor(
+        [float(sample.metadata.get("has_text", 1.0))],
+        dtype=torch.float32,
+        device=device,
+    )
     generated_surfaces: list[np.ndarray] = []
     with torch.no_grad():
-        for draw_idx in range(max(1, int(mc_samples))):
+        draw_count = 1 if int(noise_dim) <= 0 else max(1, int(mc_samples))
+        for draw_idx in range(draw_count):
             generator_noise = torch.Generator(device="cpu")
             generator_noise.manual_seed(int(seed) + int(sample.global_index) + draw_idx * 1000003)
             noise = torch.randn((1, int(noise_dim)), generator=generator_noise, dtype=torch.float32).to(device)
-            fake_delta_norm = generator(current_features, text_features, noise=noise)
+            fake_delta_norm = generator(
+                current_features,
+                text_features,
+                noise=noise,
+                has_text=has_text,
+            )
             fake_delta = (
                 denormalize_tensor(fake_delta_norm, normalization.delta_mean, normalization.delta_std)
                 if normalize_target_delta
@@ -162,6 +179,58 @@ def _weight_entropy(weights: np.ndarray) -> float:
     safe = np.clip(normalized, 1e-12, None)
     entropy = float(-np.sum(safe * np.log(safe)))
     return entropy / math.log(float(normalized.size))
+
+
+def energy_score(
+    surface_stack: np.ndarray,
+    target_surface: np.ndarray,
+    weights: np.ndarray,
+) -> float:
+    """Weighted multivariate energy score in per-grid-cell IV units."""
+
+    scenarios = np.asarray(surface_stack, dtype=np.float64).reshape(len(surface_stack), -1)
+    target = np.asarray(target_surface, dtype=np.float64).reshape(1, -1)
+    normalized_weights = np.asarray(weights, dtype=np.float64).reshape(-1)
+    scale = math.sqrt(float(scenarios.shape[1]))
+    target_distances = np.linalg.norm(scenarios - target, axis=1) / scale
+    squared_norms = np.sum(scenarios * scenarios, axis=1, keepdims=True)
+    squared_distances = np.maximum(squared_norms + squared_norms.T - 2.0 * scenarios @ scenarios.T, 0.0)
+    pair_distances = np.sqrt(squared_distances) / scale
+    return float(normalized_weights @ target_distances - 0.5 * normalized_weights @ pair_distances @ normalized_weights)
+
+
+def _probabilistic_metrics(
+    *,
+    surface_stack: np.ndarray,
+    target_surface: np.ndarray,
+    weights: np.ndarray,
+    calibration_levels: Sequence[float],
+) -> dict[str, float]:
+    flat_stack = np.asarray(surface_stack, dtype=np.float64).reshape(len(surface_stack), -1)
+    flat_target = np.asarray(target_surface, dtype=np.float64).reshape(-1)
+    weighted_mean = _weighted_mean(flat_stack, weights)
+    scale = math.sqrt(float(flat_stack.shape[1]))
+    spread = float(np.sum(weights * (np.linalg.norm(flat_stack - weighted_mean, axis=1) / scale)))
+    metrics: dict[str, float] = {
+        "energy_score": energy_score(flat_stack, flat_target, weights),
+        "scenario_spread": spread,
+        "effective_scenario_count": float(1.0 / np.sum(np.square(weights))),
+    }
+    calibration_errors: list[float] = []
+    for raw_level in calibration_levels:
+        level = float(raw_level)
+        lower_q = (1.0 - level) / 2.0
+        upper_q = 1.0 - lower_q
+        lower = _weighted_quantile(flat_stack, weights, lower_q)
+        upper = _weighted_quantile(flat_stack, weights, upper_q)
+        coverage = float(np.mean((flat_target >= lower) & (flat_target <= upper)))
+        width = float(np.mean(upper - lower))
+        suffix = str(int(round(level * 100.0)))
+        metrics[f"coverage_{suffix}"] = coverage
+        metrics[f"interval_width_{suffix}"] = width
+        calibration_errors.append(abs(coverage - level))
+    metrics["calibration_error"] = float(np.mean(calibration_errors)) if calibration_errors else 0.0
+    return metrics
 
 
 def _surface_metrics(predicted: np.ndarray, target: np.ndarray) -> dict[str, float]:
@@ -253,6 +322,8 @@ def summarize_surface_scenarios(
     reweight_beta: float,
     aggregation_mode: str,
     quantiles: Sequence[float] = (),
+    calibration_levels: Sequence[float] = (0.5, 0.8, 0.9),
+    arbitrage_violation_tolerance: float = 1e-8,
     recon_weights_surface: torch.Tensor | None = None,
     atm_short_mask_surface: torch.Tensor | None = None,
     residual_blend_alpha: float = 1.0,
@@ -279,6 +350,17 @@ def summarize_surface_scenarios(
         current_surface,
         residual_blend_alpha=float(residual_blend_alpha),
     )
+    blended_surface_stack = np.stack(
+        [
+            _apply_residual_blend(
+                scenario,
+                current_surface,
+                residual_blend_alpha=float(residual_blend_alpha),
+            )
+            for scenario in surface_stack
+        ],
+        axis=0,
+    ).astype(np.float64)
     quantile_surfaces = {
         f"q_{float(quantile):.2f}": _apply_residual_blend(
             _weighted_quantile(flat_surface_stack, weights, float(quantile))
@@ -298,6 +380,55 @@ def summarize_surface_scenarios(
         "max_abs_gap_vs_current": metrics["max_abs"] - current_metrics["max_abs"],
         "win_flag_vs_current": 1.0 if metrics["mae"] < current_metrics["mae"] else 0.0,
     }
+    strike_tensor = torch.tensor(np.asarray(strike_grid, dtype=np.float32), dtype=torch.float32)
+    maturity_tensor = torch.tensor(np.asarray(maturity_days_grid, dtype=np.float32), dtype=torch.float32)
+    scenario_tensor = torch.tensor(blended_surface_stack, dtype=torch.float32)
+    aggregate_tensor = torch.tensor(blended_surface[None, ...], dtype=torch.float32)
+    scenario_calendar_rates = (
+        calendar_arbitrage_violation_rate(
+            scenario_tensor,
+            strike_tensor,
+            maturity_tensor,
+            tolerance=float(arbitrage_violation_tolerance),
+        )
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float64)
+    )
+    scenario_butterfly_rates = (
+        butterfly_arbitrage_violation_rate(
+            scenario_tensor,
+            strike_tensor,
+            maturity_tensor,
+            tolerance=float(arbitrage_violation_tolerance),
+        )
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float64)
+    )
+    arbitrage_metrics = {
+        "calendar_violation_rate": float(
+            calendar_arbitrage_violation_rate(
+                aggregate_tensor,
+                strike_tensor,
+                maturity_tensor,
+                tolerance=float(arbitrage_violation_tolerance),
+            )[0]
+        ),
+        "butterfly_violation_rate": float(
+            butterfly_arbitrage_violation_rate(
+                aggregate_tensor,
+                strike_tensor,
+                maturity_tensor,
+                tolerance=float(arbitrage_violation_tolerance),
+            )[0]
+        ),
+        "scenario_calendar_violation_rate": float(weights @ scenario_calendar_rates),
+        "scenario_butterfly_violation_rate": float(weights @ scenario_butterfly_rates),
+        "violation_tolerance": float(arbitrage_violation_tolerance),
+    }
     return {
         "generated_surface": blended_surface.astype(float).tolist(),
         "quantile_surfaces": quantile_surfaces,
@@ -311,6 +442,13 @@ def summarize_surface_scenarios(
         "current_metrics": current_metrics,
         "generated_current_metrics": generated_current_metrics,
         "comparison_metrics": comparison_metrics,
+        "probabilistic_metrics": _probabilistic_metrics(
+            surface_stack=blended_surface_stack,
+            target_surface=target_surface,
+            weights=weights,
+            calibration_levels=calibration_levels,
+        ),
+        "arbitrage_metrics": arbitrage_metrics,
         "short_atm_metrics": _short_atm_metrics(
             generated_surface=blended_surface,
             current_surface=current_surface,
@@ -334,6 +472,8 @@ def build_sample_payload(
     reweight_beta: float,
     aggregation_mode: str,
     quantiles: Sequence[float],
+    calibration_levels: Sequence[float],
+    arbitrage_violation_tolerance: float,
     checkpoint_path: str,
     split: str,
     selection_mode: str,
@@ -366,6 +506,8 @@ def build_sample_payload(
         reweight_beta=reweight_beta,
         aggregation_mode=aggregation_mode,
         quantiles=quantiles,
+        calibration_levels=calibration_levels,
+        arbitrage_violation_tolerance=float(arbitrage_violation_tolerance),
         recon_weights_surface=recon_weights_surface,
         atm_short_mask_surface=atm_short_mask_surface,
         residual_blend_alpha=float(residual_blend_alpha),
@@ -374,6 +516,7 @@ def build_sample_payload(
         "sample_id": sample.sample_id,
         "mode": "film_wgan",
         "global_index": int(sample.global_index),
+        "surface_pair_id": sample.surface_pair_id,
         "news_timestamp_utc": sample.timestamp,
         "current_snapshot_time_utc": sample.current_snapshot_time_utc,
         "target_snapshot_time_utc": sample.target_snapshot_time_utc,
@@ -394,6 +537,8 @@ def build_sample_payload(
         "current_metrics": summary["current_metrics"],
         "generated_current_metrics": summary["generated_current_metrics"],
         "comparison_metrics": summary["comparison_metrics"],
+        "probabilistic_metrics": summary["probabilistic_metrics"],
+        "arbitrage_metrics": summary["arbitrage_metrics"],
         "short_atm_metrics": summary["short_atm_metrics"],
         "metadata": {
             "pair_quality_label": sample.metadata.get("pair_quality_label", ""),
@@ -403,6 +548,15 @@ def build_sample_payload(
             "selection_mode": str(selection_mode),
             "aggregation_mode": str(aggregation_mode),
             "residual_blend_alpha": float(residual_blend_alpha),
+            "text_alignment_mode": sample.metadata.get("text_alignment_mode", "matched"),
+            "text_source_sample_id": sample.metadata.get("text_source_sample_id", sample.sample_id),
+            "text_source_surface_pair_id": sample.metadata.get("text_source_surface_pair_id", sample.surface_pair_id),
+            "source_sample_ids": sample.metadata.get("source_sample_ids", [sample.sample_id]),
+            "article_ids": sample.metadata.get("article_ids", []),
+            "news_count": int(sample.metadata.get("news_count", 1)),
+            "unique_embedding_count": int(sample.metadata.get("unique_embedding_count", 1)),
+            "pooling_mode": sample.metadata.get("pooling_mode", ""),
+            "has_text": float(sample.metadata.get("has_text", 1.0)),
         },
     }
 
@@ -449,6 +603,7 @@ def _build_atm_vol_row(
     return {
         "sample_id": sample.sample_id,
         "global_index": int(sample.global_index),
+        "surface_pair_id": sample.surface_pair_id,
         "news_timestamp_utc": sample.timestamp,
         "current_snapshot_time_utc": sample.current_snapshot_time_utc,
         "target_snapshot_time_utc": sample.target_snapshot_time_utc,
@@ -480,16 +635,21 @@ class FilmWGANSampler:
         checkpoint = load_checkpoint(self.config.checkpoint_path, self.device)
         train_config = FilmWGANTrainConfig(**checkpoint["config"])
         surface_shape = tuple(int(v) for v in checkpoint["surface_shape"])
+        forecast_mode = str(checkpoint.get("forecast_mode", train_config.forecast_mode)).strip().lower()
+        conditioning_mode = str(checkpoint.get("conditioning_mode", train_config.conditioning_mode)).strip().lower()
         generator = FilmWGANGenerator(
             surface_height=surface_shape[0],
             surface_width=surface_shape[1],
             embedding_dim=int(checkpoint["embedding_dim"]),
-            noise_dim=int(train_config.noise_dim),
+            noise_dim=0 if forecast_mode == "deterministic" else int(train_config.noise_dim),
             base_channels=int(train_config.gen_base_channels),
             res_blocks=int(train_config.gen_res_blocks),
             text_hidden_dim=int(train_config.text_hidden_dim),
             text_out_dim=int(train_config.text_out_dim),
             fusion_hidden_dim=int(train_config.fusion_hidden_dim),
+            conditioning_mode=conditioning_mode,
+            text_dropout=float(train_config.text_dropout),
+            text_gate_initial_value=float(train_config.text_gate_initial_value),
         ).to(self.device)
         generator.load_state_dict(checkpoint["generator_state_dict"])
         generator.eval()
@@ -538,7 +698,7 @@ class FilmWGANSampler:
                     generator=generator,
                     sample=sample,
                     normalization=normalization,
-                    noise_dim=int(train_config.noise_dim),
+                    noise_dim=int(generator.noise_dim),
                     mc_samples=int(self.config.mc_samples),
                     seed=int(self.config.seed),
                     device=self.device,
@@ -546,6 +706,8 @@ class FilmWGANSampler:
                     reweight_beta=float(self.config.reweight_beta),
                     aggregation_mode=self.config.aggregation_mode,
                     quantiles=self.config.quantiles,
+                    calibration_levels=self.config.calibration_levels,
+                    arbitrage_violation_tolerance=float(self.config.arbitrage_violation_tolerance),
                     checkpoint_path=str(self.config.checkpoint_path),
                     split=str(self.config.split),
                     selection_mode=str(self.config.selection_mode),
@@ -556,6 +718,12 @@ class FilmWGANSampler:
                     normalize_target_delta=bool(train_config.normalize_target_delta),
                     residual_blend_alpha=float(self.config.residual_blend_alpha),
                 )
+                payload_cache[key]["metadata"].update(
+                    {
+                        "forecast_mode": str(train_config.forecast_mode),
+                        "conditioning_mode": str(train_config.conditioning_mode),
+                    }
+                )
             return payload_cache[key]
 
         for sample in selected_samples:
@@ -565,17 +733,18 @@ class FilmWGANSampler:
                 write_json(json_path, payload)
             if bool(self.config.save_plots):
                 plot_film_wgan_payload(payload, self.plots_dir / f"{sample.global_index:04d}_{sample.sample_id}.png")
-            sample_atm_rows.append(
-                _build_atm_vol_row(
-                    sample=sample,
-                    payload=payload,
-                    checkpoint_path=self.config.checkpoint_path,
-                )
+            atm_row = _build_atm_vol_row(
+                sample=sample,
+                payload=payload,
+                checkpoint_path=self.config.checkpoint_path,
             )
+            sample_atm_rows.append(atm_row)
             summary_rows.append(
                 {
                     "sample_id": sample.sample_id,
                     "global_index": int(sample.global_index),
+                    "surface_pair_id": sample.surface_pair_id,
+                    "split": str(self.config.split),
                     "news_timestamp_utc": sample.timestamp,
                     "current_snapshot_time_utc": sample.current_snapshot_time_utc,
                     "target_snapshot_time_utc": sample.target_snapshot_time_utc,
@@ -584,12 +753,25 @@ class FilmWGANSampler:
                     "news_cluster_id": sample.metadata.get("news_cluster_id", ""),
                     "quiet_buffer_minutes": sample.metadata.get("quiet_buffer_minutes", ""),
                     "quiet_grid_minutes": sample.metadata.get("quiet_grid_minutes", ""),
+                    "source_sample_ids": json.dumps(
+                        sample.metadata.get("source_sample_ids", [sample.sample_id]),
+                        ensure_ascii=True,
+                    ),
+                    "article_ids": json.dumps(
+                        sample.metadata.get("article_ids", []),
+                        ensure_ascii=True,
+                    ),
+                    "news_count": int(sample.metadata.get("news_count", 1)),
+                    "unique_embedding_count": int(sample.metadata.get("unique_embedding_count", 1)),
+                    "pooling_mode": sample.metadata.get("pooling_mode", ""),
+                    "has_text_condition": float(sample.metadata.get("has_text", 1.0)),
                     "effective_beta": float(payload["effective_beta"]),
                     "weight_entropy": float(payload["weight_entropy"]),
                     "penalty_mean": float(payload["penalty_mean"]),
                     "penalty_std": float(payload["penalty_std"]),
                     "residual_blend_alpha": float(payload["metadata"]["residual_blend_alpha"]),
                     "mae": float(payload["metrics"]["mae"]),
+                    "surface_mae": float(payload["metrics"]["mae"]),
                     "rmse": float(payload["metrics"]["rmse"]),
                     "max_abs": float(payload["metrics"]["max_abs"]),
                     "current_mae": float(payload["current_metrics"]["mae"]),
@@ -608,6 +790,7 @@ class FilmWGANSampler:
                         payload["short_atm_metrics"]["short_atm_weighted_win_flag_vs_current"]
                     ),
                     "atm_short_pure_mae": float(payload["short_atm_metrics"]["atm_short_pure_mae"]),
+                    "short_atm_mae": float(payload["short_atm_metrics"]["atm_short_pure_mae"]),
                     "current_atm_short_pure_mae": float(payload["short_atm_metrics"]["current_atm_short_pure_mae"]),
                     "atm_short_pure_mae_gap_vs_current": float(
                         payload["short_atm_metrics"]["atm_short_pure_mae_gap_vs_current"]
@@ -616,6 +799,38 @@ class FilmWGANSampler:
                         payload["short_atm_metrics"]["atm_short_pure_win_flag_vs_current"]
                     ),
                     "generated_current_mae": float(payload["generated_current_metrics"]["mae"]),
+                    "atm7_abs_err": float(atm_row["generated_target_abs_error"]),
+                    "current_atm7_abs_err": float(atm_row["current_target_abs_error"]),
+                    "energy_score": float(payload["probabilistic_metrics"]["energy_score"]),
+                    "scenario_spread": float(payload["probabilistic_metrics"]["scenario_spread"]),
+                    "effective_scenario_count": float(
+                        payload["probabilistic_metrics"]["effective_scenario_count"]
+                    ),
+                    "coverage_50": float(payload["probabilistic_metrics"].get("coverage_50", 0.0)),
+                    "coverage_80": float(payload["probabilistic_metrics"].get("coverage_80", 0.0)),
+                    "coverage_90": float(payload["probabilistic_metrics"].get("coverage_90", 0.0)),
+                    "interval_width_50": float(
+                        payload["probabilistic_metrics"].get("interval_width_50", 0.0)
+                    ),
+                    "interval_width_80": float(
+                        payload["probabilistic_metrics"].get("interval_width_80", 0.0)
+                    ),
+                    "interval_width_90": float(
+                        payload["probabilistic_metrics"].get("interval_width_90", 0.0)
+                    ),
+                    "calibration_error": float(payload["probabilistic_metrics"]["calibration_error"]),
+                    "calendar_violation_rate": float(payload["arbitrage_metrics"]["calendar_violation_rate"]),
+                    "butterfly_violation_rate": float(payload["arbitrage_metrics"]["butterfly_violation_rate"]),
+                    "scenario_calendar_violation_rate": float(
+                        payload["arbitrage_metrics"]["scenario_calendar_violation_rate"]
+                    ),
+                    "scenario_butterfly_violation_rate": float(
+                        payload["arbitrage_metrics"]["scenario_butterfly_violation_rate"]
+                    ),
+                    "text_alignment_mode": payload["metadata"]["text_alignment_mode"],
+                    "text_source_sample_id": payload["metadata"]["text_source_sample_id"],
+                    "forecast_mode": payload["metadata"]["forecast_mode"],
+                    "conditioning_mode": payload["metadata"]["conditioning_mode"],
                 }
             )
         write_csv(self.run_dir / "summary.csv", summary_rows)
@@ -626,35 +841,39 @@ class FilmWGANSampler:
                 key=lambda row: (str(row.get("news_timestamp_utc", "")), int(row.get("global_index", -1))),
             )
 
-        full_atm_rows = [
-            _build_atm_vol_row(
-                sample=sample,
-                payload=_payload_for_sample(sample),
-                checkpoint_path=self.config.checkpoint_path,
-            )
-            for sample in all_samples
-        ]
         ordered_sample_rows = _ordered_rows(sample_atm_rows)
-        ordered_full_rows = _ordered_rows(full_atm_rows)
         write_csv(atm_vol_dir / "film_wgan_best_atm_vol_timeseries_sample.csv", ordered_sample_rows)
-        write_csv(atm_vol_dir / "film_wgan_best_atm_vol_timeseries_full.csv", ordered_full_rows)
+        ordered_full_rows: list[dict[str, Any]] = []
+        if bool(self.config.save_full_atm_timeseries):
+            full_atm_rows = [
+                _build_atm_vol_row(
+                    sample=sample,
+                    payload=_payload_for_sample(sample),
+                    checkpoint_path=self.config.checkpoint_path,
+                )
+                for sample in all_samples
+            ]
+            ordered_full_rows = _ordered_rows(full_atm_rows)
+            write_csv(atm_vol_dir / "film_wgan_best_atm_vol_timeseries_full.csv", ordered_full_rows)
         if bool(self.config.save_plots):
             plot_atm_vol_timeseries(
                 ordered_sample_rows,
                 atm_vol_dir / "film_wgan_best_atm_vol_timeseries_sample.png",
                 series_scope="sample",
             )
-            plot_atm_vol_timeseries(
-                ordered_full_rows,
-                atm_vol_dir / "film_wgan_best_atm_vol_timeseries_full.png",
-                series_scope="full",
-            )
+            if ordered_full_rows:
+                plot_atm_vol_timeseries(
+                    ordered_full_rows,
+                    atm_vol_dir / "film_wgan_best_atm_vol_timeseries_full.png",
+                    series_scope="full",
+                )
         write_json(
             self.run_dir / "run_metadata.json",
             {
                 "checkpoint_path": str(self.config.checkpoint_path),
                 "selected_samples": len(summary_rows),
                 "full_samples": len(ordered_full_rows),
+                "available_samples": len(all_samples),
                 "config": asdict(self.config),
             },
         )

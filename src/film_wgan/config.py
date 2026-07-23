@@ -24,6 +24,19 @@ class FilmWGANTrainConfig:
     sheet_name: str = "gan_input_ready"
     text_embedding_mode: str = "lp"
     train_ratio: float = 0.8
+    val_ratio: float = 0.2
+    test_ratio: float = 0.0
+    split_strategy: str = "legacy_row"
+    split_manifest_path: str = ""
+    text_alignment_mode: str = "matched"
+    text_permutation_seed: int = 20260722
+    sample_unit: str = "article_row"
+    news_workbook_path: str = "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx"
+    text_pooling_mode: str = "mean_l2"
+    text_preprocessing_mode: str = "coordinate_zscore"
+    text_transform_path: str = ""
+    text_pca_components: int = 128
+    text_pca_whiten: bool = False
     min_samples_for_training: int = 2
 
     normalize_current_surface: bool = True
@@ -38,10 +51,17 @@ class FilmWGANTrainConfig:
     text_hidden_dim: int = 256
     text_out_dim: int = 128
     fusion_hidden_dim: int = 512
+    forecast_mode: str = "stochastic_wgan"
+    conditioning_mode: str = "film"
+    critic_conditioning_mode: str = "inherit"
+    text_dropout: float = 0.0
+    text_gate_initial_value: float = 0.0
 
     learning_rate: float = 1e-4
     generator_learning_rate: float = 1e-4
     discriminator_learning_rate: float = 1e-4
+    backbone_learning_rate: float = 2e-6
+    text_adapter_learning_rate: float = 2e-5
     beta_1: float = 0.5
     beta_2: float = 0.9
     critic_iter: int = 5
@@ -50,6 +70,8 @@ class FilmWGANTrainConfig:
     batch_size: int = 32
 
     lambda_adv: float = 1.0
+    lambda_film: float = 0.0
+    lambda_mismatch: float = 0.0
     adv_warmup_epochs: int = 0
     lambda_calendar: float = 2.0
     lambda_butterfly: float = 2.0
@@ -73,6 +95,8 @@ class FilmWGANTrainConfig:
     eval_reweight_beta_mode: str = "fixed"
     eval_reweight_beta: float = 25.0
     eval_aggregation_mode: str = "weighted_mean"
+    eval_calibration_levels: list[float] = field(default_factory=lambda: [0.5, 0.8, 0.9])
+    arbitrage_violation_tolerance: float = 1e-8
     checkpoint_metric: str = "val_mae_gap_vs_current"
     extra_checkpoint_metrics: list[str] = field(default_factory=list)
     checkpoint_warmup_epochs: int = 10
@@ -88,6 +112,8 @@ class FilmWGANTrainConfig:
     output_root: str = ""
     checkpoints_path: str = ""
     metrics_path: str = ""
+    initial_generator_checkpoint_path: str = ""
+    freeze_backbone_epochs: int = 0
     save_every: int = 10
 
 
@@ -99,6 +125,19 @@ class FilmWGANSampleConfig:
     sheet_name: str = "gan_input_ready"
     text_embedding_mode: str = "lp"
     train_ratio: float = 0.8
+    val_ratio: float = 0.2
+    test_ratio: float = 0.0
+    split_strategy: str = "legacy_row"
+    split_manifest_path: str = ""
+    text_alignment_mode: str = "matched"
+    text_permutation_seed: int = 20260722
+    sample_unit: str = "article_row"
+    news_workbook_path: str = "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx"
+    text_pooling_mode: str = "mean_l2"
+    text_preprocessing_mode: str = "coordinate_zscore"
+    text_transform_path: str = ""
+    text_pca_components: int = 128
+    text_pca_whiten: bool = False
 
     checkpoint_path: str = ""
     seed: int = 42
@@ -108,6 +147,8 @@ class FilmWGANSampleConfig:
     reweight_beta_mode: str = "fixed"
     reweight_beta: float = 25.0
     quantiles: list[float] | tuple[float, ...] = (0.05, 0.5, 0.95)
+    calibration_levels: list[float] | tuple[float, ...] = (0.5, 0.8, 0.9)
+    arbitrage_violation_tolerance: float = 1e-8
 
     split: str = "val"
     selection_mode: str = "all"
@@ -117,6 +158,7 @@ class FilmWGANSampleConfig:
     output_dir: str = ""
     save_json: bool = True
     save_plots: bool = True
+    save_full_atm_timeseries: bool = True
 
 
 _TRAIN_DEFAULTS = FilmWGANTrainConfig()
@@ -128,9 +170,114 @@ _SHARED_GENERATE_FIELDS = {
     "sheet_name",
     "text_embedding_mode",
     "train_ratio",
+    "val_ratio",
+    "test_ratio",
+    "split_strategy",
+    "split_manifest_path",
+    "text_alignment_mode",
+    "text_permutation_seed",
+    "sample_unit",
+    "news_workbook_path",
+    "text_pooling_mode",
+    "text_preprocessing_mode",
+    "text_transform_path",
+    "text_pca_components",
+    "text_pca_whiten",
     "seed",
     "cuda",
 }
+
+
+def _validate_split_fields(config: FilmWGANTrainConfig | FilmWGANSampleConfig) -> None:
+    strategy = str(config.split_strategy).strip().lower()
+    if strategy not in {"legacy_row", "grouped_chronological"}:
+        raise ValueError(
+            "split_strategy must be one of ['legacy_row', 'grouped_chronological'], "
+            f"got: {config.split_strategy}"
+        )
+    if strategy == "legacy_row":
+        if not 0.0 < float(config.train_ratio) < 1.0:
+            raise ValueError("legacy_row train_ratio must be between 0 and 1.")
+        return
+    ratios = (float(config.train_ratio), float(config.val_ratio), float(config.test_ratio))
+    if any(value <= 0.0 for value in ratios):
+        raise ValueError("grouped_chronological train/val/test ratios must all be positive.")
+    if abs(sum(ratios) - 1.0) > 1e-9:
+        raise ValueError(f"grouped_chronological train/val/test ratios must sum to 1, got {ratios}.")
+
+
+def _validate_common_fields(config: FilmWGANTrainConfig | FilmWGANSampleConfig) -> None:
+    _validate_split_fields(config)
+    alignment = str(config.text_alignment_mode).strip().lower()
+    if alignment not in {"matched", "permuted"}:
+        raise ValueError("text_alignment_mode must be one of ['matched', 'permuted'].")
+    sample_unit = str(config.sample_unit).strip().lower()
+    if sample_unit not in {"article_row", "surface_pair"}:
+        raise ValueError("sample_unit must be one of ['article_row', 'surface_pair'].")
+    pooling_mode = str(config.text_pooling_mode).strip().lower()
+    if pooling_mode != "mean_l2":
+        raise ValueError("text_pooling_mode currently supports only 'mean_l2'.")
+    preprocessing_mode = str(config.text_preprocessing_mode).strip().lower()
+    if preprocessing_mode not in {"raw_l2", "pca", "coordinate_zscore"}:
+        raise ValueError(
+            "text_preprocessing_mode must be one of ['raw_l2', 'pca', 'coordinate_zscore']."
+        )
+    if int(config.text_pca_components) <= 0:
+        raise ValueError("text_pca_components must be positive.")
+    if preprocessing_mode == "pca" and bool(getattr(config, "normalize_text_embedding", False)):
+        raise ValueError(
+            "text_preprocessing_mode=pca requires normalize_text_embedding=false; "
+            "PCA coordinates must not be z-scored again."
+        )
+    if str(config.text_embedding_mode).strip().lower().replace("-", "_") == "zero_lp" and bool(
+        getattr(config, "normalize_text_embedding", False)
+    ):
+        raise ValueError("text_embedding_mode=zero_lp requires normalize_text_embedding=false.")
+
+
+def _validate_train_fields(config: FilmWGANTrainConfig) -> None:
+    _validate_common_fields(config)
+    forecast_mode = str(config.forecast_mode).strip().lower()
+    conditioning_mode = str(config.conditioning_mode).strip().lower()
+    if forecast_mode not in {"stochastic_wgan", "deterministic"}:
+        raise ValueError("forecast_mode must be one of ['stochastic_wgan', 'deterministic'].")
+    if conditioning_mode not in {"film", "concat", "residual_film"}:
+        raise ValueError("conditioning_mode must be one of ['film', 'concat', 'residual_film'].")
+    critic_conditioning_mode = str(config.critic_conditioning_mode).strip().lower()
+    if critic_conditioning_mode not in {"inherit", "film", "concat", "projection"}:
+        raise ValueError(
+            "critic_conditioning_mode must be one of ['inherit', 'film', 'concat', 'projection']."
+        )
+    if conditioning_mode == "residual_film" and critic_conditioning_mode != "projection":
+        raise ValueError("conditioning_mode=residual_film requires critic_conditioning_mode=projection.")
+    if str(config.initial_generator_checkpoint_path).strip() and conditioning_mode != "residual_film":
+        raise ValueError("initial_generator_checkpoint_path is supported only for residual_film.")
+    if not 0.0 <= float(config.text_dropout) < 1.0:
+        raise ValueError("text_dropout must be in [0, 1).")
+    if float(config.lambda_film) < 0.0 or float(config.lambda_mismatch) < 0.0:
+        raise ValueError("lambda_film and lambda_mismatch must be non-negative.")
+    if int(config.freeze_backbone_epochs) < 0:
+        raise ValueError("freeze_backbone_epochs must be non-negative.")
+    if float(config.backbone_learning_rate) <= 0.0 or float(config.text_adapter_learning_rate) <= 0.0:
+        raise ValueError("backbone_learning_rate and text_adapter_learning_rate must be positive.")
+    if forecast_mode == "deterministic" and abs(float(config.lambda_adv)) > 1e-12:
+        raise ValueError("forecast_mode=deterministic requires lambda_adv=0.")
+    levels = [float(value) for value in config.eval_calibration_levels]
+    if any(not 0.0 < value < 1.0 for value in levels):
+        raise ValueError("eval_calibration_levels must contain values strictly between 0 and 1.")
+    if float(config.arbitrage_violation_tolerance) < 0.0:
+        raise ValueError("arbitrage_violation_tolerance must be non-negative.")
+
+
+def _validate_sample_fields(config: FilmWGANSampleConfig) -> None:
+    _validate_common_fields(config)
+    if str(config.split).strip().lower() not in {"train", "val", "test", "all"}:
+        raise ValueError("split must be one of ['train', 'val', 'test', 'all'].")
+    levels = [float(value) for value in config.calibration_levels]
+    if any(not 0.0 < value < 1.0 for value in levels):
+        raise ValueError("calibration_levels must contain values strictly between 0 and 1.")
+    if float(config.arbitrage_violation_tolerance) < 0.0:
+        raise ValueError("arbitrage_violation_tolerance must be non-negative.")
 
 
 def config_to_dict(config: Any) -> Dict[str, Any]:
@@ -233,6 +380,7 @@ def build_sample_config(
         loaded_values.update(dict(overrides))
 
     config = FilmWGANSampleConfig(**loaded_values)
+    _validate_sample_fields(config)
     if checkpoint_path not in {None, ""}:
         config = replace(config, checkpoint_path=str(checkpoint_path))
     if run_dir is not None:
@@ -293,6 +441,7 @@ def load_train_config(
         config.discriminator_learning_rate = float(config.learning_rate)
     if not str(config.output_root).strip():
         config.output_root = default_train_output_root(config.data_path)
+    _validate_train_fields(config)
     return config
 
 
