@@ -5,10 +5,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 EXPERIMENT_ROOT="${EXPERIMENT_ROOT:-}"
 if [[ -z "${EXPERIMENT_ROOT}" ]]; then
-  EXPERIMENT_ROOT="$(find outputs/experiments -maxdepth 1 -type d -name 'rq1_pair_text_raw_vol_rolling_*' -printf '%p\n' | sort | tail -n 1)"
+  EXPERIMENT_ROOT="$(find outputs/experiments -maxdepth 1 -type d -name 'rq1_pair_text_raw_vol_continuation_*' -printf '%p\n' | sort | tail -n 1)"
 fi
 if [[ -z "${EXPERIMENT_ROOT}" || ! -d "${EXPERIMENT_ROOT}" ]]; then
-  echo "No prepared raw-vol RQ1 pair experiment found. Run scripts/rq1_pair/prepare_experiment.sh first." >&2
+  echo "No prepared raw-vol RQ1 continuation experiment found. Run scripts/rq1_pair/prepare_experiment.sh first." >&2
   exit 1
 fi
 

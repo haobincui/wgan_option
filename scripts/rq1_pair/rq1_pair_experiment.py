@@ -41,18 +41,37 @@ DEFAULT_WORKBOOK = (
 )
 DEFAULT_NEWS_WORKBOOK = ROOT / "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx"
 SUMMARY_DOCUMENT = ROOT / "docs/summary/rq_research_logic_and_methodology_review_20260722.md"
-EXPERIMENT_PREFIX = "rq1_pair_text_raw_vol_rolling_"
+EXPERIMENT_PREFIX = "rq1_pair_text_raw_vol_continuation_"
 EXPECTED_SURFACE_MODEL = "raw"
 
 SEEDS = (42, 202, 404)
+PARENT_VARIANT = "pair_pca_no_text_residual"
+CONTINUATION_VARIANT = "pair_pca_no_text_continued"
+TEXT_RESIDUAL_VARIANT = "pair_pca_text_residual_pretrained"
+SHUFFLED_RESIDUAL_VARIANT = "pair_pca_shuffled_residual_pretrained"
+PAIRED_STAGE_B_VARIANTS = (
+    CONTINUATION_VARIANT,
+    TEXT_RESIDUAL_VARIANT,
+    SHUFFLED_RESIDUAL_VARIANT,
+)
 VARIANTS = (
-    "pair_pca_no_text_residual",
-    "pair_pca_text_residual_pretrained",
-    "pair_pca_shuffled_residual_pretrained",
+    PARENT_VARIANT,
+    CONTINUATION_VARIANT,
+    TEXT_RESIDUAL_VARIANT,
+    SHUFFLED_RESIDUAL_VARIANT,
     "pair_pca_text_full_film",
     "pair_pca_text_concat",
     "pair_l2_text_full_film",
 )
+VARIANT_STAGES = {
+    PARENT_VARIANT: "stage_a_parent",
+    CONTINUATION_VARIANT: "stage_b_continuation_control",
+    TEXT_RESIDUAL_VARIANT: "stage_b_text_treatment",
+    SHUFFLED_RESIDUAL_VARIANT: "stage_b_shuffled_placebo",
+    "pair_pca_text_full_film": "single_stage_ablation",
+    "pair_pca_text_concat": "single_stage_ablation",
+    "pair_l2_text_full_film": "single_stage_ablation",
+}
 FOLDS = {
     "2023Q1": {
         "train_end": "2022Q3",
@@ -93,11 +112,13 @@ PROBABILISTIC_METRICS = (
 )
 FINANCIAL_METRICS = ("calendar_violation_rate", "butterfly_violation_rate")
 CONTRASTS = (
-    ("pair_pca_text_residual_pretrained", "pair_pca_no_text_residual", "incremental_text"),
-    ("pair_pca_text_residual_pretrained", "pair_pca_shuffled_residual_pretrained", "matched_vs_shuffled"),
+    (TEXT_RESIDUAL_VARIANT, CONTINUATION_VARIANT, "incremental_text"),
+    (TEXT_RESIDUAL_VARIANT, PARENT_VARIANT, "text_vs_parent"),
+    (CONTINUATION_VARIANT, PARENT_VARIANT, "continuation_effect"),
+    (TEXT_RESIDUAL_VARIANT, SHUFFLED_RESIDUAL_VARIANT, "matched_vs_shuffled"),
     ("pair_pca_text_full_film", "pair_pca_text_concat", "film_vs_concat"),
     ("pair_pca_text_full_film", "pair_l2_text_full_film", "pca_vs_raw_l2"),
-    ("pair_pca_text_residual_pretrained", "pair_pca_text_full_film", "residual_package_vs_full_film"),
+    (TEXT_RESIDUAL_VARIANT, "pair_pca_text_full_film", "residual_package_vs_full_film"),
 )
 
 
@@ -189,20 +210,30 @@ def _variant_overrides(
         "initial_generator_checkpoint_path": "",
         "freeze_backbone_epochs": 0,
     }
-    if variant == "pair_pca_no_text_residual":
+    if variant == PARENT_VARIANT:
         overrides.update(
             text_embedding_mode="zero_lp",
             lambda_film=0.0,
             lambda_mismatch=0.0,
         )
-    elif variant == "pair_pca_text_residual_pretrained":
+    elif variant == CONTINUATION_VARIANT:
+        if parent_checkpoint is None:
+            raise FileNotFoundError("No-text continuation requires its paired no-text checkpoint.")
+        overrides.update(
+            text_embedding_mode="zero_lp",
+            lambda_film=0.0,
+            lambda_mismatch=0.0,
+            initial_generator_checkpoint_path=str(parent_checkpoint),
+            freeze_backbone_epochs=5,
+        )
+    elif variant == TEXT_RESIDUAL_VARIANT:
         if parent_checkpoint is None:
             raise FileNotFoundError("Residual text training requires its paired no-text checkpoint.")
         overrides.update(
             initial_generator_checkpoint_path=str(parent_checkpoint),
             freeze_backbone_epochs=5,
         )
-    elif variant == "pair_pca_shuffled_residual_pretrained":
+    elif variant == SHUFFLED_RESIDUAL_VARIANT:
         if parent_checkpoint is None:
             raise FileNotFoundError("Shuffled residual training requires its paired no-text checkpoint.")
         overrides.update(
@@ -309,6 +340,25 @@ def _completed_run(output_root: Path) -> Path | None:
         and (path / "metrics/best_checkpoint.json").is_file()
     ]
     return candidates[-1] if candidates else None
+
+
+def _stage_registry_fields(
+    variant: str,
+    *,
+    parent_checkpoint: Path | None,
+    parent_checkpoint_sha256: str,
+) -> dict[str, str]:
+    if variant not in VARIANT_STAGES:
+        raise ValueError(f"Missing training-stage metadata for variant: {variant}")
+    is_stage_b = variant in PAIRED_STAGE_B_VARIANTS
+    if is_stage_b and parent_checkpoint is None:
+        raise FileNotFoundError(f"{variant} requires its paired Stage-A no-text checkpoint.")
+    return {
+        "training_stage": VARIANT_STAGES[variant],
+        "parent_variant": PARENT_VARIANT if is_stage_b else "",
+        "parent_checkpoint_path": str(parent_checkpoint) if is_stage_b else "",
+        "parent_checkpoint_sha256": parent_checkpoint_sha256 if is_stage_b else "",
+    }
 
 
 def prepare_experiment(args: argparse.Namespace) -> Path:
@@ -521,12 +571,14 @@ def train_matrix(args: argparse.Namespace) -> Path:
         fold_payload = _read_yaml(_fold_config(root, fold))
         for seed in SEEDS:
             parent_checkpoint: Path | None = None
+            parent_checkpoint_sha256 = ""
             for variant in VARIANTS:
                 output_root = root / "training_runs" / variant / fold / f"seed_{seed}"
                 completed = _completed_run(output_root)
                 if completed is not None:
-                    if variant == "pair_pca_no_text_residual":
+                    if variant == PARENT_VARIANT:
                         parent_checkpoint = completed / "checkpoints/film_wgan_best.pt"
+                        parent_checkpoint_sha256 = sha256_file(parent_checkpoint)
                     registry_rows.append(
                         {
                             "fold": fold,
@@ -535,6 +587,11 @@ def train_matrix(args: argparse.Namespace) -> Path:
                             "status": "reused",
                             "run_dir": str(completed),
                             "checkpoint": str(completed / "checkpoints/film_wgan_best.pt"),
+                            **_stage_registry_fields(
+                                variant,
+                                parent_checkpoint=parent_checkpoint,
+                                parent_checkpoint_sha256=parent_checkpoint_sha256,
+                            ),
                         }
                     )
                     continue
@@ -564,8 +621,9 @@ def train_matrix(args: argparse.Namespace) -> Path:
                 completed = _completed_run(output_root)
                 if completed is None:
                     raise RuntimeError(f"Training finished without a best checkpoint: {output_root}")
-                if variant == "pair_pca_no_text_residual":
+                if variant == PARENT_VARIANT:
                     parent_checkpoint = completed / "checkpoints/film_wgan_best.pt"
+                    parent_checkpoint_sha256 = sha256_file(parent_checkpoint)
                 registry_rows.append(
                     {
                         "fold": fold,
@@ -574,6 +632,11 @@ def train_matrix(args: argparse.Namespace) -> Path:
                         "status": "completed",
                         "run_dir": str(completed),
                         "checkpoint": str(completed / "checkpoints/film_wgan_best.pt"),
+                        **_stage_registry_fields(
+                            variant,
+                            parent_checkpoint=parent_checkpoint,
+                            parent_checkpoint_sha256=parent_checkpoint_sha256,
+                        ),
                     }
                 )
                 pd.DataFrame(registry_rows).to_csv(
@@ -622,10 +685,141 @@ def monitor(args: argparse.Namespace) -> Path:
     return root
 
 
+def _config_artifact_path(value: Any) -> Path | None:
+    rendered = str(value or "").strip()
+    if not rendered:
+        return None
+    path = Path(rendered).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return path.resolve()
+
+
+def _cached_sha256(path: Path | None, cache: dict[Path, str]) -> str:
+    if path is None or not path.is_file():
+        return ""
+    if path not in cache:
+        cache[path] = sha256_file(path)
+    return cache[path]
+
+
+def _paired_stage_audit(
+    selected: pd.DataFrame,
+    resolved_configs: dict[tuple[str, int, str], dict[str, Any]],
+) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    selected_by_run = selected.set_index(["fold", "seed", "variant"], verify_integrity=True)
+    sha_cache: dict[Path, str] = {}
+    audit_rows: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    expected_variant_values = {
+        CONTINUATION_VARIANT: {
+            "text_embedding_mode": "zero_lp",
+            "text_alignment_mode": "matched",
+            "lambda_film": 0.0,
+            "lambda_mismatch": 0.0,
+        },
+        TEXT_RESIDUAL_VARIANT: {
+            "text_embedding_mode": "lp",
+            "text_alignment_mode": "matched",
+            "lambda_film": 1.0e-4,
+            "lambda_mismatch": 0.5,
+        },
+        SHUFFLED_RESIDUAL_VARIANT: {
+            "text_embedding_mode": "lp",
+            "text_alignment_mode": "permuted",
+            "lambda_film": 1.0e-4,
+            "lambda_mismatch": 0.5,
+        },
+    }
+    common_expected = {
+        "text_preprocessing_mode": "pca",
+        "normalize_text_embedding": False,
+        "conditioning_mode": "residual_film",
+        "critic_conditioning_mode": "projection",
+        "freeze_backbone_epochs": 5,
+    }
+
+    for fold in FOLDS:
+        for seed in SEEDS:
+            parent_key = (fold, seed, PARENT_VARIANT)
+            parent_row = selected_by_run.loc[parent_key]
+            expected_parent_path = Path(str(parent_row["checkpoint_path"])).resolve()
+            expected_parent_sha = str(parent_row["checkpoint_sha256"])
+            parent_payload = resolved_configs[parent_key]
+            parent_training = dict(parent_payload.get("training") or parent_payload)
+            expected_transform_path = _config_artifact_path(parent_training.get("text_transform_path"))
+            expected_transform_sha = _cached_sha256(expected_transform_path, sha_cache)
+
+            for variant in PAIRED_STAGE_B_VARIANTS:
+                key = (fold, seed, variant)
+                payload = resolved_configs[key]
+                training = dict(payload.get("training") or payload)
+                configured_parent_path = _config_artifact_path(
+                    training.get("initial_generator_checkpoint_path")
+                )
+                configured_parent_sha = _cached_sha256(configured_parent_path, sha_cache)
+                transform_path = _config_artifact_path(training.get("text_transform_path"))
+                transform_sha = _cached_sha256(transform_path, sha_cache)
+                errors: list[str] = []
+
+                if configured_parent_path != expected_parent_path:
+                    errors.append("parent_checkpoint_path_mismatch")
+                if configured_parent_sha != expected_parent_sha:
+                    errors.append("parent_checkpoint_sha256_mismatch")
+                if transform_path != expected_transform_path:
+                    errors.append("text_transform_path_mismatch")
+                if not expected_transform_sha or transform_sha != expected_transform_sha:
+                    errors.append("text_transform_sha256_mismatch")
+
+                expected_values = {**common_expected, **expected_variant_values[variant]}
+                mismatched_fields = sorted(
+                    field
+                    for field, expected in expected_values.items()
+                    if training.get(field) != expected
+                )
+                errors.extend(f"config_mismatch:{field}" for field in mismatched_fields)
+                audit_rows.append(
+                    {
+                        "fold": fold,
+                        "seed": int(seed),
+                        "variant": variant,
+                        "training_stage": VARIANT_STAGES[variant],
+                        "parent_variant": PARENT_VARIANT,
+                        "expected_parent_checkpoint_path": str(expected_parent_path),
+                        "configured_parent_checkpoint_path": (
+                            "" if configured_parent_path is None else str(configured_parent_path)
+                        ),
+                        "expected_parent_checkpoint_sha256": expected_parent_sha,
+                        "configured_parent_checkpoint_sha256": configured_parent_sha,
+                        "expected_text_transform_path": (
+                            "" if expected_transform_path is None else str(expected_transform_path)
+                        ),
+                        "configured_text_transform_path": (
+                            "" if transform_path is None else str(transform_path)
+                        ),
+                        "expected_text_transform_sha256": expected_transform_sha,
+                        "configured_text_transform_sha256": transform_sha,
+                        "status": "ok" if not errors else "failed",
+                        "errors": json.dumps(errors),
+                    }
+                )
+                if errors:
+                    failures.append(
+                        {
+                            "fold": fold,
+                            "seed": int(seed),
+                            "variant": variant,
+                            "errors": errors,
+                        }
+                    )
+    return pd.DataFrame(audit_rows), failures
+
+
 def collect_checkpoints(args: argparse.Namespace) -> Path:
     root = _resolve_root(args.experiment_root)
     rows = []
     resolved_configs: dict[tuple[str, int, str], dict[str, Any]] = {}
+    artifact_sha_cache: dict[Path, str] = {}
     for fold in FOLDS:
         for seed in SEEDS:
             for variant in VARIANTS:
@@ -639,12 +833,32 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
                     raise ValueError(f"Selected checkpoint must be after epoch 10: {run_dir} epoch={epoch}")
                 checkpoint = run_dir / "checkpoints/film_wgan_best.pt"
                 resolved_config_path = run_dir / "metrics/training_resolved_config.yaml"
-                resolved_configs[(fold, seed, variant)] = _read_yaml(resolved_config_path)
+                resolved_payload = _read_yaml(resolved_config_path)
+                resolved_configs[(fold, seed, variant)] = resolved_payload
+                resolved_training = dict(resolved_payload.get("training") or resolved_payload)
+                configured_parent_path = _config_artifact_path(
+                    resolved_training.get("initial_generator_checkpoint_path")
+                )
+                transform_path = _config_artifact_path(resolved_training.get("text_transform_path"))
                 rows.append(
                     {
                         "fold": fold,
                         "seed": seed,
                         "variant": variant,
+                        "training_stage": VARIANT_STAGES[variant],
+                        "parent_variant": PARENT_VARIANT if variant in PAIRED_STAGE_B_VARIANTS else "",
+                        "parent_checkpoint_path": (
+                            "" if configured_parent_path is None else str(configured_parent_path)
+                        ),
+                        "parent_checkpoint_sha256": _cached_sha256(
+                            configured_parent_path,
+                            artifact_sha_cache,
+                        ),
+                        "text_transform_path": "" if transform_path is None else str(transform_path),
+                        "text_transform_sha256": _cached_sha256(
+                            transform_path,
+                            artifact_sha_cache,
+                        ),
                         "selected_epoch": epoch,
                         "validation_surface_mae": float(best["best_metric"]),
                         "checkpoint_metric": str(best["checkpoint_metric"]),
@@ -654,7 +868,6 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
                     }
                 )
     frame = pd.DataFrame(rows)
-    frame.to_csv(root / "checkpoint_selection/selected_checkpoints.csv", index=False)
     allowed_variant_fields = {
         "text_embedding_mode",
         "text_alignment_mode",
@@ -709,12 +922,26 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
         root / "checkpoint_selection/resolved_config_audit.csv",
         index=False,
     )
+    paired_stage_audit, paired_stage_failures = _paired_stage_audit(frame, resolved_configs)
+    paired_stage_audit.to_csv(
+        root / "checkpoint_selection/paired_stage_validation.csv",
+        index=False,
+    )
+    if paired_stage_failures:
+        _write_json(
+            root / "checkpoint_selection/paired_stage_validation_failures.json",
+            paired_stage_failures,
+        )
+        failures.extend(paired_stage_failures)
     if failures:
         _write_json(
             root / "checkpoint_selection/resolved_config_validation_failures.json",
             failures,
         )
-        raise ValueError("Resolved configs differ outside the pre-registered variant/seed/path fields.")
+        raise ValueError(
+            "Checkpoint/config validation failed; inspect checkpoint_selection validation reports."
+        )
+    frame.to_csv(root / "checkpoint_selection/selected_checkpoints.csv", index=False)
     print(f"Selected {len(frame)} development checkpoints.")
     return root
 
@@ -1004,6 +1231,16 @@ def build_comparison(args: argparse.Namespace) -> Path:
         & (bootstrap["metric"] == "surface_mae")
     ].copy()
     primary.to_csv(root / "final_tables/development_rq1_primary_test.csv", index=False)
+    primary.to_csv(
+        root / "final_tables/development_rq1_primary_controlled_incremental_text.csv",
+        index=False,
+    )
+    bootstrap[
+        bootstrap["contrast"].isin(("text_vs_parent", "continuation_effect"))
+    ].to_csv(
+        root / "final_tables/development_rq1_parent_continuation_diagnostics.csv",
+        index=False,
+    )
     bootstrap.to_csv(root / "final_tables/development_rq1_point_metric_contrasts.csv", index=False)
     model_summary.to_csv(root / "final_tables/development_rq1_metrics_by_fold_seed.csv", index=False)
     model_summary[
@@ -1023,7 +1260,10 @@ def build_comparison(args: argparse.Namespace) -> Path:
         "fold_test_pair_counts": {
             fold: int(spec["counts"][2]) for fold, spec in FOLDS.items()
         },
-        "primary_difference_direction": "no_text_error_minus_text_error",
+        "stage_b_parent_validation": "checkpoint_selection/paired_stage_validation.csv",
+        "primary_focal_variant": TEXT_RESIDUAL_VARIANT,
+        "primary_baseline_variant": CONTINUATION_VARIANT,
+        "primary_difference_direction": "continued_no_text_error_minus_text_error",
         "positive_means_text_better": True,
     }
     _write_json(root / "validation_summary.json", status)
@@ -1039,15 +1279,26 @@ interpolation. It does not use an SVI-calibrated surface.
 Primary contrast:
 
 ```text
-pair_pca_no_text_residual - pair_pca_text_residual_pretrained
+pair_pca_no_text_continued - pair_pca_text_residual_pretrained
 positive => matched LP text has lower error
 ```
+
+The continued no-text and matched/shuffled text branches all start from the
+same fold/seed Stage-A no-text generator. They use the same Stage-B epoch
+budget, five-epoch backbone freeze, low-learning-rate backbone schedule, fresh
+critic behavior, and train-only PCA transform. This controls for improvement
+caused only by an additional optimization stage.
 
 The four outer tests are non-overlapping 2023 quarters. Text is pooled once per
 surface pair, transformed by fold-train-only PCA-128, and the residual text
 models are initialized from the paired fold/seed no-text generator.
 
-Primary table: `final_tables/development_rq1_primary_test.csv`
+Primary table:
+`final_tables/development_rq1_primary_controlled_incremental_text.csv`
+
+Parent/continuation diagnostics:
+`final_tables/development_rq1_parent_continuation_diagnostics.csv`
+
 All point-metric contrasts: `final_tables/development_rq1_point_metric_contrasts.csv`
 """
     (root / "README.md").write_text(readme, encoding="utf-8")

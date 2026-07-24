@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -318,12 +319,141 @@ class TestResidualFiLMArchitecture(unittest.TestCase):
             trainer.setup()
             self.assertTrue(trainer._backbone_frozen)
             self.assertFalse(any(parameter.requires_grad for parameter in trainer.generator.backbone_parameters()))
+
+            continued_config = replace(
+                base,
+                split_manifest_path=str(manifest_path),
+                initial_generator_checkpoint_path=str(parent_path),
+                freeze_backbone_epochs=5,
+                output_root=str(Path(tmpdir) / "continued-outputs"),
+            )
+            continued_trainer = FilmWGANTrainer(continued_config)
+            continued_trainer._ensure_runtime_prepared()
+            continued_trainer.setup()
+            self.assertEqual(
+                trainer._parent_checkpoint_sha256,
+                continued_trainer._parent_checkpoint_sha256,
+            )
+            for name, value in trainer.generator.state_dict().items():
+                self.assertTrue(torch.equal(value, continued_trainer.generator.state_dict()[name]))
+            for name, value in trainer.critic.state_dict().items():
+                self.assertTrue(torch.equal(value, continued_trainer.critic.state_dict()[name]))
+
             trainer._update_backbone_freeze_state(6)
             self.assertFalse(trainer._backbone_frozen)
             self.assertTrue(all(parameter.requires_grad for parameter in trainer.generator.backbone_parameters()))
 
 
 class TestPairRollingComparison(unittest.TestCase):
+    def test_no_text_continuation_uses_the_paired_stage_b_schedule(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            parent = Path(tmpdir) / "parent.pt"
+            parent.write_bytes(b"parent")
+            transform = Path(tmpdir) / "transform.npz"
+            transform.write_bytes(b"transform")
+            fold_config = {"training": {"text_transform_path": str(transform)}}
+
+            continued = rq1_pair_experiment._variant_overrides(
+                rq1_pair_experiment.CONTINUATION_VARIANT,
+                fold_config=fold_config,
+                output_root=Path(tmpdir) / "continued",
+                seed=42,
+                parent_checkpoint=parent,
+            )
+            matched_text = rq1_pair_experiment._variant_overrides(
+                rq1_pair_experiment.TEXT_RESIDUAL_VARIANT,
+                fold_config=fold_config,
+                output_root=Path(tmpdir) / "text",
+                seed=42,
+                parent_checkpoint=parent,
+            )
+
+            self.assertEqual(len(rq1_pair_experiment.VARIANTS), 7)
+            self.assertEqual(rq1_pair_experiment.VARIANTS[1], rq1_pair_experiment.CONTINUATION_VARIANT)
+            self.assertEqual(continued["text_embedding_mode"], "zero_lp")
+            self.assertEqual(continued["initial_generator_checkpoint_path"], str(parent))
+            self.assertEqual(continued["freeze_backbone_epochs"], 5)
+            self.assertEqual(continued["lambda_film"], 0.0)
+            self.assertEqual(continued["lambda_mismatch"], 0.0)
+            for field in (
+                "seed",
+                "text_preprocessing_mode",
+                "text_transform_path",
+                "conditioning_mode",
+                "critic_conditioning_mode",
+                "freeze_backbone_epochs",
+                "initial_generator_checkpoint_path",
+            ):
+                self.assertEqual(continued[field], matched_text[field])
+
+            with self.assertRaisesRegex(FileNotFoundError, "No-text continuation"):
+                rq1_pair_experiment._variant_overrides(
+                    rq1_pair_experiment.CONTINUATION_VARIANT,
+                    fold_config=fold_config,
+                    output_root=Path(tmpdir) / "missing-parent",
+                    seed=42,
+                    parent_checkpoint=None,
+                )
+
+    def test_paired_stage_audit_requires_one_parent_and_transform(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            parent = Path(tmpdir) / "parent.pt"
+            parent.write_bytes(b"parent")
+            transform = Path(tmpdir) / "transform.npz"
+            transform.write_bytes(b"transform")
+            selected = pd.DataFrame(
+                [
+                    {
+                        "fold": "2023Q1",
+                        "seed": 42,
+                        "variant": rq1_pair_experiment.PARENT_VARIANT,
+                        "checkpoint_path": str(parent),
+                        "checkpoint_sha256": rq1_pair_experiment.sha256_file(parent),
+                    }
+                ]
+            )
+            parent_training = {"text_transform_path": str(transform)}
+            resolved = {
+                ("2023Q1", 42, rq1_pair_experiment.PARENT_VARIANT): {
+                    "training": parent_training
+                }
+            }
+            for variant in rq1_pair_experiment.PAIRED_STAGE_B_VARIANTS:
+                overrides = rq1_pair_experiment._variant_overrides(
+                    variant,
+                    fold_config={"training": parent_training},
+                    output_root=Path(tmpdir) / variant,
+                    seed=42,
+                    parent_checkpoint=parent,
+                )
+                resolved[("2023Q1", 42, variant)] = {"training": overrides}
+
+            with (
+                patch.object(rq1_pair_experiment, "FOLDS", {"2023Q1": {}}),
+                patch.object(rq1_pair_experiment, "SEEDS", (42,)),
+            ):
+                audit, failures = rq1_pair_experiment._paired_stage_audit(selected, resolved)
+                self.assertEqual(len(audit), 3)
+                self.assertFalse(failures)
+                self.assertEqual(set(audit["status"]), {"ok"})
+
+                wrong_parent = Path(tmpdir) / "wrong-parent.pt"
+                wrong_parent.write_bytes(b"wrong")
+                text_key = ("2023Q1", 42, rq1_pair_experiment.TEXT_RESIDUAL_VARIANT)
+                bad_training = dict(resolved[text_key]["training"])
+                bad_training["initial_generator_checkpoint_path"] = str(wrong_parent)
+                bad_resolved = dict(resolved)
+                bad_resolved[text_key] = {"training": bad_training}
+                failed_audit, failures = rq1_pair_experiment._paired_stage_audit(
+                    selected,
+                    bad_resolved,
+                )
+                failed_text = failed_audit[
+                    failed_audit["variant"] == rq1_pair_experiment.TEXT_RESIDUAL_VARIANT
+                ].iloc[0]
+                self.assertEqual(failed_text["status"], "failed")
+                self.assertTrue(failures)
+
     def test_raw_workbook_validation_rejects_svi_surface(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook = Path(tmpdir) / "surface_models.xlsx"
@@ -433,12 +563,33 @@ class TestPairRollingComparison(unittest.TestCase):
                 )
             )
             primary = pd.read_csv(root / "final_tables/development_rq1_primary_test.csv")
+            controlled_primary = pd.read_csv(
+                root / "final_tables/development_rq1_primary_controlled_incremental_text.csv"
+            )
+            diagnostics = pd.read_csv(
+                root / "final_tables/development_rq1_parent_continuation_diagnostics.csv"
+            )
             seed_tests = pd.read_csv(root / "comparisons/development_seed_level_tests.csv")
             validation = json.loads((root / "validation_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(len(primary), 1)
+            pd.testing.assert_frame_equal(primary, controlled_primary)
+            self.assertEqual(primary.loc[0, "focal_variant"], rq1_pair_experiment.TEXT_RESIDUAL_VARIANT)
+            self.assertEqual(primary.loc[0, "baseline_variant"], rq1_pair_experiment.CONTINUATION_VARIANT)
+            self.assertEqual(
+                set(diagnostics["contrast"]),
+                {"text_vs_parent", "continuation_effect"},
+            )
             self.assertEqual(len(seed_tests), len(rq1_pair_experiment.CONTRASTS) * 3)
             self.assertEqual(validation["status"], "ok")
             self.assertTrue(validation["development_only"])
+            self.assertEqual(
+                validation["primary_baseline_variant"],
+                rq1_pair_experiment.CONTINUATION_VARIANT,
+            )
+            self.assertEqual(
+                validation["primary_difference_direction"],
+                "continued_no_text_error_minus_text_error",
+            )
             expected_rows = (
                 sum(int(specification["counts"][2]) for specification in rq1_pair_experiment.FOLDS.values())
                 * len(rq1_pair_experiment.SEEDS)
