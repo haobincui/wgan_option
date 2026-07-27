@@ -37,14 +37,9 @@ from scripts.rq2_pair.pair_features import (  # noqa: E402
 
 
 DEFAULT_CONFIG = ROOT / "configs/film_wgan/train_rq2_pair_textbase.yaml"
-DEFAULT_SOURCE_RQ1 = Path(
-    "/home/haobin_cui/research_files_space_2/"
-    "wgan_option-rq1-no-text-continuation/outputs/experiments/"
-    "rq1_pair_text_raw_vol_continuation_20260723-143511"
-)
-DEFAULT_FEATURE_ROOT = Path(
-    "/home/haobin_cui/research_files_space_2/"
-    "wgan_option/data/processed/text_features/rq2/20260625-075653"
+DEFAULT_SOURCE_RQ1 = ""
+DEFAULT_FEATURE_ROOT = (
+    ROOT / "data/processed/text_features/rq2/20260625-075653"
 )
 EXPERIMENT_PREFIX = "rq2_pair_representation_raw_vol_continuation_"
 
@@ -163,6 +158,19 @@ def _latest_experiment() -> Path:
     )
     if not candidates:
         raise FileNotFoundError("No prepared RQ2 pair experiment exists.")
+    return candidates[-1]
+
+
+def _latest_rq1_experiment() -> Path:
+    candidates = sorted(
+        (ROOT / "outputs/experiments").glob(
+            "rq1_pair_text_raw_vol_continuation_*"
+        )
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            "No completed London-time RQ1 continuation experiment exists."
+        )
     return candidates[-1]
 
 
@@ -371,6 +379,17 @@ def _fold_config(root: Path, fold: str, variant: str) -> Path:
     return root / "inputs/folds" / fold / f"train_{variant}.yaml"
 
 
+def _fold_counts(root: Path, fold: str) -> tuple[int, int, int]:
+    lineage_path = root / "inputs/folds" / fold / "pair_lineage_audit.csv"
+    if not lineage_path.is_file():
+        return tuple(int(value) for value in FOLDS[fold]["counts"])
+    lineage = pd.read_csv(lineage_path, usecols=["split"])
+    return tuple(
+        int((lineage["split"].astype(str) == split).sum())
+        for split in ("train", "val", "test")
+    )
+
+
 def _existing_pair_feature_artifacts(
     output_dir: Path,
 ) -> PairFeatureArtifacts | None:
@@ -466,7 +485,11 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
     ):
         (root / relative).mkdir(parents=True, exist_ok=True)
 
-    source_root = Path(args.source_rq1).expanduser().resolve()
+    source_root = (
+        Path(args.source_rq1).expanduser().resolve()
+        if str(args.source_rq1).strip()
+        else _latest_rq1_experiment().resolve()
+    )
     feature_root = Path(args.feature_root).expanduser().resolve()
     source_config = Path(args.config).expanduser().resolve()
     source_validation = json.loads(
@@ -474,6 +497,11 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
     )
     if source_validation.get("status") != "ok":
         raise ValueError(f"Source RQ1 validation status is not ok: {source_root}")
+    if source_validation.get("news_source_timezone") != "Europe/London":
+        raise ValueError(
+            "RQ2 requires an RQ1 source rebuilt with "
+            "news_source_timezone=Europe/London."
+        )
     selected = _source_selected(source_root)
     generated = _source_generated(source_root)
     import_rows: list[dict[str, Any]] = []
@@ -690,10 +718,9 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             int((lineage["split"].astype(str) == split).sum())
             for split in ("train", "val", "test")
         )
-        expected_counts = tuple(int(value) for value in specification["counts"])
-        if actual_counts != expected_counts:
+        if min(actual_counts) <= 0:
             raise ValueError(
-                f"Fold {fold} count mismatch: {actual_counts} != {expected_counts}."
+                f"Fold {fold} has an empty train/validation/test split: {actual_counts}."
             )
         for variant in NEW_VARIANTS:
             fold_training = dict(training_base)
@@ -713,7 +740,7 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
                     bundle.val_samples,
                     bundle.test_samples,
                 )
-                if bundle_counts != expected_counts or bundle.embedding_dim != 128:
+                if bundle_counts != actual_counts or bundle.embedding_dim != 128:
                     raise ValueError(
                         f"Loader validation failed for {fold}/{variant}: "
                         f"counts={bundle_counts}, embedding_dim={bundle.embedding_dim}."
@@ -762,6 +789,7 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             "status": "prepared",
             "development_only": True,
             "surface_model": "raw",
+            "news_source_timezone": "Europe/London",
             "source_rq1_experiment": str(source_root),
             "source_rq1_validation_status": source_validation.get("status"),
             "folds": fold_summary,
@@ -803,10 +831,15 @@ def _training_overrides(
 def train_matrix(args: argparse.Namespace) -> Path:
     _assert_py312()
     root = _resolve_root(args.experiment_root)
+    selected_folds = [args.fold] if getattr(args, "fold", "") else list(FOLDS)
+    selected_seeds = [int(args.seed)] if getattr(args, "seed", None) is not None else list(SEEDS)
+    selected_variants = (
+        [args.variant] if getattr(args, "variant", "") else list(NEW_VARIANTS)
+    )
     registry_rows: list[dict[str, Any]] = []
-    for fold in FOLDS:
-        for seed in SEEDS:
-            for variant in NEW_VARIANTS:
+    for fold in selected_folds:
+        for seed in selected_seeds:
+            for variant in selected_variants:
                 output_root = (
                     root / "training_runs" / variant / fold / f"seed_{seed}"
                 )
@@ -873,10 +906,16 @@ def train_matrix(args: argparse.Namespace) -> Path:
                         ],
                     }
                 )
-                pd.DataFrame(registry_rows).to_csv(
-                    root / "registry/launch_registry.csv",
-                    index=False,
-                )
+                if not getattr(args, "no_registry_write", False):
+                    pd.DataFrame(registry_rows).to_csv(
+                        root / "registry/launch_registry.csv",
+                        index=False,
+                    )
+    if not getattr(args, "no_registry_write", False):
+        pd.DataFrame(registry_rows).to_csv(
+            root / "registry/launch_registry.csv",
+            index=False,
+        )
     return root
 
 
@@ -1180,7 +1219,7 @@ def generate_matrix(args: argparse.Namespace) -> Path:
     registry_rows: list[dict[str, Any]] = []
 
     for fold in FOLDS:
-        expected = int(FOLDS[fold]["counts"][2])
+        expected = _fold_counts(root, fold)[2]
         for seed in SEEDS:
             for model, variant in (
                 ("continued_no_text", SOURCE_NO_TEXT),
@@ -1210,7 +1249,7 @@ def generate_matrix(args: argparse.Namespace) -> Path:
         run_dir = Path(record.run_dir)
         output_dir = run_dir / "development_test_json"
         summary = output_dir / "summary.csv"
-        expected = int(FOLDS[str(record.fold)]["counts"][2])
+        expected = _fold_counts(root, str(record.fold))[2]
         if summary.is_file() and len(pd.read_csv(summary)) == expected:
             status = "reused"
         else:
@@ -1763,7 +1802,7 @@ def build_comparison(args: argparse.Namespace) -> Path:
     expected = (
         len(MODEL_VARIANTS)
         * len(SEEDS)
-        * sum(int(spec["counts"][2]) for spec in FOLDS.values())
+        * sum(_fold_counts(root, fold)[2] for fold in FOLDS)
     )
     if len(samples) != expected:
         raise ValueError(
@@ -1874,13 +1913,14 @@ def build_comparison(args: argparse.Namespace) -> Path:
         "evidence_status": "2023_rolling_development",
         "claim_limit": "Not an untouched 2024+ confirmation experiment.",
         "surface_model": "raw",
+        "news_source_timezone": "Europe/London",
         "models": list(MODEL_VARIANTS),
         "seeds": list(SEEDS),
         "folds": list(FOLDS),
         "new_training_runs": 24,
         "comparison_sample_rows": int(len(samples)),
         "test_surface_pairs_per_seed": int(
-            sum(int(spec["counts"][2]) for spec in FOLDS.values())
+            sum(_fold_counts(root, fold)[2] for fold in FOLDS)
         ),
         "primary_difference_direction": "representation_error_minus_lp_error",
         "positive_means_lp_better": True,
@@ -2113,6 +2153,14 @@ def build_parser() -> argparse.ArgumentParser:
     train = subparsers.add_parser("train-matrix")
     train.add_argument("--experiment-root", default="")
     train.add_argument("--resume", action="store_true")
+    train.add_argument("--fold", choices=list(FOLDS), default="")
+    train.add_argument("--seed", type=int, choices=list(SEEDS), default=None)
+    train.add_argument("--variant", choices=list(NEW_VARIANTS), default="")
+    train.add_argument(
+        "--no-registry-write",
+        action="store_true",
+        help="Skip shared registry writes for externally parallelized single-run jobs.",
+    )
 
     monitor_parser = subparsers.add_parser("monitor")
     monitor_parser.add_argument("--experiment-root", default="")

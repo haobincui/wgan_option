@@ -1891,6 +1891,8 @@ def run_scheduled_news_regime(
     config_path: str | Path,
     *,
     output_dir: str | Path | None = None,
+    rq1_experiment_override: str | Path | None = None,
+    rq2_experiment_override: str | Path | None = None,
 ) -> Path:
     """Run the complete frozen-prediction RQ3 archive pipeline."""
 
@@ -1901,8 +1903,15 @@ def run_scheduled_news_regime(
     if not isinstance(config, dict):
         raise ValueError("RQ3 config must contain a mapping.")
 
-    rq1_experiment = _resolve_path(config["rq1_experiment"])
-    rq2_experiment = _resolve_path(config["rq2_experiment"])
+    rq1_value = rq1_experiment_override or config.get("rq1_experiment")
+    rq2_value = rq2_experiment_override or config.get("rq2_experiment")
+    if not rq1_value or not rq2_value:
+        raise ValueError(
+            "RQ3 requires rq1_experiment and rq2_experiment paths, either in "
+            "the config or as CLI overrides."
+        )
+    rq1_experiment = _resolve_path(rq1_value)
+    rq2_experiment = _resolve_path(rq2_value)
     rq1_metrics = rq1_experiment / str(
         config.get(
             "rq1_metrics_relative_path",
@@ -1916,10 +1925,8 @@ def run_scheduled_news_regime(
         )
     )
     workbook = _resolve_path(
-        config.get(
-            "workbook_path",
-            str(rq2_experiment / "inputs/data/merged_vol_rq2_text.xlsx"),
-        )
+        config.get("workbook_path")
+        or str(rq2_experiment / "inputs/data/merged_vol_rq2_text.xlsx")
     )
     calendar_path = _resolve_path(config["event_calendar_path"])
     output_root = (
@@ -1949,8 +1956,43 @@ def run_scheduled_news_regime(
         "workbook_path": str(workbook),
         "event_calendar_path": str(calendar_path),
         "output_root": str(output_root),
+        "news_source_timezone": str(
+            config.get("news_source_timezone", "Europe/London")
+        ),
     }
     try:
+        expected_timezone = str(resolved["news_source_timezone"])
+        for label, experiment in (
+            ("RQ1", rq1_experiment),
+            ("RQ2", rq2_experiment),
+        ):
+            validation_path = experiment / "validation_summary.json"
+            validation = json.loads(
+                _require_file(
+                    validation_path,
+                    f"{label} validation summary",
+                ).read_text(encoding="utf-8")
+            )
+            if validation.get("news_source_timezone") != expected_timezone:
+                raise ValueError(
+                    f"{label} was not built with news_source_timezone="
+                    f"{expected_timezone}: {validation_path}"
+                )
+        workbook_timezone = pd.read_excel(
+            _require_file(workbook, "raw-vol workbook"),
+            sheet_name=str(config.get("workbook_sheet_name", "gan_input_ready")),
+            usecols=["source_timezone"],
+        )["source_timezone"]
+        workbook_timezones = {
+            str(value).strip()
+            for value in workbook_timezone.dropna().tolist()
+            if str(value).strip()
+        }
+        if workbook_timezones != {expected_timezone}:
+            raise ValueError(
+                f"RQ3 workbook timezone mismatch: expected {expected_timezone}, "
+                f"found {sorted(workbook_timezones)}."
+            )
         for directory in (
             "inputs",
             "matched_samples",

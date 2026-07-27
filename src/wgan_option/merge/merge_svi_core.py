@@ -30,6 +30,7 @@ from wgan_option.merge_support import (
     offset_column_name as _offset_column_name,
     range_summary as _range_summary,
     resolve_existing_path as _resolve_existing_path,
+    resolve_news_source_timezone,
     resolve_surface_csv_path as _resolve_surface_csv_path,
     resolve_surface_json_path as _resolve_surface_json_path,
     safe_float as _safe_float,
@@ -53,6 +54,10 @@ AUDIT_HEADERS = [
     "news_row_id",
     "article_id",
     "source_file",
+    "source_local_timestamp",
+    "source_timezone",
+    "source_utc_offset_minutes",
+    "timestamp_parse_status",
     "direction",
     "news_timestamp_utc",
     "matched_snapshot_time_utc",
@@ -126,6 +131,10 @@ SLICE_HEADERS = [
 
 GAN_HEADERS = [
     "sample_id",
+    "source_local_timestamp",
+    "source_timezone",
+    "source_utc_offset_minutes",
+    "timestamp_parse_status",
     "news_timestamp_utc",
     "direction",
     "matched_snapshot_time_utc",
@@ -172,6 +181,16 @@ def _sample_base_fields(news_row: pd.Series, direction: str, matched_snapshot: s
         "news_row_id": int(news_row["news_row_id"]),
         "article_id": _normalize_optional_text(news_row.get("ArticleID", "")),
         "source_file": _normalize_optional_text(news_row.get("SourceFile", "")),
+        "source_local_timestamp": _normalize_optional_text(
+            news_row.get("source_local_timestamp", "")
+        ),
+        "source_timezone": _normalize_optional_text(news_row.get("source_timezone", "")),
+        "source_utc_offset_minutes": _coerce_optional_numeric(
+            _safe_float(news_row.get("source_utc_offset_minutes"))
+        ),
+        "timestamp_parse_status": _normalize_optional_text(
+            news_row.get("timestamp_parse_status", "")
+        ),
         "direction": direction,
         "news_timestamp_utc": _normalize_optional_text(news_row.get("timestamp_utc", "")),
         "matched_snapshot_time_utc": _normalize_optional_text(matched_snapshot),
@@ -364,7 +383,7 @@ def build_svi_workbook_frames(
     input_dir: Path,
     *,
     news_xlsx_path: Path = DEFAULT_NEWS_XLSX_PATH,
-    source_timezone: str = DEFAULT_SOURCE_TIMEZONE,
+    source_timezone: Optional[str] = None,
     offset_minutes: int = DEFAULT_OFFSET_MINUTES,
 ) -> Dict[str, pd.DataFrame]:
     """Build the three-sheet SVI audit workbook from raw surface results."""
@@ -372,6 +391,7 @@ def build_svi_workbook_frames(
     input_dir = _resolve_existing_path(Path(input_dir), "Input directory")
     if not input_dir.is_dir():
         raise NotADirectoryError(f"Input path must be a directory: {input_dir}")
+    source_timezone = resolve_news_source_timezone(input_dir, source_timezone)
 
     news_xlsx_path = _resolve_existing_path(Path(news_xlsx_path), "News xlsx")
     csv_path = _resolve_surface_csv_path(input_dir)

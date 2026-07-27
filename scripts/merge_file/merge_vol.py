@@ -43,7 +43,14 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Directory containing surface-<model>-<data_range>.json and surface-<model>-<data_range>-precalib-points.csv.",
     )
     parser.add_argument("--news-xlsx", default=str(DEFAULT_NEWS_XLSX_PATH), help="Path to the news embedding workbook.")
-    parser.add_argument("--source-timezone", default=DEFAULT_SOURCE_TIMEZONE, help="Timezone for PD + ET in news xlsx.")
+    parser.add_argument(
+        "--source-timezone",
+        default=None,
+        help=(
+            "Timezone for PD + ET. Defaults to the surface resolved config, "
+            f"then {DEFAULT_SOURCE_TIMEZONE} for legacy inputs."
+        ),
+    )
     parser.add_argument("--offset-minutes", type=int, default=DEFAULT_OFFSET_MINUTES, help="Forward direction offset in minutes.")
     parser.add_argument("--strike-bins", type=int, default=DEFAULT_STRIKE_BINS, help="Number of moneyness bins.")
     parser.add_argument("--maturity-bins", type=int, default=DEFAULT_MATURITY_BINS, help="Number of maturity bins.")
@@ -60,7 +67,7 @@ def main(argv: Optional[Iterable[str]] = None) -> Path:
     workbook_frames = build_vol_workbook_frames(
         input_dir,
         news_xlsx_path=Path(args.news_xlsx).expanduser(),
-        source_timezone=str(args.source_timezone),
+        source_timezone=args.source_timezone,
         offset_minutes=int(args.offset_minutes),
         strike_bins=int(args.strike_bins),
         maturity_bins=int(args.maturity_bins),

@@ -5,14 +5,12 @@ from __future__ import annotations
 import json
 import math
 from datetime import date
-from datetime import date as dt_date
-from datetime import datetime as dt_datetime
-from datetime import time as dt_time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+import yaml
 from quantlib.calendar.daycount import DayCountBusN
 from quantlib.calendar.holidays import usd_calendar
 from quantlib.vol_surface.algo.cubic_spline_surface import CubicSplineVolSurface
@@ -20,10 +18,17 @@ from quantlib.vol_surface.algo.raw_surface import RawVolSurface
 from quantlib.vol_surface.algo.sabr_surface import SabrVolSurface
 from quantlib.vol_surface.algo.svi_algo import _svi_function, _vars_to_vols
 from quantlib.vol_surface.algo.svi_surface import SviVolSurface
+from wgan_option.news_time import (
+    DEFAULT_NEWS_SOURCE_TIMEZONE,
+    excel_time_fraction_to_hms,
+    normalize_news_date,
+    normalize_news_time,
+    parse_news_timestamps,
+)
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_NEWS_XLSX_PATH = ROOT_DIR / "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx"
-DEFAULT_SOURCE_TIMEZONE = "America/New_York"
+DEFAULT_SOURCE_TIMEZONE = DEFAULT_NEWS_SOURCE_TIMEZONE
 DEFAULT_OFFSET_MINUTES = 5
 DEFAULT_DAYS_IN_YEAR = 250
 SUPPORTED_SURFACE_MODELS = {"svi", "sabr", "cubic", "raw"}
@@ -35,57 +40,9 @@ NEW_RESOLVED_CONFIG_NAME = "surface-resolved_config.yaml"
 LEGACY_RESOLVED_CONFIG_NAME = "resolved_config.yaml"
 
 
-def _normalize_date_value(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, float) and not math.isfinite(value):
-        return ""
-    if pd.isna(value):
-        return ""
-    if isinstance(value, pd.Timestamp):
-        return value.strftime("%Y-%m-%d")
-    if isinstance(value, dt_datetime):
-        return value.strftime("%Y-%m-%d")
-    if isinstance(value, dt_date):
-        return value.isoformat()
-    text = str(value).strip()
-    if text.lower() in {"", "nan", "nat", "none"}:
-        return ""
-    return text
-
-
-def _excel_time_fraction_to_hms(value: float) -> str:
-    total_seconds = int(round(max(0.0, min(float(value), 1.0)) * 24 * 60 * 60))
-    total_seconds = total_seconds % (24 * 60 * 60)
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
-    seconds = total_seconds % 60
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-
-def _normalize_time_value(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, float) and not math.isfinite(value):
-        return ""
-    if pd.isna(value):
-        return ""
-    if isinstance(value, pd.Timestamp):
-        return value.strftime("%H:%M:%S")
-    if isinstance(value, dt_datetime):
-        return value.strftime("%H:%M:%S")
-    if isinstance(value, dt_time):
-        return value.strftime("%H:%M:%S")
-    if isinstance(value, (int, float)):
-        numeric = float(value)
-        if 0.0 <= numeric < 1.0:
-            return _excel_time_fraction_to_hms(numeric)
-        text = str(value).strip()
-        return "" if text.lower() in {"", "nan", "nat", "none"} else text
-    text = str(value).strip()
-    if text.lower() in {"", "nan", "nat", "none"}:
-        return ""
-    return text
+_normalize_date_value = normalize_news_date
+_excel_time_fraction_to_hms = excel_time_fraction_to_hms
+_normalize_time_value = normalize_news_time
 
 
 def resolve_existing_path(path_value: Path, label: str) -> Path:
@@ -141,6 +98,48 @@ def resolve_surface_resolved_config_path(input_dir: Path) -> Optional[Path]:
         if path.exists():
             return path
     return None
+
+
+def _resolved_config_source_timezone(input_dir: Path) -> Optional[str]:
+    config_path = resolve_surface_resolved_config_path(input_dir)
+    if config_path is None:
+        return None
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"Expected a YAML mapping in {config_path}.")
+    surface_builder = payload.get("surface_builder") or {}
+    generate_surface = (
+        surface_builder.get("generate_surface")
+        if isinstance(surface_builder, Mapping)
+        else {}
+    ) or {}
+    candidates = (
+        generate_surface.get("source_timezone")
+        if isinstance(generate_surface, Mapping)
+        else None,
+        payload.get("source_timezone"),
+    )
+    for value in candidates:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
+
+
+def resolve_news_source_timezone(
+    input_dir: Path,
+    requested_source_timezone: Optional[str] = None,
+) -> str:
+    """Resolve merge timezone and reject disagreement with surface generation."""
+
+    requested = str(requested_source_timezone or "").strip() or None
+    generated = _resolved_config_source_timezone(input_dir)
+    if requested and generated and requested != generated:
+        raise ValueError(
+            "News source timezone mismatch between merge and surface generation: "
+            f"merge={requested}, surface_resolved_config={generated}, input_dir={input_dir}."
+        )
+    return requested or generated or DEFAULT_SOURCE_TIMEZONE
 
 
 def offset_column_name(offset_minutes: int) -> str:
@@ -262,15 +261,19 @@ def load_news_base_frame(
 
     news_df = news_df.copy()
     news_df.insert(0, "news_row_id", range(1, len(news_df) + 1))
-    date_text = news_df["PD"].map(_normalize_date_value)
-    time_text = news_df["ET"].map(_normalize_time_value)
-    combined = (date_text + " " + time_text).where((date_text != "") & (time_text != ""), None)
-    naive_ts = pd.to_datetime(combined, errors="coerce")
-    localized = naive_ts.dt.tz_localize(source_timezone, ambiguous="NaT", nonexistent="NaT")
-    utc_ts = localized.dt.tz_convert("UTC")
+    parsed = parse_news_timestamps(
+        news_df["PD"],
+        news_df["ET"],
+        source_timezone=source_timezone,
+    )
+    utc_ts = pd.to_datetime(parsed.timestamp_utc, utc=True, errors="coerce")
     shifted = utc_ts + pd.Timedelta(minutes=int(offset_minutes))
 
-    news_df["timestamp_utc"] = utc_ts.map(to_utc_string)
+    news_df["source_local_timestamp"] = parsed.source_local_timestamp
+    news_df["source_timezone"] = str(source_timezone)
+    news_df["source_utc_offset_minutes"] = parsed.utc_offset_minutes
+    news_df["timestamp_parse_status"] = parsed.parse_status
+    news_df["timestamp_utc"] = parsed.timestamp_utc
     news_df[offset_column_name(offset_minutes)] = shifted.map(to_utc_string)
     return news_df
 

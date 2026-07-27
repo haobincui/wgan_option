@@ -1,5 +1,5 @@
 training:
-  data_path: data/processed/raw-excel/raw_vol_w5_s3_20260629-144428/merged_vol_rq2_text.xlsx
+  data_path: data/processed/raw-excel/rq_raw_vol_selected/merged_vol_rq2_text.xlsx
   sheet_name: gan_input_ready
   text_embedding_mode: lp
   text_alignment_mode: matched

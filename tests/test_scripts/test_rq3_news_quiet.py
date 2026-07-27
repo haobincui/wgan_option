@@ -174,6 +174,7 @@ class TestRQ3NewsQuiet(unittest.TestCase):
                 news_xlsx=news,
                 output_workbook=output,
                 quiet_buffer_minutes=60,
+                source_timezone="America/New_York",
             )
 
             result = pd.read_excel(output, sheet_name="gan_input_ready")

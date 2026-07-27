@@ -374,7 +374,14 @@ class TestMergeParams(unittest.TestCase):
             output_path = result_dir / "merged_params.xlsx"
 
             with patch.object(merge_params, "DEFAULT_NEWS_XLSX_PATH", xlsx_path):
-                written_path = merge_params.main(["--input-dir", str(result_dir)])
+                written_path = merge_params.main(
+                    [
+                        "--input-dir",
+                        str(result_dir),
+                        "--source-timezone",
+                        "America/New_York",
+                    ]
+                )
 
             self.assertEqual(written_path, output_path)
             self.assertTrue(output_path.exists())

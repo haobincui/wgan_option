@@ -216,10 +216,15 @@ def _prepare_event_rows(source_frame: pd.DataFrame, *, quiet_buffer_minutes: int
     return frame.reset_index(drop=True)
 
 
-def _news_timestamps_from_xlsx(news_xlsx: str | Path, *, horizon_minutes: int) -> list[pd.Timestamp]:
+def _news_timestamps_from_xlsx(
+    news_xlsx: str | Path,
+    *,
+    horizon_minutes: int,
+    source_timezone: str = DEFAULT_SOURCE_TIMEZONE,
+) -> list[pd.Timestamp]:
     news_frame = load_news_base_frame(
         Path(news_xlsx).expanduser(),
-        source_timezone=DEFAULT_SOURCE_TIMEZONE,
+        source_timezone=source_timezone,
         offset_minutes=int(horizon_minutes),
     )
     timestamps: list[pd.Timestamp] = []
@@ -287,6 +292,7 @@ def prepare_news_quiet_targets(
     candidate_count: int = 12000,
     sample_seed: int = 20260625,
     sheet_name: str = GAN_SHEET,
+    source_timezone: str = DEFAULT_SOURCE_TIMEZONE,
 ) -> Path:
     event_rows = _load_event_rows(
         source_merged_vol,
@@ -298,7 +304,11 @@ def prepare_news_quiet_targets(
     start_ts = _ceil_timestamp_to_grid(start_ts, grid_minutes=int(quiet_grid_minutes))
     end_ts = _floor_timestamp_to_grid(end_ts, grid_minutes=int(quiet_grid_minutes))
 
-    news_timestamps = _news_timestamps_from_xlsx(news_xlsx, horizon_minutes=int(horizon_minutes))
+    news_timestamps = _news_timestamps_from_xlsx(
+        news_xlsx,
+        horizon_minutes=int(horizon_minutes),
+        source_timezone=source_timezone,
+    )
     news_ns = np.asarray([int(stamp.value) for stamp in news_timestamps], dtype=np.int64)
     news_ns.sort()
 
@@ -355,6 +365,7 @@ def prepare_news_quiet_targets(
             "mode": "prepare_news_quiet_targets",
             "source_merged_vol": str(Path(source_merged_vol).expanduser()),
             "news_xlsx": str(Path(news_xlsx).expanduser()),
+            "source_timezone": str(source_timezone),
             "output_dir": str(output),
             "horizon_minutes": int(horizon_minutes),
             "quiet_grid_minutes": int(quiet_grid_minutes),
@@ -382,6 +393,7 @@ def build_news_quiet_workbook(
     quiet_grid_minutes: int = 5,
     quiet_buffer_minutes: int = 60,
     sheet_name: str = GAN_SHEET,
+    source_timezone: str = DEFAULT_SOURCE_TIMEZONE,
 ) -> Path:
     source_path = Path(source_merged_vol).expanduser()
     if not source_path.exists():
@@ -406,7 +418,11 @@ def build_news_quiet_workbook(
     }
 
     surface_map = _load_all_surface_json(surface_all_json)
-    news_timestamps = _news_timestamps_from_xlsx(news_xlsx, horizon_minutes=int(horizon_minutes))
+    news_timestamps = _news_timestamps_from_xlsx(
+        news_xlsx,
+        horizon_minutes=int(horizon_minutes),
+        source_timezone=source_timezone,
+    )
     news_ns = np.asarray([int(stamp.value) for stamp in news_timestamps], dtype=np.int64)
     news_ns.sort()
 

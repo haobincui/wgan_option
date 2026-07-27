@@ -79,6 +79,7 @@ fail_step() {
 trap fail_step ERR
 
 ENV_NAME="${ENV_NAME:-py312}"
+SOURCE_TIMEZONE="${SOURCE_TIMEZONE:-Europe/London}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 RQ3_SURFACE_WORKERS="${RQ3_SURFACE_WORKERS:-32}"
 QUIET_MAX_SAMPLES="${QUIET_MAX_SAMPLES:-3711}"
@@ -164,6 +165,7 @@ if [[ ! -f "${QUIET_TARGETS}" || "${FORCE_TARGETS}" == "1" ]]; then
   conda run -n "${ENV_NAME}" python scripts/rq3/main.py prepare-news-quiet-targets \
     --source-merged-vol "${SVI_SOURCE_WORKBOOK}" \
     --news-xlsx "${NEWS_XLSX}" \
+    --source-timezone "${SOURCE_TIMEZONE}" \
     --output-dir "${QUIET_TARGET_DIR}" \
     --horizon-minutes 5 \
     --quiet-grid-minutes 5 \
