@@ -28,6 +28,9 @@ from scripts.rq3.news_quiet import (  # noqa: E402
     build_news_quiet_workbook,
     prepare_news_quiet_targets,
 )
+from scripts.rq3.scheduled_news_regime import (  # noqa: E402
+    run_scheduled_news_regime,
+)
 
 
 def _default_output_dir(prefix: str) -> str:
@@ -167,6 +170,27 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="LABEL=PATH",
         help="Result summary CSV with a model label. Repeat for multiple models.",
     )
+
+    scheduled_news = subparsers.add_parser(
+        "scheduled-news-regime",
+        help=(
+            "Run frozen-model scheduled high-information news versus matched "
+            "ordinary-news analysis."
+        ),
+    )
+    scheduled_news.add_argument(
+        "--config",
+        required=True,
+        help="RQ3 scheduled-news YAML config.",
+    )
+    scheduled_news.add_argument(
+        "--output-dir",
+        default="",
+        help=(
+            "Output archive directory. Defaults to "
+            "outputs/experiments/rq3_scheduled_news_regime_raw_vol_<timestamp>."
+        ),
+    )
     return parser
 
 
@@ -269,6 +293,13 @@ def main(argv: Iterable[str] | None = None) -> Path:
             text_label=args.text_label or None,
         )
         print(f"RQ3 news/quiet result analysis written to {output}")
+        return output
+    if args.command == "scheduled-news-regime":
+        output = run_scheduled_news_regime(
+            args.config,
+            output_dir=args.output_dir or None,
+        )
+        print(f"RQ3 scheduled-news regime archive written to {output}")
         return output
     raise ValueError(f"Unknown RQ3 command: {args.command}")
 
