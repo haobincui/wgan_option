@@ -1,0 +1,11 @@
+relative_path,source_worktree,artifact_type,apparent_bytes,notes
+outputs/archive/worktree_consolidation_20260727-131829/wgan_option/outputs,/home/haobin_cui/research_files_space_2/wgan_option,outputs,496926574066,Moved on the same filesystem
+outputs/archive/worktree_consolidation_20260727-131829/wgan_option/logs,/home/haobin_cui/research_files_space_2/wgan_option,logs,890329,Moved on the same filesystem
+outputs/archive/worktree_consolidation_20260727-131829/wgan_option/data_processed,/home/haobin_cui/research_files_space_2/wgan_option,data_processed,5316086234,Includes ignored processed artifacts and tracked-file copies
+outputs/archive/worktree_consolidation_20260727-131829/wgan_option/main_tracked_data_processed_backup,/home/haobin_cui/research_files_space_2/wgan_option,data_processed_tracked_backup,5414684,Backup made before restoring London processed data
+outputs/archive/worktree_consolidation_20260727-131829/wgan_option-rq1-no-text-continuation/outputs,/home/haobin_cui/research_files_space_2/wgan_option-rq1-no-text-continuation,outputs,166667506633,Moved on the same filesystem
+outputs/archive/worktree_consolidation_20260727-131829/wgan_option-rq1-no-text-continuation/data_processed,/home/haobin_cui/research_files_space_2/wgan_option-rq1-no-text-continuation,data_processed,5414815,Absolute workbook symlink rewritten as a relative archive link
+outputs/archive/worktree_consolidation_20260727-131829/wgan_option-rq1-no-text-continuation/data_raw,/home/haobin_cui/research_files_space_2/wgan_option-rq1-no-text-continuation,data_raw_lineage,114,News workbook symlink rewritten to canonical data/raw
+outputs/archive/worktree_consolidation_20260727-131829/wgan_option-rq2-pair-continuation/outputs,/home/haobin_cui/research_files_space_2/wgan_option-rq2-pair-continuation,outputs,60708664134,Moved on the same filesystem
+outputs/archive/worktree_consolidation_20260727-131829/wgan_option-rq2-pair-continuation/data_processed,/home/haobin_cui/research_files_space_2/wgan_option-rq2-pair-continuation,data_processed,5414684,Tracked and ignored input snapshot
+data/raw,/home/haobin_cui/research_files_space_2/wgan_option/data/raw,canonical_raw_input,1290678471,Moved into the surviving London-time worktree and is no longer a symlink
