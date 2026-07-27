@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -81,18 +80,59 @@ def _build_vocabulary(documents: list[list[str]], *, target_dim: int) -> list[st
     ]
 
 
-def _frequency_features(documents: list[list[str]], vocabulary: list[str], *, target_dim: int) -> np.ndarray:
-    features = np.zeros((len(documents), int(target_dim)), dtype=np.float32)
-    if not vocabulary:
+def fit_bow_vocabulary(
+    texts: Iterable[str],
+    *,
+    target_dim: int = 1024,
+    ngram_range: tuple[int, int] = (1, 2),
+) -> list[str]:
+    """Fit a deterministic frequency-ranked vocabulary on supplied training text only."""
+
+    resolved_dim = int(target_dim)
+    if resolved_dim <= 0:
+        raise ValueError(f"target_dim must be positive, got {resolved_dim}")
+    normalized_range = _normalize_ngram_range(ngram_range)
+    documents = [_ngrams(_tokens(str(text)), normalized_range) for text in texts]
+    return _build_vocabulary(documents, target_dim=resolved_dim)
+
+
+def transform_bow_counts(
+    texts: Iterable[str],
+    vocabulary: Sequence[str],
+    *,
+    ngram_range: tuple[int, int] = (1, 2),
+) -> np.ndarray:
+    """Transform text with a frozen vocabulary into raw n-gram count vectors."""
+
+    normalized_range = _normalize_ngram_range(ngram_range)
+    vocabulary_list = [str(term) for term in vocabulary]
+    if len(vocabulary_list) != len(set(vocabulary_list)):
+        raise ValueError("BoW vocabulary contains duplicate terms.")
+    documents = [_ngrams(_tokens(str(text)), normalized_range) for text in texts]
+    features = np.zeros((len(documents), len(vocabulary_list)), dtype=np.float32)
+    if not vocabulary_list:
         return features
-    term_to_idx = {term: idx for idx, term in enumerate(vocabulary)}
+    term_to_idx = {term: idx for idx, term in enumerate(vocabulary_list)}
     for row_idx, terms in enumerate(documents):
         row_counts = Counter(terms)
         for term, count in row_counts.items():
             column_idx = term_to_idx.get(term)
             if column_idx is not None:
-                features[row_idx, column_idx] = math.log1p(float(count))
+                features[row_idx, column_idx] = float(count)
     return features
+
+
+def transform_bow_log_counts(
+    texts: Iterable[str],
+    vocabulary: Sequence[str],
+    *,
+    ngram_range: tuple[int, int] = (1, 2),
+) -> np.ndarray:
+    """Transform text into ``log1p`` n-gram counts using a frozen vocabulary."""
+
+    return np.log1p(
+        transform_bow_counts(texts, vocabulary, ngram_range=ngram_range)
+    ).astype(np.float32)
 
 
 def _feature_frame(news_df: pd.DataFrame, *, features: np.ndarray, target_dim: int) -> pd.DataFrame:
@@ -128,9 +168,22 @@ def fit_bow_features(
     ngram_range = _normalize_ngram_range(ngram_range)
 
     texts = _text_series(news_df, text_column)
-    documents = [_ngrams(_tokens(text), ngram_range) for text in texts.tolist()]
-    vocabulary = _build_vocabulary(documents, target_dim=target_dim)
-    features = _frequency_features(documents, vocabulary, target_dim=target_dim)
+    vocabulary = fit_bow_vocabulary(
+        texts.tolist(),
+        target_dim=target_dim,
+        ngram_range=ngram_range,
+    )
+    features = transform_bow_log_counts(
+        texts.tolist(),
+        vocabulary,
+        ngram_range=ngram_range,
+    )
+    if features.shape[1] < target_dim:
+        features = np.pad(
+            features,
+            ((0, 0), (0, target_dim - features.shape[1])),
+            mode="constant",
+        ).astype(np.float32)
     frame = _feature_frame(news_df, features=features, target_dim=target_dim)
 
     fitted = bool(vocabulary)
