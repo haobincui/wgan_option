@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import yaml
 
 
 def _now_utc() -> str:
@@ -106,6 +107,21 @@ def _workbook_summary(path: Path) -> dict[str, Any]:
                 str(key): int(value)
                 for key, value in pair["surface_model"].value_counts(dropna=False).items()
             }
+        if "source_timezone" in pair:
+            summary["news_source_timezones"] = sorted(
+                {
+                    str(value).strip()
+                    for value in pair["source_timezone"].dropna().tolist()
+                    if str(value).strip()
+                }
+            )
+        if "timestamp_parse_status" in pair:
+            summary["timestamp_parse_status_counts"] = {
+                str(key): int(value)
+                for key, value in pair["timestamp_parse_status"]
+                .value_counts(dropna=False)
+                .items()
+            }
         if "training_candidate_flag" in pair:
             summary["usable_pairs"] = int(pd.to_numeric(pair["training_candidate_flag"], errors="coerce").fillna(0).sum())
         else:
@@ -136,6 +152,22 @@ def _workbook_summary(path: Path) -> dict[str, Any]:
     return summary
 
 
+def _resolved_source_timezone(dataset_dir: Path) -> str:
+    config_path = dataset_dir / "surface-resolved_config.yaml"
+    if not config_path.is_file():
+        return ""
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        return ""
+    surface_builder = payload.get("surface_builder") or {}
+    generate = (
+        surface_builder.get("generate_surface")
+        if isinstance(surface_builder, dict)
+        else {}
+    ) or {}
+    return str(generate.get("source_timezone") or "").strip()
+
+
 def validate_dataset(args: argparse.Namespace) -> int:
     dataset_dir = Path(args.dataset_dir).expanduser()
     workbook_path = Path(args.workbook).expanduser() if args.workbook else dataset_dir / "merged_vol.xlsx"
@@ -145,6 +177,14 @@ def validate_dataset(args: argparse.Namespace) -> int:
 
     workbook = _workbook_summary(workbook_path)
     usable_pairs = int(workbook.get("usable_pairs", 0))
+    expected_timezone = str(args.source_timezone).strip()
+    resolved_timezone = _resolved_source_timezone(dataset_dir)
+    workbook_timezones = list(workbook.get("news_source_timezones") or [])
+    timezone_ok = (
+        resolved_timezone == expected_timezone
+        and workbook_timezones == [expected_timezone]
+    )
+    usable_ok = usable_pairs >= int(args.min_usable_pairs)
     validation = {
         "created_at_utc": _now_utc(),
         "dataset_dir": str(dataset_dir),
@@ -153,11 +193,23 @@ def validate_dataset(args: argparse.Namespace) -> int:
         "interpolation_policy": "linear_percent_strike_and_linear_total_variance_by_maturity",
         "window_minutes": args.window_minutes,
         "min_strikes_per_expiry": args.min_strikes_per_expiry,
+        "expected_news_source_timezone": expected_timezone,
+        "surface_news_source_timezone": resolved_timezone,
+        "workbook_news_source_timezones": workbook_timezones,
+        "timezone_validation_ok": bool(timezone_ok),
         **_surface_json_summary(surface_json),
         **workbook,
         "training_hard_stop_threshold": int(args.min_usable_pairs),
         "low_power_warning_threshold": int(args.warn_usable_pairs),
-        "status": "ok" if usable_pairs >= int(args.min_usable_pairs) else "failed_low_usable_pairs",
+        "status": (
+            "ok"
+            if usable_ok and timezone_ok
+            else (
+                "failed_timezone_mismatch"
+                if not timezone_ok
+                else "failed_low_usable_pairs"
+            )
+        ),
         "warning": "low_power" if usable_pairs < int(args.warn_usable_pairs) else "",
     }
     output_json = Path(args.output_json).expanduser() if args.output_json else dataset_dir / "raw_vol_dataset_validation.json"
@@ -175,6 +227,7 @@ def validate_dataset(args: argparse.Namespace) -> int:
                     "dataset_dir",
                     "window_minutes",
                     "min_strikes_per_expiry",
+                    "news_source_timezone",
                     "usable_pairs",
                     "gan_input_rows",
                     "json_target_count",
@@ -191,6 +244,7 @@ def validate_dataset(args: argparse.Namespace) -> int:
                     "dataset_dir": validation["dataset_dir"],
                     "window_minutes": validation["window_minutes"],
                     "min_strikes_per_expiry": validation["min_strikes_per_expiry"],
+                    "news_source_timezone": validation["surface_news_source_timezone"],
                     "usable_pairs": validation["usable_pairs"],
                     "gan_input_rows": validation["gan_input_rows"],
                     "json_target_count": validation["json_target_count"],
@@ -244,6 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--coverage-csv", default="")
     validate.add_argument("--window-minutes", type=int, default=0)
     validate.add_argument("--min-strikes-per-expiry", type=int, default=0)
+    validate.add_argument("--source-timezone", default="Europe/London")
     validate.add_argument("--min-usable-pairs", type=int, default=100)
     validate.add_argument("--warn-usable-pairs", type=int, default=1000)
     validate.add_argument("--no-fail", action="store_true")

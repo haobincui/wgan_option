@@ -36,8 +36,10 @@ from wgan_option.merge_support import (  # noqa: E402
     normalize_optional_text,
     offset_column_name,
     resolve_existing_path,
+    resolve_news_source_timezone,
     resolve_surface_csv_path,
     resolve_surface_json_path,
+    safe_float,
     serialize_json,
     serialize_list,
     weighted_mae,
@@ -57,6 +59,10 @@ AUDIT_HEADERS = [
     "news_row_id",
     "article_id",
     "source_file",
+    "source_local_timestamp",
+    "source_timezone",
+    "source_utc_offset_minutes",
+    "timestamp_parse_status",
     "direction",
     "news_timestamp_utc",
     "matched_snapshot_time_utc",
@@ -112,6 +118,10 @@ SLICE_HEADERS = [
 
 GAN_HEADERS = [
     "sample_id",
+    "source_local_timestamp",
+    "source_timezone",
+    "source_utc_offset_minutes",
+    "timestamp_parse_status",
     "news_timestamp_utc",
     "direction",
     "matched_snapshot_time_utc",
@@ -145,8 +155,11 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--source-timezone",
-        default=DEFAULT_SOURCE_TIMEZONE,
-        help="Timezone used to parse PD + ET in the news xlsx.",
+        default=None,
+        help=(
+            "Timezone used to parse PD + ET. Defaults to the surface resolved "
+            f"config, then {DEFAULT_SOURCE_TIMEZONE} for legacy inputs."
+        ),
     )
     parser.add_argument(
         "--offset-minutes",
@@ -163,6 +176,16 @@ def _sample_base_fields(news_row: pd.Series, direction: str, matched_snapshot: s
         "news_row_id": int(news_row["news_row_id"]),
         "article_id": normalize_optional_text(news_row.get("ArticleID", "")),
         "source_file": normalize_optional_text(news_row.get("SourceFile", "")),
+        "source_local_timestamp": normalize_optional_text(
+            news_row.get("source_local_timestamp", "")
+        ),
+        "source_timezone": normalize_optional_text(news_row.get("source_timezone", "")),
+        "source_utc_offset_minutes": coerce_optional_numeric(
+            safe_float(news_row.get("source_utc_offset_minutes"))
+        ),
+        "timestamp_parse_status": normalize_optional_text(
+            news_row.get("timestamp_parse_status", "")
+        ),
         "direction": direction,
         "news_timestamp_utc": normalize_optional_text(news_row.get("timestamp_utc", "")),
         "matched_snapshot_time_utc": normalize_optional_text(matched_snapshot),
@@ -419,12 +442,13 @@ def build_workbook_frames(
     input_dir: Path,
     *,
     news_xlsx_path: Path = DEFAULT_NEWS_XLSX_PATH,
-    source_timezone: str = DEFAULT_SOURCE_TIMEZONE,
+    source_timezone: Optional[str] = None,
     offset_minutes: int = DEFAULT_OFFSET_MINUTES,
 ) -> Dict[str, pd.DataFrame]:
     input_dir = resolve_existing_path(Path(input_dir), "Input directory")
     if not input_dir.is_dir():
         raise NotADirectoryError(f"Input path must be a directory: {input_dir}")
+    source_timezone = resolve_news_source_timezone(input_dir, source_timezone)
 
     news_xlsx_path = resolve_existing_path(Path(news_xlsx_path), "News xlsx")
     csv_path = resolve_surface_csv_path(input_dir)
@@ -472,7 +496,7 @@ def main(argv: Optional[Iterable[str]] = None) -> Path:
     workbook_frames = build_workbook_frames(
         input_dir,
         news_xlsx_path=Path(args.news_xlsx).expanduser(),
-        source_timezone=str(args.source_timezone),
+        source_timezone=args.source_timezone,
         offset_minutes=int(args.offset_minutes),
     )
     output_path = input_dir / DEFAULT_OUTPUT_NAME

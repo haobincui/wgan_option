@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import argparse
 import logging
-import math
 import sys
-from datetime import date as dt_date
-from datetime import datetime as dt_datetime
-from datetime import time as dt_time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
+from wgan_option.news_time import (
+    DEFAULT_NEWS_SOURCE_TIMEZONE,
+    excel_time_fraction_to_hms,
+    normalize_news_date,
+    normalize_news_time,
+    parse_news_timestamps,
+)
 from ..common.config_utils import resolve_config_variables  # noqa: E402
 from .all import (  # noqa: E402
     DEFAULT_CONFIG_PATH,
@@ -33,7 +36,7 @@ DEFAULT_TARGET_XLSX = "data/raw/text_embedding/news_with_openai_embeddings_large
 DEFAULT_SHEET_NAME = "Sheet1"
 DEFAULT_DATE_COLUMN = "PD"
 DEFAULT_TIME_COLUMN = "ET"
-DEFAULT_SOURCE_TIMEZONE = "America/New_York"
+DEFAULT_SOURCE_TIMEZONE = DEFAULT_NEWS_SOURCE_TIMEZONE
 
 
 def _load_excel_config(config_path_value: str) -> Dict[str, Any]:
@@ -122,57 +125,9 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     return args
 
 
-def _normalize_date_value(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, float) and not math.isfinite(value):
-        return ""
-    if pd.isna(value):
-        return ""
-    if isinstance(value, pd.Timestamp):
-        return value.strftime("%Y-%m-%d")
-    if isinstance(value, dt_datetime):
-        return value.strftime("%Y-%m-%d")
-    if isinstance(value, dt_date):
-        return value.isoformat()
-    text = str(value).strip()
-    if text.lower() in {"", "nan", "nat", "none"}:
-        return ""
-    return text
-
-
-def _excel_time_fraction_to_hms(value: float) -> str:
-    total_seconds = int(round(max(0.0, min(float(value), 1.0)) * 24 * 60 * 60))
-    total_seconds = total_seconds % (24 * 60 * 60)
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
-    seconds = total_seconds % 60
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-
-def _normalize_time_value(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, float) and not math.isfinite(value):
-        return ""
-    if pd.isna(value):
-        return ""
-    if isinstance(value, pd.Timestamp):
-        return value.strftime("%H:%M:%S")
-    if isinstance(value, dt_datetime):
-        return value.strftime("%H:%M:%S")
-    if isinstance(value, dt_time):
-        return value.strftime("%H:%M:%S")
-    if isinstance(value, (int, float)):
-        numeric = float(value)
-        if 0.0 <= numeric < 1.0:
-            return _excel_time_fraction_to_hms(numeric)
-        text = str(value).strip()
-        return "" if text.lower() in {"", "nan", "nat", "none"} else text
-    text = str(value).strip()
-    if text.lower() in {"", "nan", "nat", "none"}:
-        return ""
-    return text
+_normalize_date_value = normalize_news_date
+_excel_time_fraction_to_hms = excel_time_fraction_to_hms
+_normalize_time_value = normalize_news_time
 
 
 def _to_utc_string(ts: pd.Timestamp) -> str:
@@ -205,18 +160,12 @@ def _load_target_datetimes_from_excel(args: argparse.Namespace) -> Tuple[List[pd
     if df.empty:
         raise ValueError(f"No rows found in xlsx: {path} (sheet={args.sheet_name})")
 
-    date_text = df[args.date_column].map(_normalize_date_value)
-    time_text = df[args.time_column].map(_normalize_time_value)
-    complete_mask = (date_text != "") & (time_text != "")
-    combined_text = (date_text + " " + time_text).where(complete_mask, None)
-
-    naive_ts = pd.to_datetime(combined_text, errors="coerce")
-    localized_ts = naive_ts.dt.tz_localize(
-        args.source_timezone,
-        ambiguous="NaT",
-        nonexistent="NaT",
+    parsed = parse_news_timestamps(
+        df[args.date_column],
+        df[args.time_column],
+        source_timezone=args.source_timezone,
     )
-    utc_ts = localized_ts.dt.tz_convert("UTC")
+    utc_ts = pd.to_datetime(parsed.timestamp_utc, utc=True, errors="coerce")
 
     parsed_mask = utc_ts.notna()
     parsed_rows = int(parsed_mask.sum())
@@ -251,6 +200,10 @@ def _load_target_datetimes_from_excel(args: argparse.Namespace) -> Tuple[List[pd
         "invalid_rows": invalid_rows,
         "deduped_targets": deduped_count,
         "final_targets_used": final_targets_used,
+        "parse_status_counts": {
+            str(key): int(value)
+            for key, value in parsed.parse_status.value_counts(dropna=False).items()
+        },
     }
     return deduped_targets, stats
 
@@ -275,6 +228,7 @@ def run_excel_job(
     logger.info("  excel_rows_total=%d", stats["excel_rows_total"])
     logger.info("  parsed_rows=%d", stats["parsed_rows"])
     logger.info("  invalid_rows=%d", stats["invalid_rows"])
+    logger.info("  parse_status_counts=%s", stats["parse_status_counts"])
     logger.info("  deduped_targets=%d", stats["deduped_targets"])
     logger.info("  final_targets_used=%d", stats["final_targets_used"])
     logger.info("  source_xlsx=%s", Path(args.target_xlsx))

@@ -462,7 +462,14 @@ class TestMergeVol(unittest.TestCase):
             output_path = result_dir / "merged_vol.xlsx"
 
             with patch.object(merge_vol, "DEFAULT_NEWS_XLSX_PATH", xlsx_path):
-                written_path = merge_vol.main(["--input-dir", str(result_dir)])
+                written_path = merge_vol.main(
+                    [
+                        "--input-dir",
+                        str(result_dir),
+                        "--source-timezone",
+                        "America/New_York",
+                    ]
+                )
 
             self.assertEqual(written_path, output_path)
             self.assertTrue(output_path.exists())

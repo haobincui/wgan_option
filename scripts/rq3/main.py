@@ -28,6 +28,10 @@ from scripts.rq3.news_quiet import (  # noqa: E402
     build_news_quiet_workbook,
     prepare_news_quiet_targets,
 )
+from scripts.rq3.scheduled_news_regime import (  # noqa: E402
+    run_scheduled_news_regime,
+)
+from wgan_option.merge_support import DEFAULT_SOURCE_TIMEZONE  # noqa: E402
 
 
 def _default_output_dir(prefix: str) -> str:
@@ -105,6 +109,11 @@ def build_parser() -> argparse.ArgumentParser:
     build_news_quiet.add_argument("--source-merged-vol", required=True, help="Source merged_vol_rq2_text.xlsx path.")
     build_news_quiet.add_argument("--surface-all-json", required=True, help="surface-*-all.json path.")
     build_news_quiet.add_argument("--news-xlsx", required=True, help="Raw news workbook used to define news buffers.")
+    build_news_quiet.add_argument(
+        "--source-timezone",
+        default=DEFAULT_SOURCE_TIMEZONE,
+        help="Timezone for Factiva PD/ET publication timestamps.",
+    )
     build_news_quiet.add_argument("--output-workbook", required=True, help="Output news/quiet workbook path.")
     build_news_quiet.add_argument("--sheet-name", default=GAN_SHEET, help=f"Source sheet name (default: {GAN_SHEET}).")
     build_news_quiet.add_argument("--horizon-minutes", type=int, default=5, help="Target horizon in minutes.")
@@ -122,6 +131,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prepare_news_quiet.add_argument("--source-merged-vol", required=True, help="Source merged_vol_rq2_text.xlsx path.")
     prepare_news_quiet.add_argument("--news-xlsx", required=True, help="Raw news workbook used to define news buffers.")
+    prepare_news_quiet.add_argument(
+        "--source-timezone",
+        default=DEFAULT_SOURCE_TIMEZONE,
+        help="Timezone for Factiva PD/ET publication timestamps.",
+    )
     prepare_news_quiet.add_argument("--output-dir", required=True, help="Output directory for quiet_targets.txt and audit CSV.")
     prepare_news_quiet.add_argument("--sheet-name", default=GAN_SHEET, help=f"Source sheet name (default: {GAN_SHEET}).")
     prepare_news_quiet.add_argument("--horizon-minutes", type=int, default=5, help="Target horizon in minutes.")
@@ -166,6 +180,37 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="LABEL=PATH",
         help="Result summary CSV with a model label. Repeat for multiple models.",
+    )
+
+    scheduled_news = subparsers.add_parser(
+        "scheduled-news-regime",
+        help=(
+            "Run frozen-model scheduled high-information news versus matched "
+            "ordinary-news analysis."
+        ),
+    )
+    scheduled_news.add_argument(
+        "--config",
+        required=True,
+        help="RQ3 scheduled-news YAML config.",
+    )
+    scheduled_news.add_argument(
+        "--output-dir",
+        default="",
+        help=(
+            "Output archive directory. Defaults to "
+            "outputs/experiments/rq3_scheduled_news_regime_raw_vol_<timestamp>."
+        ),
+    )
+    scheduled_news.add_argument(
+        "--rq1-experiment",
+        default="",
+        help="Override the RQ1 frozen-prediction experiment path.",
+    )
+    scheduled_news.add_argument(
+        "--rq2-experiment",
+        default="",
+        help="Override the RQ2 frozen-prediction experiment path.",
     )
     return parser
 
@@ -219,6 +264,7 @@ def main(argv: Iterable[str] | None = None) -> Path:
             quiet_grid_minutes=int(args.quiet_grid_minutes),
             quiet_buffer_minutes=int(args.quiet_buffer_minutes),
             sheet_name=args.sheet_name,
+            source_timezone=args.source_timezone,
         )
         print(f"RQ3 news/quiet workbook written to {output}")
         return output
@@ -233,6 +279,7 @@ def main(argv: Iterable[str] | None = None) -> Path:
             candidate_count=int(args.candidate_count),
             sample_seed=int(args.sample_seed),
             sheet_name=args.sheet_name,
+            source_timezone=args.source_timezone,
         )
         print(f"RQ3 quiet target files written to {output}")
         return output
@@ -269,6 +316,15 @@ def main(argv: Iterable[str] | None = None) -> Path:
             text_label=args.text_label or None,
         )
         print(f"RQ3 news/quiet result analysis written to {output}")
+        return output
+    if args.command == "scheduled-news-regime":
+        output = run_scheduled_news_regime(
+            args.config,
+            output_dir=args.output_dir or None,
+            rq1_experiment_override=args.rq1_experiment or None,
+            rq2_experiment_override=args.rq2_experiment or None,
+        )
+        print(f"RQ3 scheduled-news regime archive written to {output}")
         return output
     raise ValueError(f"Unknown RQ3 command: {args.command}")
 

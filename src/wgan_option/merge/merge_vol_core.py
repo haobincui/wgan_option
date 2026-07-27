@@ -27,8 +27,10 @@ from wgan_option.merge_support import (
     normalize_optional_text,
     offset_column_name,
     resolve_existing_path,
+    resolve_news_source_timezone,
     resolve_surface_csv_path,
     resolve_surface_json_path,
+    safe_float,
     serialize_json,
     serialize_list,
     weighted_mae,
@@ -58,6 +60,10 @@ PAIR_AUDIT_HEADERS = [
     "news_row_id",
     "article_id",
     "source_file",
+    "source_local_timestamp",
+    "source_timezone",
+    "source_utc_offset_minutes",
+    "timestamp_parse_status",
     "news_timestamp_utc",
     "current_snapshot_time_utc",
     "target_snapshot_time_utc",
@@ -146,6 +152,10 @@ SIDE_DETAIL_HEADERS = [
 
 GAN_HEADERS = [
     "sample_id",
+    "source_local_timestamp",
+    "source_timezone",
+    "source_utc_offset_minutes",
+    "timestamp_parse_status",
     "news_timestamp_utc",
     "current_snapshot_time_utc",
     "target_snapshot_time_utc",
@@ -286,6 +296,16 @@ def _base_pair_fields(news_row: pd.Series) -> Dict[str, Any]:
         "news_row_id": int(news_row["news_row_id"]),
         "article_id": normalize_optional_text(news_row.get("ArticleID", "")),
         "source_file": normalize_optional_text(news_row.get("SourceFile", "")),
+        "source_local_timestamp": normalize_optional_text(
+            news_row.get("source_local_timestamp", "")
+        ),
+        "source_timezone": normalize_optional_text(news_row.get("source_timezone", "")),
+        "source_utc_offset_minutes": coerce_optional_numeric(
+            safe_float(news_row.get("source_utc_offset_minutes"))
+        ),
+        "timestamp_parse_status": normalize_optional_text(
+            news_row.get("timestamp_parse_status", "")
+        ),
         "news_timestamp_utc": normalize_optional_text(news_row.get("timestamp_utc", "")),
         "hd_text": normalize_optional_text(news_row.get("HD", "")),
         "lp_text": normalize_optional_text(news_row.get("LP", "")),
@@ -479,7 +499,7 @@ def build_vol_workbook_frames(
     input_dir: Path,
     *,
     news_xlsx_path: Path = DEFAULT_NEWS_XLSX_PATH,
-    source_timezone: str = DEFAULT_SOURCE_TIMEZONE,
+    source_timezone: Optional[str] = None,
     offset_minutes: int = DEFAULT_OFFSET_MINUTES,
     strike_bins: int = DEFAULT_STRIKE_BINS,
     maturity_bins: int = DEFAULT_MATURITY_BINS,
@@ -493,6 +513,7 @@ def build_vol_workbook_frames(
     input_dir = resolve_existing_path(Path(input_dir), "Input directory")
     if not input_dir.is_dir():
         raise NotADirectoryError(f"Input path must be a directory: {input_dir}")
+    source_timezone = resolve_news_source_timezone(input_dir, source_timezone)
 
     news_xlsx_path = resolve_existing_path(Path(news_xlsx_path), "News xlsx")
     csv_path = resolve_surface_csv_path(input_dir)

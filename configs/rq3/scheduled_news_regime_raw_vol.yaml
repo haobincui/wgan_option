@@ -1,0 +1,30 @@
+rq3:
+  rq1_experiment: ""
+  rq2_experiment: ""
+  rq1_metrics_relative_path: comparisons/development_test_sample_metrics.csv
+  rq2_metrics_relative_path: comparisons/development_rq2_test_sample_metrics.csv
+  workbook_path: ""
+  workbook_sheet_name: gan_input_ready
+  news_source_timezone: Europe/London
+  event_calendar_path: data/reference/rq3_scheduled_macro_events_2023.csv
+
+  ordinary_buffer_minutes: 60
+  time_caliper_minutes: 15
+  exact_weekday: true
+  match_ratio: 1
+  minimum_release_days: 20
+  source_tolerance: 1.0e-8
+
+  bootstrap_iterations: 10000
+  bootstrap_seed: 20260722
+
+  windows:
+    primary_0_5:
+      pre_minutes: 0
+      post_minutes: 5
+    robustness_m10_p20:
+      pre_minutes: 10
+      post_minutes: 20
+    robustness_0_30:
+      pre_minutes: 0
+      post_minutes: 30

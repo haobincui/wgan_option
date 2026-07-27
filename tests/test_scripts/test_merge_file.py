@@ -361,7 +361,14 @@ class TestMergeSvi(unittest.TestCase):
             output_path = result_dir / "merged_svi.xlsx"
 
             with patch.object(merge_svi, "DEFAULT_NEWS_XLSX_PATH", xlsx_path):
-                written_path = merge_svi.main(["--input-dir", str(result_dir)])
+                written_path = merge_svi.main(
+                    [
+                        "--input-dir",
+                        str(result_dir),
+                        "--source-timezone",
+                        "America/New_York",
+                    ]
+                )
 
             self.assertEqual(written_path, output_path)
             self.assertTrue(output_path.exists())

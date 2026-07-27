@@ -37,12 +37,13 @@ from film_wgan.text_transform import sha256_file  # noqa: E402
 DEFAULT_CONFIG = ROOT / "configs/film_wgan/train_rq1_pair_textbase.yaml"
 DEFAULT_WORKBOOK = (
     ROOT
-    / "data/processed/raw-excel/raw_vol_w5_s3_20260629-144428/merged_vol_rq2_text.xlsx"
+    / "data/processed/raw-excel/rq_raw_vol_selected/merged_vol_rq2_text.xlsx"
 )
 DEFAULT_NEWS_WORKBOOK = ROOT / "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx"
 SUMMARY_DOCUMENT = ROOT / "docs/summary/rq_research_logic_and_methodology_review_20260722.md"
 EXPERIMENT_PREFIX = "rq1_pair_text_raw_vol_continuation_"
 EXPECTED_SURFACE_MODEL = "raw"
+EXPECTED_NEWS_SOURCE_TIMEZONE = "Europe/London"
 
 SEEDS = (42, 202, 404)
 PARENT_VARIANT = "pair_pca_no_text_residual"
@@ -185,6 +186,17 @@ def _fold_config(root: Path, fold: str) -> Path:
     return _fold_dir(root, fold) / "train_rq1_pair_textbase.yaml"
 
 
+def _fold_counts(root: Path, fold: str) -> tuple[int, int, int]:
+    lineage_path = _fold_dir(root, fold) / "pair_lineage_audit.csv"
+    if not lineage_path.is_file():
+        return tuple(int(value) for value in FOLDS[fold]["counts"])
+    lineage = pd.read_csv(lineage_path, usecols=["split"])
+    return tuple(
+        int((lineage["split"].astype(str) == split).sum())
+        for split in ("train", "val", "test")
+    )
+
+
 def _variant_overrides(
     variant: str,
     *,
@@ -288,13 +300,16 @@ def _validate_raw_surface_workbook(path: Path, *, sheet_name: str) -> str:
         frame = pd.read_excel(
             path,
             sheet_name=sheet_name,
-            usecols=["surface_model"],
         )
     except ValueError as exc:
         raise ValueError(
-            f"RQ1 raw-vol workbook must contain a surface_model column in sheet "
-            f"{sheet_name!r}: {path}"
+            f"Failed to read RQ1 raw-vol workbook sheet {sheet_name!r}: {path}"
         ) from exc
+    if "surface_model" not in frame.columns:
+        raise ValueError(
+            f"RQ1 raw-vol workbook must contain a surface_model column in "
+            f"sheet {sheet_name!r}: {path}"
+        )
     models = {
         str(value).strip().lower()
         for value in frame["surface_model"].dropna().tolist()
@@ -304,6 +319,34 @@ def _validate_raw_surface_workbook(path: Path, *, sheet_name: str) -> str:
         raise ValueError(
             f"RQ1 raw-vol workflow requires surface_model={EXPECTED_SURFACE_MODEL!r}; "
             f"found {sorted(models)} in {path}."
+        )
+    missing_lineage = sorted(
+        {"source_timezone", "timestamp_parse_status"} - set(frame.columns)
+    )
+    if missing_lineage:
+        raise ValueError(
+            f"RQ1 workbook is missing London-time lineage columns "
+            f"{missing_lineage}: {path}"
+        )
+    timezones = {
+        str(value).strip()
+        for value in frame["source_timezone"].dropna().tolist()
+        if str(value).strip()
+    }
+    if timezones != {EXPECTED_NEWS_SOURCE_TIMEZONE}:
+        raise ValueError(
+            "RQ1 workbook must be rebuilt using Factiva "
+            f"source_timezone={EXPECTED_NEWS_SOURCE_TIMEZONE!r}; "
+            f"found {sorted(timezones)} in {path}."
+        )
+    parse_statuses = {
+        str(value).strip()
+        for value in frame["timestamp_parse_status"].dropna().tolist()
+        if str(value).strip()
+    }
+    if parse_statuses != {"ok"}:
+        raise ValueError(
+            f"RQ1 workbook contains non-ok timestamp parse states: {sorted(parse_statuses)}."
         )
     return EXPECTED_SURFACE_MODEL
 
@@ -476,10 +519,9 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
         )
         bundle = create_train_val_bundle(load_train_config(fold_config_path))
         actual_counts = (bundle.train_samples, bundle.val_samples, bundle.test_samples)
-        expected_counts = tuple(int(value) for value in specification["counts"])
-        if actual_counts != expected_counts:
+        if min(actual_counts) <= 0:
             raise ValueError(
-                f"Rolling fold {fold} count mismatch: expected {expected_counts}, found {actual_counts}."
+                f"Rolling fold {fold} has an empty train/validation/test split: {actual_counts}."
             )
         pair_rows = []
         permutation_rows = []
@@ -553,6 +595,7 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             "surface_model": surface_model,
             "source_workbook": str(source_workbook),
             "source_workbook_sha256": sha256_file(source_workbook),
+            "news_source_timezone": EXPECTED_NEWS_SOURCE_TIMEZONE,
             "models": list(VARIANTS),
             "seeds": list(SEEDS),
             "folds": fold_validation,
@@ -566,13 +609,33 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
 def train_matrix(args: argparse.Namespace) -> Path:
     _assert_py312()
     root = _resolve_root(args.experiment_root)
+    selected_folds = [args.fold] if getattr(args, "fold", "") else list(FOLDS)
+    selected_seeds = [int(args.seed)] if getattr(args, "seed", None) is not None else list(SEEDS)
+    selected_variants = (
+        [args.variant] if getattr(args, "variant", "") else list(VARIANTS)
+    )
     registry_rows: list[dict[str, Any]] = []
-    for fold in FOLDS:
+    for fold in selected_folds:
         fold_payload = _read_yaml(_fold_config(root, fold))
-        for seed in SEEDS:
-            parent_checkpoint: Path | None = None
-            parent_checkpoint_sha256 = ""
-            for variant in VARIANTS:
+        for seed in selected_seeds:
+            parent_run = _completed_run(
+                root
+                / "training_runs"
+                / PARENT_VARIANT
+                / fold
+                / f"seed_{seed}"
+            )
+            parent_checkpoint = (
+                parent_run / "checkpoints/film_wgan_best.pt"
+                if parent_run is not None
+                else None
+            )
+            parent_checkpoint_sha256 = (
+                sha256_file(parent_checkpoint)
+                if parent_checkpoint is not None
+                else ""
+            )
+            for variant in selected_variants:
                 output_root = root / "training_runs" / variant / fold / f"seed_{seed}"
                 completed = _completed_run(output_root)
                 if completed is not None:
@@ -639,11 +702,16 @@ def train_matrix(args: argparse.Namespace) -> Path:
                         ),
                     }
                 )
-                pd.DataFrame(registry_rows).to_csv(
-                    root / "registry/launch_registry.csv",
-                    index=False,
-                )
-    pd.DataFrame(registry_rows).to_csv(root / "registry/launch_registry.csv", index=False)
+                if not getattr(args, "no_registry_write", False):
+                    pd.DataFrame(registry_rows).to_csv(
+                        root / "registry/launch_registry.csv",
+                        index=False,
+                    )
+    if not getattr(args, "no_registry_write", False):
+        pd.DataFrame(registry_rows).to_csv(
+            root / "registry/launch_registry.csv",
+            index=False,
+        )
     return root
 
 
@@ -958,7 +1026,7 @@ def generate_matrix(args: argparse.Namespace) -> Path:
         run_dir = Path(row.run_dir)
         output_dir = run_dir / "development_test_json"
         summary_path = output_dir / "summary.csv"
-        expected = int(FOLDS[str(row.fold)]["counts"][2])
+        expected = _fold_counts(root, str(row.fold))[2]
         if summary_path.is_file() and len(pd.read_csv(summary_path)) == expected:
             status = "reused"
         else:
@@ -1048,6 +1116,113 @@ def _holm_adjust(values: Sequence[float]) -> list[float]:
     return adjusted.astype(float).tolist()
 
 
+def _write_result_summary(
+    root: Path,
+    *,
+    samples: pd.DataFrame,
+    bootstrap: pd.DataFrame,
+    seed_tests: pd.DataFrame,
+) -> None:
+    metric_columns = [*POINT_METRICS, *PROBABILISTIC_METRICS, *FINANCIAL_METRICS]
+    overall_rows = []
+    for variant, group in samples.groupby("variant", sort=True):
+        row = {
+            "variant": str(variant),
+            "sample_rows": int(len(group)),
+            "pair_count": int(
+                group[["fold", "surface_pair_id"]].drop_duplicates().shape[0]
+            ),
+            "fold_count": int(group["fold"].nunique()),
+            "seed_count": int(group["seed"].nunique()),
+        }
+        row.update({metric: float(group[metric].mean()) for metric in metric_columns})
+        overall_rows.append(row)
+    overall = pd.DataFrame(overall_rows)
+    overall_path = root / "final_tables/development_rq1_model_overall_metrics.csv"
+    overall.to_csv(overall_path, index=False)
+
+    primary = bootstrap[bootstrap["contrast"] == "incremental_text"].copy()
+    primary_seed = seed_tests[seed_tests["contrast"] == "incremental_text"][
+        [
+            "metric",
+            "seed_count",
+            "positive_seed_count",
+            "paired_t_p_two_sided",
+            "wilcoxon_exact_p_two_sided",
+        ]
+    ]
+    primary = primary.merge(primary_seed, on="metric", how="left", validate="one_to_one")
+    primary_path = root / "final_tables/development_rq1_primary_all_metrics.csv"
+    primary.to_csv(primary_path, index=False)
+
+    summary = {
+        "status": "ok",
+        "development_only": True,
+        "experiment_root": str(root),
+        "difference_direction": "no_text_error_minus_text_error",
+        "positive_means_text_better": True,
+        "folds": list(FOLDS),
+        "seeds": list(SEEDS),
+        "variants": list(VARIANTS),
+        "primary_metrics": json.loads(primary.to_json(orient="records")),
+        "model_overall_point_metrics": json.loads(
+            overall[["variant", "surface_mae", "short_atm_mae", "atm7_abs_err"]].to_json(
+                orient="records"
+            )
+        ),
+        "result_files": {
+            "primary_all_metrics": str(primary_path),
+            "model_overall_metrics": str(overall_path),
+            "all_point_metric_contrasts": str(
+                root / "final_tables/development_rq1_point_metric_contrasts.csv"
+            ),
+            "seed_level_tests": str(
+                root / "comparisons/development_seed_level_tests.csv"
+            ),
+        },
+    }
+    _write_json(root / "final_tables/development_rq1_result_summary.json", summary)
+
+    primary_columns = [
+        "metric",
+        "mean_difference",
+        "ci_95_lower",
+        "ci_95_upper",
+        "p_two_sided",
+        "p_holm_within_contrast",
+        "positive_seed_count",
+        "seed_count",
+    ]
+    markdown_lines = [
+        "# RQ1 Development Result Summary",
+        "",
+        "Difference is `no_text_error - text_error`; positive values favor matched LP text.",
+        "",
+        "| " + " | ".join(primary_columns) + " |",
+        "|" + "|".join(["---"] * len(primary_columns)) + "|",
+    ]
+    for row in primary[primary_columns].itertuples(index=False):
+        markdown_lines.append(
+            "| "
+            + " | ".join(
+                str(value) if isinstance(value, str) else f"{float(value):.10g}"
+                for value in row
+            )
+            + " |"
+        )
+    markdown_lines.extend(
+        [
+            "",
+            "This is rolling 2023 development evidence, not an untouched 2024+ confirmation.",
+            "",
+        ]
+    )
+    (root / "final_tables/development_rq1_result_summary.md").write_text(
+        "\n".join(markdown_lines),
+        encoding="utf-8",
+    )
+
+
 def build_comparison(args: argparse.Namespace) -> Path:
     root = _resolve_root(args.experiment_root)
     (root / "comparisons").mkdir(parents=True, exist_ok=True)
@@ -1064,7 +1239,11 @@ def build_comparison(args: argparse.Namespace) -> Path:
         summary["variant"] = str(record.variant)
         rows.append(summary)
     samples = pd.concat(rows, ignore_index=True)
-    expected_rows = sum(int(spec["counts"][2]) for spec in FOLDS.values()) * len(SEEDS) * len(VARIANTS)
+    expected_rows = (
+        sum(_fold_counts(root, fold)[2] for fold in FOLDS)
+        * len(SEEDS)
+        * len(VARIANTS)
+    )
     if len(samples) != expected_rows:
         raise ValueError(f"Combined development sample count mismatch: {len(samples)} != {expected_rows}.")
     samples_path = root / "comparisons/development_test_sample_metrics.csv"
@@ -1249,6 +1428,12 @@ def build_comparison(args: argparse.Namespace) -> Path:
     model_summary[
         ["variant", "fold", "seed", "n_pairs", *FINANCIAL_METRICS]
     ].to_csv(root / "final_tables/development_rq1_financial_consistency.csv", index=False)
+    _write_result_summary(
+        root,
+        samples=samples,
+        bootstrap=bootstrap,
+        seed_tests=seed_tests,
+    )
 
     status = {
         "status": "ok",
@@ -1258,8 +1443,9 @@ def build_comparison(args: argparse.Namespace) -> Path:
         "sample_metric_rows": int(len(samples)),
         "pairwise_difference_rows": int(len(differences)),
         "fold_test_pair_counts": {
-            fold: int(spec["counts"][2]) for fold, spec in FOLDS.items()
+            fold: _fold_counts(root, fold)[2] for fold in FOLDS
         },
+        "news_source_timezone": EXPECTED_NEWS_SOURCE_TIMEZONE,
         "stage_b_parent_validation": "checkpoint_selection/paired_stage_validation.csv",
         "primary_focal_variant": TEXT_RESIDUAL_VARIANT,
         "primary_baseline_variant": CONTINUATION_VARIANT,
@@ -1299,11 +1485,113 @@ Primary table:
 Parent/continuation diagnostics:
 `final_tables/development_rq1_parent_continuation_diagnostics.csv`
 
+Primary three-metric summary: `final_tables/development_rq1_primary_all_metrics.csv`
+Machine-readable summary: `final_tables/development_rq1_result_summary.json`
 All point-metric contrasts: `final_tables/development_rq1_point_metric_contrasts.csv`
 """
     (root / "README.md").write_text(readme, encoding="utf-8")
     _build_manifest(root)
     return root
+
+
+def run_results_pipeline(args: argparse.Namespace) -> Path:
+    _assert_py312()
+    root = _resolve_root(args.experiment_root)
+    status_path = root / "registry/results_pipeline_status.json"
+    state: dict[str, Any] = {
+        "status": "running",
+        "current_stage": "preflight",
+        "experiment_root": str(root),
+        "started_at_utc": datetime.now(timezone.utc).isoformat(),
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "bootstrap_iterations": int(args.bootstrap_iterations),
+        "bootstrap_seed": int(args.bootstrap_seed),
+        "stages": {},
+    }
+
+    def update_stage(stage: str, status: str, **extra: Any) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        state["current_stage"] = stage
+        state["updated_at_utc"] = now
+        stage_state = dict(state["stages"].get(stage) or {})
+        stage_state["status"] = status
+        if status == "running":
+            stage_state["started_at_utc"] = now
+        if status in {"completed", "failed"}:
+            stage_state["finished_at_utc"] = now
+        stage_state.update(extra)
+        state["stages"][stage] = stage_state
+        _write_json(status_path, state)
+
+    try:
+        update_stage("collect_checkpoints", "running")
+        collect_checkpoints(argparse.Namespace(experiment_root=str(root)))
+        selected = pd.read_csv(root / "checkpoint_selection/selected_checkpoints.csv")
+        expected_runs = len(FOLDS) * len(SEEDS) * len(VARIANTS)
+        if len(selected) != expected_runs:
+            raise ValueError(
+                f"Selected checkpoint count mismatch: {len(selected)} != {expected_runs}."
+            )
+        update_stage(
+            "collect_checkpoints",
+            "completed",
+            selected_checkpoint_count=int(len(selected)),
+        )
+
+        update_stage("generate_test_results", "running")
+        generate_matrix(argparse.Namespace(experiment_root=str(root)))
+        generated = pd.read_csv(root / "registry/generate_registry.csv")
+        if len(generated) != expected_runs:
+            raise ValueError(
+                f"Generate registry count mismatch: {len(generated)} != {expected_runs}."
+            )
+        update_stage(
+            "generate_test_results",
+            "completed",
+            generated_run_count=int(len(generated)),
+            generated_sample_count=int(generated["sample_count"].sum()),
+        )
+
+        update_stage("build_comparison", "running")
+        build_comparison(
+            argparse.Namespace(
+                experiment_root=str(root),
+                bootstrap_iterations=int(args.bootstrap_iterations),
+                bootstrap_seed=int(args.bootstrap_seed),
+            )
+        )
+        summary_path = root / "final_tables/development_rq1_result_summary.json"
+        if not summary_path.is_file():
+            raise FileNotFoundError(f"Missing final result summary: {summary_path}")
+        update_stage(
+            "build_comparison",
+            "completed",
+            result_summary_path=str(summary_path),
+        )
+
+        state["status"] = "completed"
+        state["current_stage"] = "completed"
+        state["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+        state["updated_at_utc"] = state["finished_at_utc"]
+        _write_json(status_path, state)
+        print(f"RQ1 result pipeline completed: {root}")
+        print(f"Result summary: {summary_path}")
+        return root
+    except Exception as exc:
+        failed_stage = str(state.get("current_stage", "unknown"))
+        state["status"] = "failed"
+        state["error_type"] = type(exc).__name__
+        state["error_message"] = str(exc)
+        state["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+        state["updated_at_utc"] = state["finished_at_utc"]
+        stage_state = dict(state["stages"].get(failed_stage) or {})
+        stage_state["status"] = "failed"
+        stage_state["finished_at_utc"] = state["finished_at_utc"]
+        stage_state["error_type"] = type(exc).__name__
+        stage_state["error_message"] = str(exc)
+        state["stages"][failed_stage] = stage_state
+        _write_json(status_path, state)
+        raise
 
 
 def _build_manifest(root: Path) -> Path:
@@ -1351,6 +1639,14 @@ def build_parser() -> argparse.ArgumentParser:
     train = subparsers.add_parser("train-matrix")
     train.add_argument("--experiment-root", default="")
     train.add_argument("--resume", action="store_true")
+    train.add_argument("--fold", choices=list(FOLDS), default="")
+    train.add_argument("--seed", type=int, choices=list(SEEDS), default=None)
+    train.add_argument("--variant", choices=list(VARIANTS), default="")
+    train.add_argument(
+        "--no-registry-write",
+        action="store_true",
+        help="Skip shared registry writes for externally parallelized single-run jobs.",
+    )
 
     monitor_parser = subparsers.add_parser("monitor")
     monitor_parser.add_argument("--experiment-root", default="")
@@ -1365,6 +1661,11 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--experiment-root", default="")
     compare.add_argument("--bootstrap-iterations", type=int, default=10000)
     compare.add_argument("--bootstrap-seed", type=int, default=20260722)
+
+    results = subparsers.add_parser("results-pipeline")
+    results.add_argument("--experiment-root", default="")
+    results.add_argument("--bootstrap-iterations", type=int, default=10000)
+    results.add_argument("--bootstrap-seed", type=int, default=20260722)
 
     package = subparsers.add_parser("package")
     package.add_argument("--experiment-root", default="")
@@ -1386,6 +1687,8 @@ def main(argv: Iterable[str] | None = None) -> Path:
         return generate_matrix(args)
     if args.command == "compare":
         return build_comparison(args)
+    if args.command == "results-pipeline":
+        return run_results_pipeline(args)
     if args.command == "package":
         return package_experiment(args)
     raise ValueError(args.command)

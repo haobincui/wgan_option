@@ -28,6 +28,6 @@ surface_builder:
     sheet_name: Sheet1
     date_column: PD
     time_column: ET
-    source_timezone: America/New_York
+    source_timezone: Europe/London
     max_target_datetimes: 0
     window_minutes: 5
