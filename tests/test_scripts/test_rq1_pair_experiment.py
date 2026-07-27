@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pandas as pd
@@ -433,18 +434,112 @@ class TestPairRollingComparison(unittest.TestCase):
                 )
             )
             primary = pd.read_csv(root / "final_tables/development_rq1_primary_test.csv")
+            primary_all = pd.read_csv(
+                root / "final_tables/development_rq1_primary_all_metrics.csv"
+            )
+            overall = pd.read_csv(
+                root / "final_tables/development_rq1_model_overall_metrics.csv"
+            )
             seed_tests = pd.read_csv(root / "comparisons/development_seed_level_tests.csv")
             validation = json.loads((root / "validation_summary.json").read_text(encoding="utf-8"))
+            result_summary = json.loads(
+                (root / "final_tables/development_rq1_result_summary.json").read_text(
+                    encoding="utf-8"
+                )
+            )
             self.assertEqual(len(primary), 1)
+            self.assertEqual(set(primary_all["metric"]), set(rq1_pair_experiment.POINT_METRICS))
+            self.assertEqual(set(overall["variant"]), set(rq1_pair_experiment.VARIANTS))
             self.assertEqual(len(seed_tests), len(rq1_pair_experiment.CONTRASTS) * 3)
             self.assertEqual(validation["status"], "ok")
             self.assertTrue(validation["development_only"])
+            self.assertEqual(result_summary["status"], "ok")
+            self.assertEqual(
+                result_summary["difference_direction"],
+                "no_text_error_minus_text_error",
+            )
             expected_rows = (
                 sum(int(specification["counts"][2]) for specification in rq1_pair_experiment.FOLDS.values())
                 * len(rq1_pair_experiment.SEEDS)
                 * len(rq1_pair_experiment.VARIANTS)
             )
             self.assertEqual(validation["sample_metric_rows"], expected_rows)
+
+    def test_results_pipeline_records_completed_stages(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "rq1_pair_text_raw_vol_rolling_test"
+            (root / "checkpoint_selection").mkdir(parents=True)
+            (root / "registry").mkdir(parents=True)
+            (root / "final_tables").mkdir(parents=True)
+            expected_runs = (
+                len(rq1_pair_experiment.FOLDS)
+                * len(rq1_pair_experiment.SEEDS)
+                * len(rq1_pair_experiment.VARIANTS)
+            )
+
+            def fake_collect(_args):
+                pd.DataFrame({"run": range(expected_runs)}).to_csv(
+                    root / "checkpoint_selection/selected_checkpoints.csv",
+                    index=False,
+                )
+                return root
+
+            def fake_generate(_args):
+                pd.DataFrame(
+                    {
+                        "run": range(expected_runs),
+                        "sample_count": np.ones(expected_runs, dtype=int),
+                    }
+                ).to_csv(root / "registry/generate_registry.csv", index=False)
+                return root
+
+            def fake_compare(_args):
+                (root / "final_tables/development_rq1_result_summary.json").write_text(
+                    '{"status": "ok"}\n',
+                    encoding="utf-8",
+                )
+                return root
+
+            args = argparse.Namespace(
+                experiment_root=str(root),
+                bootstrap_iterations=100,
+                bootstrap_seed=20260722,
+            )
+            with (
+                mock.patch.object(rq1_pair_experiment, "_assert_py312"),
+                mock.patch.object(
+                    rq1_pair_experiment,
+                    "collect_checkpoints",
+                    side_effect=fake_collect,
+                ),
+                mock.patch.object(
+                    rq1_pair_experiment,
+                    "generate_matrix",
+                    side_effect=fake_generate,
+                ),
+                mock.patch.object(
+                    rq1_pair_experiment,
+                    "build_comparison",
+                    side_effect=fake_compare,
+                ),
+            ):
+                result = rq1_pair_experiment.run_results_pipeline(args)
+
+            self.assertEqual(result, root)
+            status = json.loads(
+                (root / "registry/results_pipeline_status.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(status["status"], "completed")
+            self.assertEqual(status["current_stage"], "completed")
+            self.assertEqual(
+                status["stages"]["collect_checkpoints"]["selected_checkpoint_count"],
+                expected_runs,
+            )
+            self.assertEqual(
+                status["stages"]["generate_test_results"]["generated_run_count"],
+                expected_runs,
+            )
+            self.assertEqual(status["stages"]["build_comparison"]["status"], "completed")
 
 
 if __name__ == "__main__":

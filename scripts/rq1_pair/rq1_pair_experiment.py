@@ -821,6 +821,113 @@ def _holm_adjust(values: Sequence[float]) -> list[float]:
     return adjusted.astype(float).tolist()
 
 
+def _write_result_summary(
+    root: Path,
+    *,
+    samples: pd.DataFrame,
+    bootstrap: pd.DataFrame,
+    seed_tests: pd.DataFrame,
+) -> None:
+    metric_columns = [*POINT_METRICS, *PROBABILISTIC_METRICS, *FINANCIAL_METRICS]
+    overall_rows = []
+    for variant, group in samples.groupby("variant", sort=True):
+        row = {
+            "variant": str(variant),
+            "sample_rows": int(len(group)),
+            "pair_count": int(
+                group[["fold", "surface_pair_id"]].drop_duplicates().shape[0]
+            ),
+            "fold_count": int(group["fold"].nunique()),
+            "seed_count": int(group["seed"].nunique()),
+        }
+        row.update({metric: float(group[metric].mean()) for metric in metric_columns})
+        overall_rows.append(row)
+    overall = pd.DataFrame(overall_rows)
+    overall_path = root / "final_tables/development_rq1_model_overall_metrics.csv"
+    overall.to_csv(overall_path, index=False)
+
+    primary = bootstrap[bootstrap["contrast"] == "incremental_text"].copy()
+    primary_seed = seed_tests[seed_tests["contrast"] == "incremental_text"][
+        [
+            "metric",
+            "seed_count",
+            "positive_seed_count",
+            "paired_t_p_two_sided",
+            "wilcoxon_exact_p_two_sided",
+        ]
+    ]
+    primary = primary.merge(primary_seed, on="metric", how="left", validate="one_to_one")
+    primary_path = root / "final_tables/development_rq1_primary_all_metrics.csv"
+    primary.to_csv(primary_path, index=False)
+
+    summary = {
+        "status": "ok",
+        "development_only": True,
+        "experiment_root": str(root),
+        "difference_direction": "no_text_error_minus_text_error",
+        "positive_means_text_better": True,
+        "folds": list(FOLDS),
+        "seeds": list(SEEDS),
+        "variants": list(VARIANTS),
+        "primary_metrics": json.loads(primary.to_json(orient="records")),
+        "model_overall_point_metrics": json.loads(
+            overall[["variant", "surface_mae", "short_atm_mae", "atm7_abs_err"]].to_json(
+                orient="records"
+            )
+        ),
+        "result_files": {
+            "primary_all_metrics": str(primary_path),
+            "model_overall_metrics": str(overall_path),
+            "all_point_metric_contrasts": str(
+                root / "final_tables/development_rq1_point_metric_contrasts.csv"
+            ),
+            "seed_level_tests": str(
+                root / "comparisons/development_seed_level_tests.csv"
+            ),
+        },
+    }
+    _write_json(root / "final_tables/development_rq1_result_summary.json", summary)
+
+    primary_columns = [
+        "metric",
+        "mean_difference",
+        "ci_95_lower",
+        "ci_95_upper",
+        "p_two_sided",
+        "p_holm_within_contrast",
+        "positive_seed_count",
+        "seed_count",
+    ]
+    markdown_lines = [
+        "# RQ1 Development Result Summary",
+        "",
+        "Difference is `no_text_error - text_error`; positive values favor matched LP text.",
+        "",
+        "| " + " | ".join(primary_columns) + " |",
+        "|" + "|".join(["---"] * len(primary_columns)) + "|",
+    ]
+    for row in primary[primary_columns].itertuples(index=False):
+        markdown_lines.append(
+            "| "
+            + " | ".join(
+                str(value) if isinstance(value, str) else f"{float(value):.10g}"
+                for value in row
+            )
+            + " |"
+        )
+    markdown_lines.extend(
+        [
+            "",
+            "This is rolling 2023 development evidence, not an untouched 2024+ confirmation.",
+            "",
+        ]
+    )
+    (root / "final_tables/development_rq1_result_summary.md").write_text(
+        "\n".join(markdown_lines),
+        encoding="utf-8",
+    )
+
+
 def build_comparison(args: argparse.Namespace) -> Path:
     root = _resolve_root(args.experiment_root)
     (root / "comparisons").mkdir(parents=True, exist_ok=True)
@@ -1012,6 +1119,12 @@ def build_comparison(args: argparse.Namespace) -> Path:
     model_summary[
         ["variant", "fold", "seed", "n_pairs", *FINANCIAL_METRICS]
     ].to_csv(root / "final_tables/development_rq1_financial_consistency.csv", index=False)
+    _write_result_summary(
+        root,
+        samples=samples,
+        bootstrap=bootstrap,
+        seed_tests=seed_tests,
+    )
 
     status = {
         "status": "ok",
@@ -1048,11 +1161,113 @@ surface pair, transformed by fold-train-only PCA-128, and the residual text
 models are initialized from the paired fold/seed no-text generator.
 
 Primary table: `final_tables/development_rq1_primary_test.csv`
+Primary three-metric summary: `final_tables/development_rq1_primary_all_metrics.csv`
+Machine-readable summary: `final_tables/development_rq1_result_summary.json`
 All point-metric contrasts: `final_tables/development_rq1_point_metric_contrasts.csv`
 """
     (root / "README.md").write_text(readme, encoding="utf-8")
     _build_manifest(root)
     return root
+
+
+def run_results_pipeline(args: argparse.Namespace) -> Path:
+    _assert_py312()
+    root = _resolve_root(args.experiment_root)
+    status_path = root / "registry/results_pipeline_status.json"
+    state: dict[str, Any] = {
+        "status": "running",
+        "current_stage": "preflight",
+        "experiment_root": str(root),
+        "started_at_utc": datetime.now(timezone.utc).isoformat(),
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "bootstrap_iterations": int(args.bootstrap_iterations),
+        "bootstrap_seed": int(args.bootstrap_seed),
+        "stages": {},
+    }
+
+    def update_stage(stage: str, status: str, **extra: Any) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        state["current_stage"] = stage
+        state["updated_at_utc"] = now
+        stage_state = dict(state["stages"].get(stage) or {})
+        stage_state["status"] = status
+        if status == "running":
+            stage_state["started_at_utc"] = now
+        if status in {"completed", "failed"}:
+            stage_state["finished_at_utc"] = now
+        stage_state.update(extra)
+        state["stages"][stage] = stage_state
+        _write_json(status_path, state)
+
+    try:
+        update_stage("collect_checkpoints", "running")
+        collect_checkpoints(argparse.Namespace(experiment_root=str(root)))
+        selected = pd.read_csv(root / "checkpoint_selection/selected_checkpoints.csv")
+        expected_runs = len(FOLDS) * len(SEEDS) * len(VARIANTS)
+        if len(selected) != expected_runs:
+            raise ValueError(
+                f"Selected checkpoint count mismatch: {len(selected)} != {expected_runs}."
+            )
+        update_stage(
+            "collect_checkpoints",
+            "completed",
+            selected_checkpoint_count=int(len(selected)),
+        )
+
+        update_stage("generate_test_results", "running")
+        generate_matrix(argparse.Namespace(experiment_root=str(root)))
+        generated = pd.read_csv(root / "registry/generate_registry.csv")
+        if len(generated) != expected_runs:
+            raise ValueError(
+                f"Generate registry count mismatch: {len(generated)} != {expected_runs}."
+            )
+        update_stage(
+            "generate_test_results",
+            "completed",
+            generated_run_count=int(len(generated)),
+            generated_sample_count=int(generated["sample_count"].sum()),
+        )
+
+        update_stage("build_comparison", "running")
+        build_comparison(
+            argparse.Namespace(
+                experiment_root=str(root),
+                bootstrap_iterations=int(args.bootstrap_iterations),
+                bootstrap_seed=int(args.bootstrap_seed),
+            )
+        )
+        summary_path = root / "final_tables/development_rq1_result_summary.json"
+        if not summary_path.is_file():
+            raise FileNotFoundError(f"Missing final result summary: {summary_path}")
+        update_stage(
+            "build_comparison",
+            "completed",
+            result_summary_path=str(summary_path),
+        )
+
+        state["status"] = "completed"
+        state["current_stage"] = "completed"
+        state["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+        state["updated_at_utc"] = state["finished_at_utc"]
+        _write_json(status_path, state)
+        print(f"RQ1 result pipeline completed: {root}")
+        print(f"Result summary: {summary_path}")
+        return root
+    except Exception as exc:
+        failed_stage = str(state.get("current_stage", "unknown"))
+        state["status"] = "failed"
+        state["error_type"] = type(exc).__name__
+        state["error_message"] = str(exc)
+        state["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+        state["updated_at_utc"] = state["finished_at_utc"]
+        stage_state = dict(state["stages"].get(failed_stage) or {})
+        stage_state["status"] = "failed"
+        stage_state["finished_at_utc"] = state["finished_at_utc"]
+        stage_state["error_type"] = type(exc).__name__
+        stage_state["error_message"] = str(exc)
+        state["stages"][failed_stage] = stage_state
+        _write_json(status_path, state)
+        raise
 
 
 def _build_manifest(root: Path) -> Path:
@@ -1115,6 +1330,11 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--bootstrap-iterations", type=int, default=10000)
     compare.add_argument("--bootstrap-seed", type=int, default=20260722)
 
+    results = subparsers.add_parser("results-pipeline")
+    results.add_argument("--experiment-root", default="")
+    results.add_argument("--bootstrap-iterations", type=int, default=10000)
+    results.add_argument("--bootstrap-seed", type=int, default=20260722)
+
     package = subparsers.add_parser("package")
     package.add_argument("--experiment-root", default="")
     package.add_argument("--output", default="")
@@ -1135,6 +1355,8 @@ def main(argv: Iterable[str] | None = None) -> Path:
         return generate_matrix(args)
     if args.command == "compare":
         return build_comparison(args)
+    if args.command == "results-pipeline":
+        return run_results_pipeline(args)
     if args.command == "package":
         return package_experiment(args)
     raise ValueError(args.command)

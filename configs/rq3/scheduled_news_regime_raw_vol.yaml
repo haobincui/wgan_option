@@ -1,0 +1,29 @@
+rq3:
+  rq1_experiment: /home/haobin_cui/research_files_space_2/wgan_option-rq1-no-text-continuation/outputs/experiments/rq1_pair_text_raw_vol_continuation_20260723-143511
+  rq2_experiment: /home/haobin_cui/research_files_space_2/wgan_option-rq2-pair-continuation/outputs/experiments/rq2_pair_representation_raw_vol_continuation_20260724-145528
+  rq1_metrics_relative_path: comparisons/development_test_sample_metrics.csv
+  rq2_metrics_relative_path: comparisons/development_rq2_test_sample_metrics.csv
+  workbook_path: /home/haobin_cui/research_files_space_2/wgan_option-rq2-pair-continuation/outputs/experiments/rq2_pair_representation_raw_vol_continuation_20260724-145528/inputs/data/merged_vol_rq2_text.xlsx
+  workbook_sheet_name: gan_input_ready
+  event_calendar_path: data/reference/rq3_scheduled_macro_events_2023.csv
+
+  ordinary_buffer_minutes: 60
+  time_caliper_minutes: 15
+  exact_weekday: true
+  match_ratio: 1
+  minimum_release_days: 20
+  source_tolerance: 1.0e-8
+
+  bootstrap_iterations: 10000
+  bootstrap_seed: 20260722
+
+  windows:
+    primary_0_5:
+      pre_minutes: 0
+      post_minutes: 5
+    robustness_m10_p20:
+      pre_minutes: 10
+      post_minutes: 20
+    robustness_0_30:
+      pre_minutes: 0
+      post_minutes: 30
