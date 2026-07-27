@@ -136,6 +136,7 @@ SUPPORTED_GENERATE_SURFACE_CONFIG_KEYS = {
     "date_column",
     "time_column",
     "source_timezone",
+    "publication_availability_lag_minutes",
     "max_target_datetimes",
     "pricing_model",
     "rate_curve_path",

@@ -107,6 +107,16 @@ class TestGenerateSurfaceConfigParsing(unittest.TestCase):
             ("configs/surface_builder/raw/generate_surface-raw-all.yaml", "raw", "all"),
             ("configs/surface_builder/raw/generate_surface-raw-window.yaml", "raw", "window"),
             ("configs/surface_builder/raw/generate_surface-raw-excel.yaml", "raw", "excel"),
+            (
+                "configs/surface_builder/raw/generate_surface-raw-excel-rq.yaml",
+                "raw",
+                "excel",
+            ),
+            (
+                "configs/surface_builder/raw/generate_surface-raw-excel-pipeline.yaml",
+                "raw",
+                "excel",
+            ),
         ]
 
         for config_path, expected_model, expected_data_range in cases:
@@ -330,8 +340,10 @@ class TestGenerateSurfaceConfigParsing(unittest.TestCase):
                         date_column: PublishDate
                         time_column: EventTime
                         source_timezone: Europe/London
+                        publication_availability_lag_minutes: 2
                         max_target_datetimes: 12
                         window_minutes: 9
+                        min_expiries_per_minute: 2
                         calibration_workers: 6
                     """
                 ).strip()
@@ -351,6 +363,7 @@ class TestGenerateSurfaceConfigParsing(unittest.TestCase):
             self.assertEqual(args.date_column, "PublishDate")
             self.assertEqual(args.time_column, "EventTime")
             self.assertEqual(args.source_timezone, "Europe/London")
+            self.assertEqual(args.publication_availability_lag_minutes, 2)
             self.assertEqual(args.max_target_datetimes, 12)
             self.assertEqual(args.window_minutes, 9)
             self.assertEqual(args.calibration_workers, 6)
