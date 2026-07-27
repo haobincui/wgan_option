@@ -25,6 +25,7 @@ from .all import (  # noqa: E402
     DEFAULT_CONFIG_PATH,
     PRECALIB_CSV_HEADERS,
     ProcessMinuteFn,
+    SurfacePricingContext,
     _load_generate_surface_config,
     _build_rows_for_minute,
     _collect_spot_and_option_rows,
@@ -33,12 +34,16 @@ from .all import (  # noqa: E402
     _infer_file_date_range,
     _log_cli_arguments,
     _parse_args as _parse_base_args,
+    _pricing_context_from_args,
     _resolve_config_path,
     _setup_runtime,
     _to_utc_minute_string,
+    _to_utc_timestamp,
+    _update_last_underlying_trade,
 )
 from quantlib.calendar.daycount import DayCountBusN  # noqa: E402
 from quantlib.calendar.holidays import usd_calendar  # noqa: E402
+from wgan_option.market.treasury_options import cme_treasury_calendar  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +77,18 @@ def _write_precalib_rows(
     stats["precalib_minutes_written"] += 1
 
 
+def _trade_identity(row: Any) -> str:
+    meta = row.meta
+    return "|".join(
+        [
+            str(meta.contract_id or ""),
+            _to_utc_timestamp(row.trade_ts).isoformat(),
+            f"{float(row.price):.12g}",
+            f"{float(row.volume):.12g}",
+        ]
+    )
+
+
 def _run_window_calibration_task(
     *,
     process_minute_fn: ProcessMinuteFn,
@@ -84,10 +101,19 @@ def _run_window_calibration_task(
     last_spot_by_key: Dict[Tuple[str, str], float],
     surface_model: str,
     save_precalib_csv: bool,
+    pricing_context: SurfacePricingContext,
 ) -> Dict[str, Any]:
-    calendar = usd_calendar()
+    calendar = (
+        cme_treasury_calendar()
+        if pricing_context.pricing_model == "black76"
+        else usd_calendar()
+    )
     vol_daycount = DayCountBusN(
-        f"BUS{int(days_in_year)}USD",
+        (
+            f"BUS{int(days_in_year)}CME_TREASURY"
+            if pricing_context.pricing_model == "black76"
+            else f"BUS{int(days_in_year)}USD"
+        ),
         calendar,
         int(days_in_year),
     )
@@ -111,6 +137,7 @@ def _run_window_calibration_task(
         tau_anchor_ts=anchor_ts,
         count_stat_key="window_surface_attempts",
         surface_model=surface_model,
+        pricing_context=pricing_context,
     )
     minute_key = _to_utc_minute_string(anchor_ts)
     return {
@@ -256,8 +283,8 @@ def _build_target_window_map(
     target_datetimes: Sequence[DatetimeLike],
     window_minutes: int,
 ) -> Dict[str, Dict[str, Dict[str, Any]]]:
-    if window_minutes < 0:
-        raise ValueError(f"window_minutes must be >= 0, got {window_minutes}")
+    if window_minutes <= 0:
+        raise ValueError(f"window_minutes must be > 0, got {window_minutes}")
     if not target_datetimes:
         raise ValueError("target_datetimes is empty; please provide at least one datetime.")
 
@@ -267,20 +294,26 @@ def _build_target_window_map(
         target_key = _to_utc_minute_string(center_minute)
         backward_minutes = [
             center_minute + pd.Timedelta(minutes=offset)
-            for offset in range(-window_minutes, 1)
+            for offset in range(-window_minutes, 0)
         ]
         forward_minutes = [
             center_minute + pd.Timedelta(minutes=offset)
-            for offset in range(0, window_minutes + 1)
+            for offset in range(0, window_minutes)
         ]
         window_map[target_key] = {
             "target_ts": center_minute,
             "backward": {
                 "anchor_ts": center_minute,
+                "start_ts": center_minute
+                - pd.Timedelta(minutes=window_minutes),
+                "end_ts": center_minute,
                 "minutes": sorted(backward_minutes),
             },
             "forward": {
                 "anchor_ts": center_minute + pd.Timedelta(minutes=window_minutes),
+                "start_ts": center_minute,
+                "end_ts": center_minute
+                + pd.Timedelta(minutes=window_minutes),
                 "minutes": sorted(forward_minutes),
             },
         }
@@ -382,6 +415,8 @@ def generate_surfaces_for_datetime_windows(
     if not files:
         raise FileNotFoundError("No input files overlap the requested target datetime windows.")
     bucket_rows: Dict[Tuple[str, str], List[Any]] = {}
+    bucket_initial_underlying_state: Dict[Tuple[str, str], Dict[Any, Any]] = {}
+    window_side_audit: Dict[Tuple[str, str], Dict[str, Any]] = {}
     minute_bucket_map: Dict[pd.Timestamp, List[Tuple[str, str]]] = defaultdict(list)
     pending_buckets: List[Tuple[pd.Timestamp, str, str]] = []
     all_window_minutes: set[pd.Timestamp] = set()
@@ -436,7 +471,7 @@ def generate_surfaces_for_datetime_windows(
     stats: Dict[str, int] = defaultdict(int)
     side_results: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}
     contract_cache: Dict[str, Any] = {}
-    visible_spot_by_key: Dict[tuple[str, str], float] = {}
+    visible_spot_by_key: Dict[Any, Any] = {}
     precalib_csv_path = Path(args.precalib_csv)
     precalib_writer: Optional[csv.DictWriter] = None
     precalib_fp = None
@@ -501,7 +536,83 @@ def generate_surfaces_for_datetime_windows(
 
             task_idx = next_bucket_idx
             task_rows = list(bucket_rows[(target_key, direction)])
-            task_spot_state = dict(visible_spot_by_key)
+            task_spot_state = dict(
+                bucket_initial_underlying_state.get(
+                    (target_key, direction),
+                    {},
+                )
+            )
+            side_spec = target_window_map[target_key][direction]
+            pricing_context = _pricing_context_from_args(
+                args,
+                target_datetime_utc=target_key,
+                window_side=direction,
+                window_start_utc=_to_utc_minute_string(
+                    side_spec["start_ts"]
+                ),
+                window_end_utc=_to_utc_minute_string(
+                    side_spec["end_ts"]
+                ),
+            )
+            start_ts = _to_utc_timestamp(side_spec["start_ts"])
+            end_ts = _to_utc_timestamp(side_spec["end_ts"])
+            invalid_rows = [
+                row
+                for row in task_rows
+                if not (
+                    start_ts
+                    <= _to_utc_timestamp(row.trade_ts)
+                    < end_ts
+                )
+            ]
+            trade_times = [
+                _to_utc_timestamp(row.trade_ts)
+                for row in task_rows
+            ]
+            identities = sorted({_trade_identity(row) for row in task_rows})
+            option_rows_count = sum(
+                row.meta.contract_type == "option" for row in task_rows
+            )
+            future_rows_count = sum(
+                row.meta.contract_type == "future" for row in task_rows
+            )
+            window_side_audit[(target_key, direction)] = {
+                "target_datetime_utc": target_key,
+                "window_side": direction,
+                "window_start_utc": _to_utc_minute_string(start_ts),
+                "window_end_utc": _to_utc_minute_string(end_ts),
+                "half_open_interval": "[start,end)",
+                "row_count": len(task_rows),
+                "option_row_count": int(option_rows_count),
+                "future_row_count": int(future_rows_count),
+                "minimum_trade_datetime_utc": (
+                    min(trade_times).isoformat().replace("+00:00", "Z")
+                    if trade_times
+                    else ""
+                ),
+                "maximum_trade_datetime_utc": (
+                    max(trade_times).isoformat().replace("+00:00", "Z")
+                    if trade_times
+                    else ""
+                ),
+                "invalid_membership_count": len(invalid_rows),
+                "post_origin_trade_count": sum(
+                    trade_time
+                    >= _to_utc_timestamp(
+                        target_window_map[target_key]["target_ts"]
+                    )
+                    for trade_time in trade_times
+                )
+                if direction == "backward"
+                else 0,
+                "trade_identities": identities,
+            }
+            if invalid_rows:
+                raise RuntimeError(
+                    "Window membership invariant failed: "
+                    f"target={target_key}, side={direction}, "
+                    f"invalid_rows={len(invalid_rows)}"
+                )
             if executor is None:
                 local_results: Dict[str, Dict[str, Any]] = {}
                 process_minute_fn(
@@ -521,6 +632,7 @@ def generate_surfaces_for_datetime_windows(
                     tau_anchor_ts=anchor_ts,
                     count_stat_key="window_surface_attempts",
                     surface_model=str(args.model),
+                    pricing_context=pricing_context,
                 )
                 side_results[(target_key, direction)] = local_results.get(_to_utc_minute_string(anchor_ts))
             else:
@@ -536,6 +648,7 @@ def generate_surfaces_for_datetime_windows(
                     last_spot_by_key=task_spot_state,
                     surface_model=str(args.model),
                     save_precalib_csv=bool(args.save_precalib_csv),
+                    pricing_context=pricing_context,
                 )
                 inflight_futures[future] = (task_idx, target_key, direction)
                 collect_completed_parallel_results(wait_for_completion=False)
@@ -587,12 +700,14 @@ def generate_surfaces_for_datetime_windows(
                         }
                     )
                     chunk["price"] = pd.to_numeric(chunk["price"], errors="coerce")
-                    chunk["volume"] = pd.to_numeric(chunk["volume"], errors="coerce").fillna(1.0)
+                    chunk["volume"] = pd.to_numeric(chunk["volume"], errors="coerce")
                     chunk["trade_dt"] = pd.to_datetime(chunk["raw_time"], errors="coerce", utc=True)
                     chunk = chunk[
                         chunk["ric"].notna()
                         & chunk["price"].notna()
                         & (chunk["price"] > 0)
+                        & chunk["volume"].notna()
+                        & (chunk["volume"] > 0)
                         & chunk["trade_dt"].notna()
                     ].copy()
                     if chunk.empty:
@@ -625,15 +740,26 @@ def generate_surfaces_for_datetime_windows(
                             calendar=calendar,
                             contract_cache=contract_cache,
                             stats=stats,
+                            pricing_model=str(args.pricing_model),
                         )
                         if rows:
-                            _collect_spot_and_option_rows(
-                                rows=rows,
-                                target_future_month_code=None,
-                                last_spot_by_key=visible_spot_by_key,
-                            )
                             for bucket_key in minute_bucket_map.get(minute_ts, []):
+                                bucket_initial_underlying_state.setdefault(
+                                    bucket_key,
+                                    dict(visible_spot_by_key),
+                                )
                                 bucket_rows[bucket_key].extend(rows)
+                            if str(args.pricing_model) == "black76":
+                                _update_last_underlying_trade(
+                                    rows,
+                                    visible_spot_by_key,
+                                )
+                            else:
+                                _collect_spot_and_option_rows(
+                                    rows=rows,
+                                    target_future_month_code=None,
+                                    last_spot_by_key=visible_spot_by_key,
+                                )
                         if minute_ts not in minute_bucket_map:
                             stats["skip_not_target_minute"] += 1
                         finalize_pending_buckets(current_minute=minute_ts, include_equal=True)
@@ -660,15 +786,26 @@ def generate_surfaces_for_datetime_windows(
                         calendar=calendar,
                         contract_cache=contract_cache,
                         stats=stats,
+                        pricing_model=str(args.pricing_model),
                     )
                     if rows:
-                        _collect_spot_and_option_rows(
-                            rows=rows,
-                            target_future_month_code=None,
-                            last_spot_by_key=visible_spot_by_key,
-                        )
                         for bucket_key in minute_bucket_map.get(minute_ts, []):
+                            bucket_initial_underlying_state.setdefault(
+                                bucket_key,
+                                dict(visible_spot_by_key),
+                            )
                             bucket_rows[bucket_key].extend(rows)
+                        if str(args.pricing_model) == "black76":
+                            _update_last_underlying_trade(
+                                rows,
+                                visible_spot_by_key,
+                            )
+                        else:
+                            _collect_spot_and_option_rows(
+                                rows=rows,
+                                target_future_month_code=None,
+                                last_spot_by_key=visible_spot_by_key,
+                            )
                     if minute_ts not in minute_bucket_map:
                         stats["skip_not_target_minute"] += 1
                     finalize_pending_buckets(current_minute=minute_ts, include_equal=True)
@@ -694,6 +831,48 @@ def generate_surfaces_for_datetime_windows(
         target_window_map,
         default_surface_model=str(args.model),
     )
+    temporal_audit: Dict[str, Any] = {}
+    for target_key, target_spec in target_window_map.items():
+        backward = window_side_audit.get((target_key, "backward"), {})
+        forward = window_side_audit.get((target_key, "forward"), {})
+        backward_ids = set(backward.get("trade_identities", []))
+        forward_ids = set(forward.get("trade_identities", []))
+        overlap = sorted(backward_ids & forward_ids)
+        post_origin_current = int(backward.get("post_origin_trade_count", 0))
+        temporal_audit[target_key] = {
+            "target_datetime_utc": target_key,
+            "backward": {
+                key: value
+                for key, value in backward.items()
+                if key != "trade_identities"
+            },
+            "forward": {
+                key: value
+                for key, value in forward.items()
+                if key != "trade_identities"
+            },
+            "current_target_trade_overlap_count": len(overlap),
+            "post_origin_current_trade_count": post_origin_current,
+            "status": (
+                "ok"
+                if not overlap and post_origin_current == 0
+                else "failed"
+            ),
+        }
+        if overlap or post_origin_current:
+            raise RuntimeError(
+                "Temporal leakage audit failed: "
+                f"target={target_key}, overlap={len(overlap)}, "
+                f"post_origin_current={post_origin_current}"
+            )
+    audit_path = Path(
+        str(getattr(args, "window_audit_json", "")).strip()
+        or str(Path(args.output_dir) / "window_temporal_audit.json")
+    )
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    with audit_path.open("w", encoding="utf-8") as handle:
+        json.dump(temporal_audit, handle, ensure_ascii=True, indent=2)
+        handle.write("\n")
     with output_json_path.open("w", encoding="utf-8") as f:
         json.dump(surfaces_by_target, f, ensure_ascii=False, indent=2)
 

@@ -17,6 +17,14 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from .config import FilmWGANSampleConfig, FilmWGANTrainConfig
+from .support import (
+    RawSurfaceSupportArtifact,
+    fit_raw_support_artifact,
+    parse_raw_surface_params,
+    raw_support_mask,
+    reconstruct_raw_surface,
+    validate_support_artifact_lineage,
+)
 from .text_transform import (
     FilmWGANTextTransform,
     fit_text_transform,
@@ -103,6 +111,8 @@ class FilmWGANSample:
     text_embedding: np.ndarray
     metadata: dict[str, Any]
     raw_text_embedding: np.ndarray | None = None
+    current_support_mask: np.ndarray | None = None
+    target_support_mask: np.ndarray | None = None
 
     @property
     def surface_shape(self) -> tuple[int, int]:
@@ -113,6 +123,15 @@ class FilmWGANSample:
         current = _canonical_timestamp(self.current_snapshot_time_utc)
         target = _canonical_timestamp(self.target_snapshot_time_utc)
         return hashlib.sha256(f"{current}|{target}".encode("utf-8")).hexdigest()[:20]
+
+    @property
+    def evaluation_support_mask(self) -> np.ndarray:
+        if self.current_support_mask is None or self.target_support_mask is None:
+            return np.ones(self.surface_shape, dtype=bool)
+        return np.asarray(self.current_support_mask, dtype=bool) & np.asarray(
+            self.target_support_mask,
+            dtype=bool,
+        )
 
 
 @dataclass(frozen=True)
@@ -149,6 +168,8 @@ class FilmWGANDataBundle:
     split_manifest: pd.DataFrame
     text_transform_path: str = ""
     text_transform_sha256: str = ""
+    surface_support_path: str = ""
+    surface_support_sha256: str = ""
 
 
 def _canonical_timestamp(value: Any) -> str:
@@ -176,9 +197,22 @@ def _safe_std(values: np.ndarray) -> np.ndarray:
     return std
 
 
+def _masked_mean_std(values: np.ndarray, masks: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    counts = masks.sum(axis=0)
+    sums = np.where(masks, values, 0.0).sum(axis=0)
+    means = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
+    squared = np.where(masks, np.square(values - means), 0.0).sum(axis=0)
+    variances = np.divide(squared, counts, out=np.ones_like(squared), where=counts > 0)
+    std = np.sqrt(np.maximum(variances, 0.0)).astype(np.float32)
+    std[(std < 1e-6) | (counts <= 0)] = 1.0
+    return means.astype(np.float32), std
+
+
 def _compute_normalization_stats(samples: Sequence[FilmWGANSample]) -> FilmWGANNormalizationStats:
     current_logs: list[np.ndarray] = []
     deltas: list[np.ndarray] = []
+    current_masks: list[np.ndarray] = []
+    delta_masks: list[np.ndarray] = []
     text_embeddings: list[np.ndarray] = []
     for sample in samples:
         current_flat = sample.current_surface.astype(np.float32).reshape(-1)
@@ -187,15 +221,27 @@ def _compute_normalization_stats(samples: Sequence[FilmWGANSample]) -> FilmWGANN
         target_log = np.log(np.clip(target_flat, _VOL_FLOOR, None))
         current_logs.append(current_log.astype(np.float32))
         deltas.append((target_log - current_log).astype(np.float32))
+        current_masks.append(
+            (
+                np.asarray(sample.current_support_mask, dtype=bool).reshape(-1)
+                if sample.current_support_mask is not None
+                else np.ones_like(current_log, dtype=bool)
+            )
+        )
+        delta_masks.append(sample.evaluation_support_mask.reshape(-1))
         text_embeddings.append(sample.text_embedding.astype(np.float32))
     current_logs_arr = np.stack(current_logs, axis=0)
     deltas_arr = np.stack(deltas, axis=0)
+    current_masks_arr = np.stack(current_masks, axis=0)
+    delta_masks_arr = np.stack(delta_masks, axis=0)
     text_arr = np.stack(text_embeddings, axis=0)
+    current_mean, current_std = _masked_mean_std(current_logs_arr, current_masks_arr)
+    delta_mean, delta_std = _masked_mean_std(deltas_arr, delta_masks_arr)
     return FilmWGANNormalizationStats(
-        current_log_mean=np.mean(current_logs_arr, axis=0).astype(np.float32),
-        current_log_std=_safe_std(current_logs_arr),
-        delta_mean=np.mean(deltas_arr, axis=0).astype(np.float32),
-        delta_std=_safe_std(deltas_arr),
+        current_log_mean=current_mean,
+        current_log_std=current_std,
+        delta_mean=delta_mean,
+        delta_std=delta_std,
         text_mean=np.mean(text_arr, axis=0).astype(np.float32),
         text_std=_safe_std(text_arr),
     )
@@ -230,6 +276,7 @@ class FilmWGANDataset(Dataset):
         normalize_target_delta: bool,
         normalize_text_embedding: bool,
         include_has_text: bool = False,
+        include_support_mask: bool = False,
     ):
         self.samples = list(samples)
         self.normalization_stats = normalization_stats
@@ -237,6 +284,7 @@ class FilmWGANDataset(Dataset):
         self.normalize_target_delta = bool(normalize_target_delta)
         self.normalize_text_embedding = bool(normalize_text_embedding)
         self.include_has_text = bool(include_has_text)
+        self.include_support_mask = bool(include_support_mask)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -251,6 +299,12 @@ class FilmWGANDataset(Dataset):
         current_features = current_log.astype(np.float32)
         text_features = sample.text_embedding.astype(np.float32)
         target_delta_features = target_delta.astype(np.float32)
+        current_support = (
+            np.asarray(sample.current_support_mask, dtype=np.float32).reshape(-1)
+            if sample.current_support_mask is not None
+            else np.ones_like(current_features, dtype=np.float32)
+        )
+        evaluation_support = sample.evaluation_support_mask.astype(np.float32).reshape(-1)
         stats = self.normalization_stats
         if self.normalize_current_surface:
             current_features = ((current_features - stats.current_log_mean) / stats.current_log_std).astype(np.float32)
@@ -258,20 +312,38 @@ class FilmWGANDataset(Dataset):
             text_features = ((text_features - stats.text_mean) / stats.text_std).astype(np.float32)
         if self.normalize_target_delta:
             target_delta_features = ((target_delta_features - stats.delta_mean) / stats.delta_std).astype(np.float32)
+        current_features = np.where(current_support > 0.0, current_features, 0.0).astype(np.float32)
+        target_delta_features = np.where(
+            evaluation_support > 0.0,
+            target_delta_features,
+            0.0,
+        ).astype(np.float32)
         height, width = sample.surface_shape
+        current_tensor = torch.from_numpy(current_features.reshape(1, height, width))
+        if self.include_support_mask:
+            current_tensor = torch.cat(
+                [
+                    current_tensor,
+                    torch.from_numpy(current_support.reshape(1, height, width)),
+                ],
+                dim=0,
+            )
         tensors = (
-            torch.from_numpy(current_features.reshape(1, height, width)),
+            current_tensor,
             torch.from_numpy(text_features),
             torch.from_numpy(target_delta_features),
             torch.from_numpy(current_flat),
             torch.from_numpy(target_flat),
         )
-        if not self.include_has_text:
-            return tensors
-        return (
-            *tensors,
-            torch.tensor(float(sample.metadata.get("has_text", 1.0)), dtype=torch.float32),
-        )
+        extras: tuple[torch.Tensor, ...] = ()
+        if self.include_support_mask:
+            extras = (*extras, torch.from_numpy(evaluation_support))
+        if self.include_has_text:
+            extras = (
+                *extras,
+                torch.tensor(float(sample.metadata.get("has_text", 1.0)), dtype=torch.float32),
+            )
+        return (*tensors, *extras)
 
 
 def _validate_shape(sample_id: str, surface: np.ndarray, expected_shape: tuple[int, int]) -> None:
@@ -321,6 +393,27 @@ def load_film_wgan_samples(config: FilmWGANTrainConfig | FilmWGANSampleConfig) -
                 maturity_days_grid=maturity_days_grid,
                 text_embedding=_parse_embedding(row, config.text_embedding_mode),
                 metadata={
+                    "surface_model": str(getattr(row, "surface_model", "")),
+                    "publication_timestamp_utc": str(
+                        getattr(row, "publication_timestamp_utc", "")
+                    ),
+                    "publication_availability_lag_minutes": int(
+                        getattr(row, "publication_availability_lag_minutes", 0)
+                        if not pd.isna(
+                            getattr(row, "publication_availability_lag_minutes", 0)
+                        )
+                        else 0
+                    ),
+                    "current_surface_param_json": getattr(
+                        row,
+                        "current_surface_param_json",
+                        "",
+                    ),
+                    "target_surface_param_json": getattr(
+                        row,
+                        "target_surface_param_json",
+                        "",
+                    ),
                     "pair_quality_label": str(getattr(row, "pair_quality_label", "")),
                     "current_weighted_iv_rmse": getattr(row, "current_weighted_iv_rmse", None),
                     "target_weighted_iv_rmse": getattr(row, "target_weighted_iv_rmse", None),
@@ -362,11 +455,19 @@ def load_film_wgan_samples(config: FilmWGANTrainConfig | FilmWGANSampleConfig) -
             text_embedding=sample.text_embedding,
             metadata=sample.metadata,
             raw_text_embedding=sample.raw_text_embedding,
+            current_support_mask=sample.current_support_mask,
+            target_support_mask=sample.target_support_mask,
         )
     return parsed
 
 
 _NEWS_SAMPLE_ID_PATTERN = re.compile(r"^news_(\d+)$")
+
+
+def _optional_source_text(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip()
 
 
 def _resolved_config_path(value: str) -> Path:
@@ -452,12 +553,27 @@ def _assert_pair_member_consistency(reference: FilmWGANSample, candidate: FilmWG
         candidate.target_snapshot_time_utc
     ):
         raise ValueError(f"Surface pair {reference.surface_pair_id} has inconsistent target timestamps.")
+    for field_name in ("current_surface_param_json", "target_surface_param_json"):
+        reference_value = reference.metadata.get(field_name, "")
+        candidate_value = candidate.metadata.get(field_name, "")
+        if bool(str(reference_value).strip()) != bool(str(candidate_value).strip()):
+            raise ValueError(
+                f"Surface pair {reference.surface_pair_id} has inconsistent {field_name} presence."
+            )
+        if str(reference_value).strip():
+            reference_params = parse_raw_surface_params(reference_value)
+            candidate_params = parse_raw_surface_params(candidate_value)
+            if reference_params != candidate_params:
+                raise ValueError(
+                    f"Surface pair {reference.surface_pair_id} has inconsistent {field_name}."
+                )
 
 
 def _news_lineage_rows(
     samples: Sequence[FilmWGANSample],
     *,
     news_workbook: pd.DataFrame,
+    strict: bool,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for sample in samples:
@@ -478,6 +594,17 @@ def _news_lineage_rows(
             _parse_serialized_list(source_row.get("LP_embedding", [])),
             dtype=np.float32,
         )
+        lp_text = _optional_source_text(source_row.get("LP", ""))
+        if strict and not lp_text:
+            lineage_status = (
+                "empty_lp_nonzero_embedding"
+                if raw_embedding.size and bool(np.any(np.abs(raw_embedding) > 0.0))
+                else "empty_lp"
+            )
+        elif strict and raw_embedding.size <= 0:
+            lineage_status = "nonempty_lp_missing_embedding"
+        else:
+            lineage_status = "ok"
         merged_embedding = sample.raw_text_embedding
         if merged_embedding is None or raw_embedding.shape != merged_embedding.shape or not np.array_equal(
             raw_embedding,
@@ -504,9 +631,11 @@ def _news_lineage_rows(
             {
                 "sample": sample,
                 "news_row_id": news_row_id,
-                "article_id": str(source_row.get("ArticleID", "")).strip(),
-                "source_file": str(source_row.get("SourceFile", "")).strip(),
+                "article_id": _optional_source_text(source_row.get("ArticleID", "")),
+                "source_file": _optional_source_text(source_row.get("SourceFile", "")),
+                "lp_text": lp_text,
                 "embedding": raw_embedding,
+                "lineage_status": lineage_status,
             }
         )
     return rows
@@ -516,7 +645,7 @@ def _pool_pair_text(lineage_rows: Sequence[dict[str, Any]]) -> tuple[np.ndarray,
     article_unique: list[dict[str, Any]] = []
     seen_articles: set[str] = set()
     for row in lineage_rows:
-        article_key = str(row["article_id"]).strip() or f"news_row_{int(row['news_row_id'])}"
+        article_key = _optional_source_text(row["article_id"]) or f"news_row_{int(row['news_row_id'])}"
         if article_key in seen_articles:
             continue
         seen_articles.add(article_key)
@@ -563,12 +692,13 @@ def aggregate_surface_pair_samples(
             "sample_unit=surface_pair requires pair_text_feature_path for non-LP representations; "
             f"got text_embedding_mode={config.text_embedding_mode!r}."
         )
-    if external_features is None and news_workbook is None:
+    strict_lineage = str(config.text_lineage_mode).strip().lower() == "strict"
+    if (external_features is None or strict_lineage) and news_workbook is None:
         news_path = Path(config.news_workbook_path)
         if not news_path.is_file():
             raise FileNotFoundError(f"news_workbook_path does not exist: {news_path}")
         news_workbook = pd.read_excel(news_path)
-    if external_features is None:
+    if external_features is None or strict_lineage:
         assert news_workbook is not None
         required_columns = {"ArticleID", "SourceFile", "LP_embedding"}
         missing_columns = sorted(required_columns - set(news_workbook.columns))
@@ -592,13 +722,30 @@ def aggregate_surface_pair_samples(
         ),
     ):
         reference = members[0]
+        excluded_rows: list[dict[str, Any]] = []
         for candidate in members[1:]:
             _assert_pair_member_consistency(reference, candidate)
         if external_features is None:
             assert news_workbook is not None
-            lineage_rows = _news_lineage_rows(members, news_workbook=news_workbook)
-            pooled_text, unique_rows = _pool_pair_text(lineage_rows)
-            source_sample_ids = [sample.sample_id for sample in members]
+            lineage_rows = _news_lineage_rows(
+                members,
+                news_workbook=news_workbook,
+                strict=strict_lineage,
+            )
+            excluded_rows = [
+                row for row in lineage_rows if str(row["lineage_status"]) != "ok"
+            ]
+            usable_lineage_rows = (
+                [row for row in lineage_rows if str(row["lineage_status"]) == "ok"]
+                if strict_lineage
+                else lineage_rows
+            )
+            if not usable_lineage_rows:
+                continue
+            pooled_text, unique_rows = _pool_pair_text(usable_lineage_rows)
+            source_sample_ids = [
+                str(row["sample"].sample_id) for row in usable_lineage_rows
+            ]
             article_ids = [str(row["article_id"]) for row in unique_rows]
             source_files = [str(row["source_file"]) for row in unique_rows]
             pooling_mode = "mean_l2"
@@ -627,6 +774,25 @@ def aggregate_surface_pair_samples(
                     f"config={config.text_embedding_mode!r}."
                 )
             expected_samples = sorted(sample.sample_id for sample in members)
+            if strict_lineage:
+                assert news_workbook is not None
+                external_lineage_rows = _news_lineage_rows(
+                    members,
+                    news_workbook=news_workbook,
+                    strict=True,
+                )
+                excluded_rows = [
+                    row
+                    for row in external_lineage_rows
+                    if str(row["lineage_status"]) != "ok"
+                ]
+                expected_samples = sorted(
+                    str(row["sample"].sample_id)
+                    for row in external_lineage_rows
+                    if str(row["lineage_status"]) == "ok"
+                )
+                if not expected_samples:
+                    continue
             artifact_samples = sorted(str(item) for item in feature["source_sample_ids"])
             if expected_samples != artifact_samples:
                 raise ValueError(
@@ -648,12 +814,23 @@ def aggregate_surface_pair_samples(
                 "source_sample_ids": source_sample_ids,
                 "article_ids": article_ids,
                 "source_files": source_files,
-                "news_count": int(len(members)),
+                "news_count": int(len(source_sample_ids)),
                 "unique_embedding_count": int(len(article_ids)),
                 "pooling_mode": pooling_mode,
                 "pair_text_feature_path": pair_feature_path,
                 "pair_text_feature_sha256": feature_sha256,
                 "has_text": has_text,
+                "text_lineage_mode": str(config.text_lineage_mode).strip().lower(),
+                "excluded_source_sample_ids": (
+                    [str(row["sample"].sample_id) for row in excluded_rows]
+                    if strict_lineage
+                    else []
+                ),
+                "excluded_text_lineage_reasons": (
+                    [str(row["lineage_status"]) for row in excluded_rows]
+                    if strict_lineage
+                    else []
+                ),
             }
         )
         pooled_samples.append(
@@ -670,6 +847,16 @@ def aggregate_surface_pair_samples(
                 text_embedding=pooled_text.copy(),
                 metadata=metadata,
                 raw_text_embedding=pooled_text.copy(),
+                current_support_mask=(
+                    reference.current_support_mask.copy()
+                    if reference.current_support_mask is not None
+                    else None
+                ),
+                target_support_mask=(
+                    reference.target_support_mask.copy()
+                    if reference.target_support_mask is not None
+                    else None
+                ),
             )
         )
     return pooled_samples
@@ -933,6 +1120,125 @@ def _partition_samples(
     return partitions, manifest
 
 
+def _fit_or_load_surface_support(
+    config: FilmWGANTrainConfig | FilmWGANSampleConfig,
+    train_samples: Sequence[FilmWGANSample],
+) -> RawSurfaceSupportArtifact | None:
+    mode = str(config.surface_support_mode).strip().lower()
+    if mode == "full_grid":
+        return None
+    support_path = _resolved_config_path(str(config.surface_support_path))
+    train_pair_ids = [sample.surface_pair_id for sample in train_samples]
+    input_hash = workbook_sha256(config.data_path)
+    if support_path.is_file():
+        artifact = RawSurfaceSupportArtifact.load(support_path)
+        validate_support_artifact_lineage(
+            artifact,
+            train_pair_ids=train_pair_ids,
+            input_workbook_sha256=input_hash,
+        )
+    else:
+        if isinstance(config, FilmWGANSampleConfig):
+            raise FileNotFoundError(
+                f"Generate-result cannot fit a missing raw support artifact: {support_path}"
+            )
+        records = []
+        for sample in train_samples:
+            if str(sample.metadata.get("surface_model", "")).strip().lower() != "raw":
+                raise ValueError(
+                    "surface_support_mode=raw_observed requires surface_model=raw for every sample."
+                )
+            records.append(
+                {
+                    "surface_pair_id": sample.surface_pair_id,
+                    "current_surface_params": sample.metadata.get(
+                        "current_surface_param_json",
+                        "",
+                    ),
+                    "target_surface_params": sample.metadata.get(
+                        "target_surface_param_json",
+                        "",
+                    ),
+                }
+            )
+        artifact = fit_raw_support_artifact(
+            records,
+            input_workbook_sha256=input_hash,
+            strike_bins=int(config.support_strike_bins),
+            maturity_bins=int(config.support_maturity_bins),
+            quantile_low=float(config.support_grid_quantile_low),
+            quantile_high=float(config.support_grid_quantile_high),
+        )
+        artifact.save(support_path)
+    return artifact
+
+
+def _apply_surface_support(
+    samples: Sequence[FilmWGANSample],
+    artifact: RawSurfaceSupportArtifact | None,
+    *,
+    report_atm7_metric: bool,
+) -> list[FilmWGANSample]:
+    if artifact is None:
+        return list(samples)
+    strike_grid = np.asarray(artifact.strike_grid, dtype=np.float32)
+    maturity_grid = np.asarray(artifact.maturity_days_grid, dtype=np.float32)
+    transformed: list[FilmWGANSample] = []
+    for sample in samples:
+        current_params = parse_raw_surface_params(
+            sample.metadata.get("current_surface_param_json", "")
+        )
+        target_params = parse_raw_surface_params(
+            sample.metadata.get("target_surface_param_json", "")
+        )
+        current_mask = raw_support_mask(
+            current_params,
+            strike_grid=strike_grid,
+            maturity_days_grid=maturity_grid,
+        )
+        target_mask = raw_support_mask(
+            target_params,
+            strike_grid=strike_grid,
+            maturity_days_grid=maturity_grid,
+        )
+        current_surface = reconstruct_raw_surface(
+            current_params,
+            strike_grid=strike_grid,
+            maturity_days_grid=maturity_grid,
+        )
+        target_surface = reconstruct_raw_surface(
+            target_params,
+            strike_grid=strike_grid,
+            maturity_days_grid=maturity_grid,
+        )
+        pair_mask = current_mask & target_mask
+        metadata = dict(sample.metadata)
+        metadata.update(
+            {
+                "surface_support_mode": "raw_observed",
+                "surface_support_method": artifact.method,
+                "current_supported_cell_count": int(current_mask.sum()),
+                "target_supported_cell_count": int(target_mask.sum()),
+                "evaluation_supported_cell_count": int(pair_mask.sum()),
+                "evaluation_supported_fraction": float(pair_mask.mean()),
+                "report_atm7_metric": bool(report_atm7_metric),
+            }
+        )
+        transformed.append(
+            replace(
+                sample,
+                current_surface=current_surface,
+                target_surface=target_surface,
+                strike_grid=strike_grid.copy(),
+                maturity_days_grid=maturity_grid.copy(),
+                current_support_mask=current_mask,
+                target_support_mask=target_mask,
+                metadata=metadata,
+            )
+        )
+    return transformed
+
+
 def _prepare_partitioned_samples(
     config: FilmWGANTrainConfig | FilmWGANSampleConfig,
     samples: Sequence[FilmWGANSample],
@@ -940,7 +1246,10 @@ def _prepare_partitioned_samples(
     partitions, manifest = _partition_samples(config, samples)
     if str(config.sample_unit).strip().lower() == "surface_pair":
         news_workbook = None
-        if not str(config.pair_text_feature_path).strip():
+        if (
+            not str(config.pair_text_feature_path).strip()
+            or str(config.text_lineage_mode).strip().lower() == "strict"
+        ):
             news_path = Path(config.news_workbook_path)
             if not news_path.is_file():
                 raise FileNotFoundError(f"news_workbook_path does not exist: {news_path}")
@@ -955,6 +1264,30 @@ def _prepare_partitioned_samples(
         }
     if not partitions["train"]:
         raise ValueError("The resolved split contains no training samples.")
+    support_artifact = _fit_or_load_surface_support(config, partitions["train"])
+    partitions = {
+        split: _apply_surface_support(
+            split_samples_raw,
+            support_artifact,
+            report_atm7_metric=bool(config.report_atm7_metric),
+        )
+        for split, split_samples_raw in partitions.items()
+    }
+    if support_artifact is not None:
+        minimum_cells = int(config.support_min_train_pair_cells)
+        partitions = {
+            split: [
+                sample
+                for sample in split_samples_raw
+                if int(sample.evaluation_support_mask.sum()) >= minimum_cells
+            ]
+            for split, split_samples_raw in partitions.items()
+        }
+        if not partitions["train"]:
+            raise ValueError(
+                "No training pairs remain after applying the train-derived raw support grid "
+                f"with support_min_train_pair_cells={minimum_cells}."
+            )
     transform = _fit_or_load_transform(config, partitions["train"])
     transformed = {
         split: _apply_text_transform(
@@ -1073,12 +1406,15 @@ def create_train_val_bundle(config: FilmWGANTrainConfig) -> FilmWGANDataBundle:
     samples = load_film_wgan_samples(config)
     if len(samples) < int(config.min_samples_for_training):
         raise ValueError(f"Standalone FiLM WGAN requires at least {config.min_samples_for_training} samples.")
-    strike_grid, maturity_days_grid = _check_consistent_grids(samples)
     partitions, split_manifest, transform = _prepare_partitioned_samples(config, samples)
     train_items = partitions["train"]
     val_items = partitions["val"]
     test_items = partitions["test"]
+    strike_grid, maturity_days_grid = _check_consistent_grids(
+        [*train_items, *val_items, *test_items]
+    )
     normalization_stats = _compute_normalization_stats(train_items)
+    support_enabled = str(config.surface_support_mode).strip().lower() == "raw_observed"
     train_loader = DataLoader(
         FilmWGANDataset(
             train_items,
@@ -1087,6 +1423,7 @@ def create_train_val_bundle(config: FilmWGANTrainConfig) -> FilmWGANDataBundle:
             normalize_target_delta=config.normalize_target_delta,
             normalize_text_embedding=config.normalize_text_embedding,
             include_has_text=str(config.conditioning_mode).strip().lower() == "residual_film",
+            include_support_mask=support_enabled,
         ),
         batch_size=int(config.batch_size),
         shuffle=True,
@@ -1102,6 +1439,7 @@ def create_train_val_bundle(config: FilmWGANTrainConfig) -> FilmWGANDataBundle:
                 normalize_target_delta=config.normalize_target_delta,
                 normalize_text_embedding=config.normalize_text_embedding,
                 include_has_text=str(config.conditioning_mode).strip().lower() == "residual_film",
+                include_support_mask=support_enabled,
             ),
             batch_size=int(config.batch_size),
             shuffle=False,
@@ -1117,6 +1455,7 @@ def create_train_val_bundle(config: FilmWGANTrainConfig) -> FilmWGANDataBundle:
                 normalize_target_delta=config.normalize_target_delta,
                 normalize_text_embedding=config.normalize_text_embedding,
                 include_has_text=str(config.conditioning_mode).strip().lower() == "residual_film",
+                include_support_mask=support_enabled,
             ),
             batch_size=int(config.batch_size),
             shuffle=False,
@@ -1143,6 +1482,13 @@ def create_train_val_bundle(config: FilmWGANTrainConfig) -> FilmWGANDataBundle:
         text_transform_sha256=(
             sha256_file(config.text_transform_path)
             if str(config.text_transform_path).strip() and Path(config.text_transform_path).is_file()
+            else ""
+        ),
+        surface_support_path=str(config.surface_support_path),
+        surface_support_sha256=(
+            sha256_file(_resolved_config_path(str(config.surface_support_path)))
+            if str(config.surface_support_path).strip()
+            and _resolved_config_path(str(config.surface_support_path)).is_file()
             else ""
         ),
     )

@@ -16,9 +16,11 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timezone
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 
 from wgan_option.surface_generation.common.config_utils import (  # noqa: E402
@@ -37,22 +39,51 @@ from market_data.contract_handler.utils import ContractTerminationRule  # noqa: 
 from market_data.dto.tradedata_do import TradeDataDO  # noqa: E402
 from quantlib.calendar.daycount import DayCountBusN  # noqa: E402
 from quantlib.calendar.holidays import usd_calendar  # noqa: E402
-from quantlib.calendar.utils import month_map, option_maturity_month_map  # noqa: E402
+from quantlib.calendar.utils import (  # noqa: E402
+    future_maturity_month_map,
+    month_map,
+    option_maturity_month_map,
+)
+from wgan_option.market.black76 import (  # noqa: E402
+    black76_implied_vol,
+    black76_no_arbitrage_bounds,
+)
+from wgan_option.market.rates import TreasuryParYieldCurve  # noqa: E402
+from wgan_option.market.treasury_options import (  # noqa: E402
+    cme_treasury_calendar,
+    resolve_contract_year,
+    resolve_ty_option_contract_dates,
+)
 
 logger = logging.getLogger(__name__)
 
 PRECALIB_CSV_HEADERS = [
+    "target_datetime_utc",
+    "window_side",
+    "window_start_utc",
+    "window_end_utc",
     "trade_datetime_utc",
     "calibration_datetime_utc",
     "business_days",
     "maturity_date",
+    "expiration_datetime_utc",
     "contract_id",
     "option_type",
     "strike",
     "price",
     "spot",
+    "underlying_contract_id",
+    "underlying_trade_datetime_utc",
+    "underlying_staleness_seconds",
+    "underlying_match_mode",
     "percent_strike",
+    "pricing_model",
+    "rate_curve_date",
+    "continuous_rate",
+    "discount_factor",
+    "rate_curve_sha256",
     "implied_vol",
+    "is_otm",
     "passes_precalib_filter",
     "filter_reason",
     "weight",
@@ -64,8 +95,17 @@ DEFAULT_MAX_PRECALIB_IV = 3.0
 DEFAULT_CALIBRATION_WORKERS = 0
 DEFAULT_SURFACE_MODEL = "svi"
 DEFAULT_DATA_RANGE = "all"
+DEFAULT_PRICING_MODEL = "legacy_black_scholes"
+DEFAULT_RATE_CURVE_PATH = "data/reference/us_treasury_par_yield_curve_2022_2023.csv"
+DEFAULT_MAX_RATE_STALENESS_DAYS = 7
+DEFAULT_MAX_UNDERLYING_STALENESS_SECONDS = 60
+DEFAULT_OPTION_FILTER_MODE = "none"
+DEFAULT_IV_AGGREGATION_MODE = "volume_weighted_mean"
 SUPPORTED_SURFACE_MODELS = {"svi", "sabr", "cubic", "raw"}
 SUPPORTED_DATA_RANGES = {"all", "window", "excel"}
+SUPPORTED_PRICING_MODELS = {"legacy_black_scholes", "black76"}
+SUPPORTED_OPTION_FILTER_MODES = {"none", "otm_only"}
+SUPPORTED_IV_AGGREGATION_MODES = {"volume_weighted_mean", "volume_weighted_median"}
 RESOLVED_CONFIG_FILENAME = "surface-resolved_config.yaml"
 SUPPORTED_GENERATE_SURFACE_CONFIG_KEYS = {
     "input_glob",
@@ -97,6 +137,14 @@ SUPPORTED_GENERATE_SURFACE_CONFIG_KEYS = {
     "time_column",
     "source_timezone",
     "max_target_datetimes",
+    "pricing_model",
+    "rate_curve_path",
+    "max_rate_staleness_days",
+    "max_underlying_staleness_seconds",
+    "underlying_match_mode",
+    "option_filter_mode",
+    "iv_aggregation_mode",
+    "window_audit_json",
 }
 
 FILE_DATE_RANGE_RE = re.compile(r"_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})\.csv(?:\.gz)?$")
@@ -108,10 +156,13 @@ class ContractMeta:
     contract_type: str
     underlying: str
     maturity_month_code: Optional[str] = None
+    maturity_year: Optional[int] = None
     strike: Optional[float] = None
     option_type: Any = None
     expiry_date: Optional[date] = None
     expiry_dt_utc: Optional[datetime] = None
+    underlying_future_month_code: Optional[str] = None
+    underlying_future_year: Optional[int] = None
     contract_id: Optional[str] = None
 
 
@@ -121,6 +172,31 @@ class MinuteTradeRow:
     meta: ContractMeta
     price: float
     volume: float
+
+
+SpotKey = Tuple[Any, ...]
+
+
+@dataclass(frozen=True)
+class UnderlyingTrade:
+    trade_ts: pd.Timestamp
+    price: float
+    contract_id: str
+
+
+@dataclass(frozen=True)
+class SurfacePricingContext:
+    pricing_model: str = DEFAULT_PRICING_MODEL
+    rate_curve_path: str = DEFAULT_RATE_CURVE_PATH
+    max_rate_staleness_days: int = DEFAULT_MAX_RATE_STALENESS_DAYS
+    max_underlying_staleness_seconds: int = DEFAULT_MAX_UNDERLYING_STALENESS_SECONDS
+    underlying_match_mode: str = "last_prior_trade"
+    option_filter_mode: str = DEFAULT_OPTION_FILTER_MODE
+    iv_aggregation_mode: str = DEFAULT_IV_AGGREGATION_MODE
+    target_datetime_utc: str = ""
+    window_side: str = ""
+    window_start_utc: str = ""
+    window_end_utc: str = ""
 
 
 @dataclass(frozen=True)
@@ -133,26 +209,22 @@ class MinuteOptionCandidate:
     tau: float
     business_days: int
     trade_ts: Optional[pd.Timestamp] = None
+    underlying_trade_ts: Optional[pd.Timestamp] = None
+    underlying_contract_id: str = ""
+    underlying_staleness_seconds: float = math.nan
+    pricing_model: str = DEFAULT_PRICING_MODEL
+    rate_curve_date: Optional[date] = None
+    continuous_rate: float = 0.0
+    discount_factor: float = 1.0
+    rate_curve_sha256: str = ""
+    is_otm: bool = True
+    target_datetime_utc: str = ""
+    window_side: str = ""
+    window_start_utc: str = ""
+    window_end_utc: str = ""
 
 
-ProcessMinuteFn = Callable[
-    [
-        pd.Timestamp,
-        List[MinuteTradeRow],
-        int,
-        int,
-        int,
-        float,
-        DayCountBusN,
-        Any,
-        Optional[str],
-        Dict[Tuple[str, str], float],
-        Dict[str, Dict[str, Any]],
-        Dict[str, int],
-        Optional[csv.DictWriter],
-    ],
-    None,
-]
+ProcessMinuteFn = Callable[..., None]
 
 
 _resolve_config_path = resolve_config_path
@@ -179,6 +251,36 @@ def _normalize_data_range(value: Any) -> str:
             f"Unsupported data_range `{value}`. Expected one of: {sorted(SUPPORTED_DATA_RANGES)}"
         )
     return data_range
+
+
+def _normalize_pricing_model(value: Any) -> str:
+    pricing_model = str(value or DEFAULT_PRICING_MODEL).strip().lower()
+    if pricing_model not in SUPPORTED_PRICING_MODELS:
+        raise ValueError(
+            f"Unsupported pricing model `{value}`. Expected one of: "
+            f"{sorted(SUPPORTED_PRICING_MODELS)}"
+        )
+    return pricing_model
+
+
+def _normalize_option_filter_mode(value: Any) -> str:
+    mode = str(value or DEFAULT_OPTION_FILTER_MODE).strip().lower()
+    if mode not in SUPPORTED_OPTION_FILTER_MODES:
+        raise ValueError(
+            f"Unsupported option filter mode `{value}`. Expected one of: "
+            f"{sorted(SUPPORTED_OPTION_FILTER_MODES)}"
+        )
+    return mode
+
+
+def _normalize_iv_aggregation_mode(value: Any) -> str:
+    mode = str(value or DEFAULT_IV_AGGREGATION_MODE).strip().lower()
+    if mode not in SUPPORTED_IV_AGGREGATION_MODES:
+        raise ValueError(
+            f"Unsupported IV aggregation mode `{value}`. Expected one of: "
+            f"{sorted(SUPPORTED_IV_AGGREGATION_MODES)}"
+        )
+    return mode
 
 
 def _parse_expiration_time_utc(value: Any, key: str = "expiration_time_utc") -> dt_time:
@@ -230,6 +332,26 @@ def _load_generate_surface_config(
 
     defaults["model"] = _normalize_surface_model(defaults.get("model", DEFAULT_SURFACE_MODEL))
     defaults["data_range"] = _normalize_data_range(defaults.get("data_range", DEFAULT_DATA_RANGE))
+    defaults["pricing_model"] = _normalize_pricing_model(
+        defaults.get(
+            "pricing_model",
+            "black76" if defaults["model"] == "raw" else DEFAULT_PRICING_MODEL,
+        )
+    )
+    defaults["option_filter_mode"] = _normalize_option_filter_mode(
+        defaults.get(
+            "option_filter_mode",
+            "otm_only" if defaults["model"] == "raw" else DEFAULT_OPTION_FILTER_MODE,
+        )
+    )
+    defaults["iv_aggregation_mode"] = _normalize_iv_aggregation_mode(
+        defaults.get(
+            "iv_aggregation_mode",
+            "volume_weighted_median"
+            if defaults["model"] == "raw"
+            else DEFAULT_IV_AGGREGATION_MODE,
+        )
+    )
     defaults["run_ts"] = str(defaults.get("run_ts", "")).strip() or _default_run_ts()
     defaults.setdefault("output_dir", "data/processed/${model}-${data_range}/${run_ts}")
     defaults.setdefault("output_json", "${output_dir}/surface-${model}-${data_range}.json")
@@ -412,15 +534,84 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         default=str(config_defaults.get("precalib_csv", f"data/processed/{DEFAULT_SURFACE_MODEL}-{DEFAULT_DATA_RANGE}/surface-{DEFAULT_SURFACE_MODEL}-{DEFAULT_DATA_RANGE}-precalib-points.csv")),
         help="Path for pre-calibration SVI input points CSV.",
     )
+    parser.add_argument(
+        "--pricing-model",
+        choices=sorted(SUPPORTED_PRICING_MODELS),
+        default=str(config_defaults.get("pricing_model", DEFAULT_PRICING_MODEL)),
+        help="Option pricing model used for implied-volatility inversion.",
+    )
+    parser.add_argument(
+        "--rate-curve-path",
+        default=str(config_defaults.get("rate_curve_path", DEFAULT_RATE_CURVE_PATH)),
+        help="Frozen U.S. Treasury curve used by Black-76.",
+    )
+    parser.add_argument(
+        "--max-rate-staleness-days",
+        type=int,
+        default=int(
+            config_defaults.get(
+                "max_rate_staleness_days",
+                DEFAULT_MAX_RATE_STALENESS_DAYS,
+            )
+        ),
+    )
+    parser.add_argument(
+        "--max-underlying-staleness-seconds",
+        type=int,
+        default=int(
+            config_defaults.get(
+                "max_underlying_staleness_seconds",
+                DEFAULT_MAX_UNDERLYING_STALENESS_SECONDS,
+            )
+        ),
+    )
+    parser.add_argument(
+        "--underlying-match-mode",
+        choices=["last_prior_trade"],
+        default=str(config_defaults.get("underlying_match_mode", "last_prior_trade")),
+    )
+    parser.add_argument(
+        "--option-filter-mode",
+        choices=sorted(SUPPORTED_OPTION_FILTER_MODES),
+        default=str(
+            config_defaults.get("option_filter_mode", DEFAULT_OPTION_FILTER_MODE)
+        ),
+    )
+    parser.add_argument(
+        "--iv-aggregation-mode",
+        choices=sorted(SUPPORTED_IV_AGGREGATION_MODES),
+        default=str(
+            config_defaults.get(
+                "iv_aggregation_mode",
+                DEFAULT_IV_AGGREGATION_MODE,
+            )
+        ),
+    )
+    parser.add_argument(
+        "--window-audit-json",
+        default=str(config_defaults.get("window_audit_json", "")),
+        help="Optional path for per-target temporal-window audit JSON.",
+    )
     args = parser.parse_args(argv_list)
     args.config = str(_resolve_config_path(args.config))
     args.model = _normalize_surface_model(args.model)
     args.data_range = _normalize_data_range(args.data_range)
+    args.pricing_model = _normalize_pricing_model(args.pricing_model)
+    args.option_filter_mode = _normalize_option_filter_mode(args.option_filter_mode)
+    args.iv_aggregation_mode = _normalize_iv_aggregation_mode(args.iv_aggregation_mode)
     args.run_ts = str(args.run_ts).strip() or _default_run_ts()
     args.calibration_workers = int(args.calibration_workers)
     if args.calibration_workers < 0:
         raise ValueError(
             f"Invalid --calibration-workers: {args.calibration_workers}. Expected >= 0."
+        )
+    if args.max_underlying_staleness_seconds < 0:
+        raise ValueError("--max-underlying-staleness-seconds must be >= 0")
+    if args.max_rate_staleness_days < 0:
+        raise ValueError("--max-rate-staleness-days must be >= 0")
+    if args.model == "raw" and args.min_expiries_per_minute < 2:
+        raise ValueError(
+            "Corrected raw-vol surfaces require --min-expiries-per-minute >= 2"
         )
 
     resolved_defaults = _load_generate_surface_config(
@@ -497,6 +688,29 @@ def _evaluate_precalib_filter(implied_vol: float, max_precalib_iv: float) -> Tup
     return True, ""
 
 
+def _weighted_median(values: Iterable[float], weights: Iterable[float]) -> float:
+    pairs = sorted(
+        (
+            (float(value), max(float(weight), 0.0))
+            for value, weight in zip(values, weights)
+            if math.isfinite(float(value)) and math.isfinite(float(weight))
+        ),
+        key=lambda item: item[0],
+    )
+    if not pairs:
+        return math.nan
+    total_weight = sum(weight for _, weight in pairs)
+    if total_weight <= 0:
+        return float(np.median([value for value, _ in pairs]))
+    threshold = total_weight / 2.0
+    cumulative = 0.0
+    for value, weight in pairs:
+        cumulative += weight
+        if cumulative >= threshold:
+            return value
+    return pairs[-1][0]
+
+
 def _log_cli_arguments(args: argparse.Namespace) -> None:
     logger.info("CLI argv: %s", " ".join(shlex.quote(x) for x in sys.argv))
     logger.info("Parsed CLI arguments:")
@@ -530,6 +744,40 @@ def _build_resolved_config_payload(args: argparse.Namespace) -> Dict[str, Any]:
         "calibration_workers": int(args.calibration_workers),
         "save_precalib_csv": bool(args.save_precalib_csv),
         "precalib_csv": str(args.precalib_csv),
+        "pricing_model": str(
+            getattr(args, "pricing_model", DEFAULT_PRICING_MODEL)
+        ),
+        "rate_curve_path": str(
+            getattr(args, "rate_curve_path", DEFAULT_RATE_CURVE_PATH)
+        ),
+        "max_rate_staleness_days": int(
+            getattr(
+                args,
+                "max_rate_staleness_days",
+                DEFAULT_MAX_RATE_STALENESS_DAYS,
+            )
+        ),
+        "max_underlying_staleness_seconds": int(
+            getattr(
+                args,
+                "max_underlying_staleness_seconds",
+                DEFAULT_MAX_UNDERLYING_STALENESS_SECONDS,
+            )
+        ),
+        "underlying_match_mode": str(
+            getattr(args, "underlying_match_mode", "last_prior_trade")
+        ),
+        "option_filter_mode": str(
+            getattr(args, "option_filter_mode", DEFAULT_OPTION_FILTER_MODE)
+        ),
+        "iv_aggregation_mode": str(
+            getattr(
+                args,
+                "iv_aggregation_mode",
+                DEFAULT_IV_AGGREGATION_MODE,
+            )
+        ),
+        "window_audit_json": str(getattr(args, "window_audit_json", "")),
     }
     optional_keys = (
         "target_datetimes",
@@ -623,8 +871,70 @@ def _coerce_expiry_dt_utc(
     return expiry_value, _make_expiry_dt_utc(expiry_value, expiration_time_utc)
 
 
-def _make_spot_cache_key(underlying: str, target_future_month_code: Optional[str]) -> Tuple[str, str]:
-    return underlying, (target_future_month_code or "").upper()
+def _make_spot_cache_key(
+    underlying: str,
+    target_future_month_code: Optional[str],
+    target_future_year: Optional[int] = None,
+) -> SpotKey:
+    base_key = (
+        str(underlying or "").upper(),
+        (target_future_month_code or "").upper(),
+    )
+    if target_future_year is None:
+        return base_key
+    return (*base_key, int(target_future_year))
+
+
+def _pricing_context_from_args(
+    args: argparse.Namespace,
+    **window_overrides: str,
+) -> SurfacePricingContext:
+    return SurfacePricingContext(
+        pricing_model=_normalize_pricing_model(
+            getattr(args, "pricing_model", DEFAULT_PRICING_MODEL)
+        ),
+        rate_curve_path=str(
+            getattr(args, "rate_curve_path", DEFAULT_RATE_CURVE_PATH)
+        ),
+        max_rate_staleness_days=int(
+            getattr(
+                args,
+                "max_rate_staleness_days",
+                DEFAULT_MAX_RATE_STALENESS_DAYS,
+            )
+        ),
+        max_underlying_staleness_seconds=int(
+            getattr(
+                args,
+                "max_underlying_staleness_seconds",
+                DEFAULT_MAX_UNDERLYING_STALENESS_SECONDS,
+            )
+        ),
+        underlying_match_mode=str(
+            getattr(args, "underlying_match_mode", "last_prior_trade")
+        ),
+        option_filter_mode=_normalize_option_filter_mode(
+            getattr(args, "option_filter_mode", DEFAULT_OPTION_FILTER_MODE)
+        ),
+        iv_aggregation_mode=_normalize_iv_aggregation_mode(
+            getattr(args, "iv_aggregation_mode", DEFAULT_IV_AGGREGATION_MODE)
+        ),
+        target_datetime_utc=str(window_overrides.get("target_datetime_utc", "")),
+        window_side=str(window_overrides.get("window_side", "")),
+        window_start_utc=str(window_overrides.get("window_start_utc", "")),
+        window_end_utc=str(window_overrides.get("window_end_utc", "")),
+    )
+
+
+@lru_cache(maxsize=8)
+def _load_rate_curve(
+    path: str,
+    max_staleness_days: int,
+) -> TreasuryParYieldCurve:
+    return TreasuryParYieldCurve(
+        path,
+        max_staleness_days=int(max_staleness_days),
+    )
 
 
 def _get_ty_option_underlying_future_month_code(
@@ -664,37 +974,93 @@ def _resolve_option_target_future_month_code(
     return normalized_fallback
 
 
+def _resolve_future_year(
+    *,
+    contract: FutureContract,
+    trade_date: date,
+) -> int:
+    month_name = future_maturity_month_map.get(
+        str(contract.get_maturity_month_code()).upper()
+    )
+    if month_name is None:
+        raise ValueError(
+            f"Unsupported futures month code: {contract.get_maturity_month_code()!r}"
+        )
+    return resolve_contract_year(
+        contract.get_maturity_year_code(),
+        trade_date=trade_date,
+        contract_month=int(month_map[month_name]),
+    )
+
+
 def _build_contract_meta(
     trade_do: TradeDataDO,
     expiry_inference_date: date,
     calendar,
     expiration_time_utc: dt_time,
+    pricing_model: str = DEFAULT_PRICING_MODEL,
 ) -> Optional[ContractMeta]:
     contract = trade_do.to_contract()
+    trade_date = _to_utc_timestamp(trade_do.get_data_time()).date()
     if isinstance(contract, FutureContract):
         return ContractMeta(
             contract_type="future",
             underlying=contract.get_underlying(),
             maturity_month_code=contract.get_maturity_month_code(),
+            maturity_year=_resolve_future_year(
+                contract=contract,
+                trade_date=trade_date,
+            ),
             contract_id=trade_do.contract_id,
         )
 
     if isinstance(contract, OptionContract):
-        expiry = contract.get_contract_maturity_dates_by_contract_id(
-            data_date=expiry_inference_date,
-            calendars=[calendar],
-            termination_rule=ContractTerminationRule.EndOfMonth,
-            expiration_time=expiration_time_utc,
-        )
-        expiry_date, expiry_dt_utc = _coerce_expiry_dt_utc(expiry, expiration_time_utc)
+        if (
+            str(contract.get_underlying()).upper() == "TY"
+            and _normalize_pricing_model(pricing_model) == "black76"
+        ):
+            ty_dates = resolve_ty_option_contract_dates(
+                option_month_code=contract.get_maturity_month_code(),
+                option_year_code=contract.get_maturity_year_code(),
+                trade_date=trade_date,
+            )
+            expiry_date = ty_dates.last_trading_date
+            expiry_dt_utc = ty_dates.last_trading_datetime_utc
+            maturity_year = ty_dates.named_year
+            underlying_future_month_code = (
+                ty_dates.underlying_future_month_code
+            )
+            underlying_future_year = ty_dates.underlying_future_year
+        else:
+            expiry = contract.get_contract_maturity_dates_by_contract_id(
+                data_date=expiry_inference_date,
+                calendars=[calendar],
+                termination_rule=ContractTerminationRule.EndOfMonth,
+                expiration_time=expiration_time_utc,
+            )
+            expiry_date, expiry_dt_utc = _coerce_expiry_dt_utc(
+                expiry,
+                expiration_time_utc,
+            )
+            maturity_year = expiry_date.year
+            underlying_future_month_code = (
+                _get_ty_option_underlying_future_month_code(
+                    option_month_code=contract.get_maturity_month_code(),
+                    expiry_date=expiry_date,
+                )
+            )
+            underlying_future_year = expiry_date.year
         return ContractMeta(
             contract_type="option",
             underlying=contract.get_underlying(),
             maturity_month_code=contract.get_maturity_month_code(),
+            maturity_year=maturity_year,
             strike=float(contract.get_strike()),
             option_type=contract.get_option_type(),
             expiry_date=expiry_date,
             expiry_dt_utc=expiry_dt_utc,
+            underlying_future_month_code=underlying_future_month_code,
+            underlying_future_year=underlying_future_year,
             contract_id=trade_do.contract_id,
         )
 
@@ -766,6 +1132,105 @@ def _collect_spot_and_option_rows(
     return minute_spot, option_rows
 
 
+def _update_last_underlying_trade(
+    rows: Iterable[MinuteTradeRow],
+    state: Dict[SpotKey, UnderlyingTrade],
+) -> None:
+    """Update exact-contract futures state using chronologically visible trades."""
+
+    for row in sorted(rows, key=lambda item: _to_utc_timestamp(item.trade_ts)):
+        meta = row.meta
+        if meta.contract_type != "future":
+            continue
+        key = _make_spot_cache_key(
+            meta.underlying,
+            meta.maturity_month_code,
+            meta.maturity_year,
+        )
+        trade = UnderlyingTrade(
+            trade_ts=_to_utc_timestamp(row.trade_ts),
+            price=float(row.price),
+            contract_id=str(meta.contract_id or ""),
+        )
+        previous = state.get(key)
+        if previous is None or trade.trade_ts >= previous.trade_ts:
+            state[key] = trade
+
+
+def _build_underlying_timelines(
+    rows: Iterable[MinuteTradeRow],
+    initial_state: Mapping[SpotKey, UnderlyingTrade],
+) -> Dict[SpotKey, List[UnderlyingTrade]]:
+    timelines: Dict[SpotKey, List[UnderlyingTrade]] = defaultdict(list)
+    for key, trade in initial_state.items():
+        if isinstance(trade, UnderlyingTrade):
+            timelines[key].append(trade)
+    for row in rows:
+        meta = row.meta
+        if meta.contract_type != "future":
+            continue
+        key = _make_spot_cache_key(
+            meta.underlying,
+            meta.maturity_month_code,
+            meta.maturity_year,
+        )
+        timelines[key].append(
+            UnderlyingTrade(
+                trade_ts=_to_utc_timestamp(row.trade_ts),
+                price=float(row.price),
+                contract_id=str(meta.contract_id or ""),
+            )
+        )
+    for key in list(timelines):
+        deduped = {
+            (
+                int(trade.trade_ts.value),
+                float(trade.price),
+                trade.contract_id,
+            ): trade
+            for trade in timelines[key]
+        }
+        timelines[key] = sorted(
+            deduped.values(),
+            key=lambda trade: trade.trade_ts,
+        )
+    return dict(timelines)
+
+
+def _find_last_prior_underlying_trade(
+    timeline: List[UnderlyingTrade],
+    option_trade_ts: pd.Timestamp,
+) -> Optional[UnderlyingTrade]:
+    option_ns = int(_to_utc_timestamp(option_trade_ts).value)
+    low = 0
+    high = len(timeline)
+    while low < high:
+        middle = (low + high) // 2
+        if int(timeline[middle].trade_ts.value) <= option_ns:
+            low = middle + 1
+        else:
+            high = middle
+    return timeline[low - 1] if low > 0 else None
+
+
+def _is_otm_option(option_type: Any, strike: float, futures_price: float) -> bool:
+    option_name = _option_type_name(option_type)
+    if option_name == "CALL":
+        return float(strike) >= float(futures_price)
+    if option_name == "PUT":
+        return float(strike) < float(futures_price)
+    raise ValueError(f"Unsupported option type: {option_type!r}")
+
+
+def _pricing_tau_act365(
+    trade_ts: pd.Timestamp,
+    expiry_dt_utc: datetime,
+) -> float:
+    trade = _to_utc_timestamp(trade_ts)
+    expiry = _to_utc_timestamp(expiry_dt_utc)
+    return float((expiry - trade).total_seconds() / (365.0 * SECONDS_PER_DAY))
+
+
 def _day_fraction_utc(value: pd.Timestamp | datetime) -> float:
     ts_utc = _to_utc_timestamp(value)
     midnight = ts_utc.normalize()
@@ -790,72 +1255,328 @@ def _tau_years_from_trade_to_expiry(
 def _prepare_option_candidates(
     minute_ts: pd.Timestamp,
     option_rows: List[MinuteTradeRow],
-    minute_spot: Dict[Tuple[str, str], float],
-    last_spot_by_key: Dict[Tuple[str, str], float],
+    minute_spot: Mapping[Any, Any],
+    last_spot_by_key: Mapping[Any, Any],
     target_future_month_code: Optional[str],
     vol_daycount: DayCountBusN,
     calendar,
     stats: Dict[str, int],
     tau_anchor_ts: Optional[pd.Timestamp] = None,
+    all_rows: Optional[List[MinuteTradeRow]] = None,
+    pricing_context: Optional[SurfacePricingContext] = None,
+    rejected_audit_rows: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[date, List[MinuteOptionCandidate]]:
     minute_ts_utc = _to_utc_timestamp(minute_ts)
     valuation_date = minute_ts_utc.date()
+    pricing_context = pricing_context or SurfacePricingContext()
+    corrected_black76 = pricing_context.pricing_model == "black76"
+    underlying_timelines = (
+        _build_underlying_timelines(
+            all_rows or option_rows,
+            {
+                key: value
+                for key, value in last_spot_by_key.items()
+                if isinstance(key, tuple)
+                and len(key) == 3
+                and isinstance(value, UnderlyingTrade)
+            },
+        )
+        if corrected_black76
+        else {}
+    )
+    rate_curve = (
+        _load_rate_curve(
+            pricing_context.rate_curve_path,
+            pricing_context.max_rate_staleness_days,
+        )
+        if corrected_black76
+        else None
+    )
+
+    def reject(
+        row: MinuteTradeRow,
+        reason: str,
+        *,
+        underlying: Optional[UnderlyingTrade] = None,
+        staleness_seconds: float = math.nan,
+        is_otm: Optional[bool] = None,
+    ) -> None:
+        stats[f"skip_{reason}"] += 1
+        if rejected_audit_rows is None:
+            return
+        meta = row.meta
+        rejected_audit_rows.append(
+            {
+                "target_datetime_utc": pricing_context.target_datetime_utc,
+                "window_side": pricing_context.window_side,
+                "window_start_utc": pricing_context.window_start_utc,
+                "window_end_utc": pricing_context.window_end_utc,
+                "trade_datetime_utc": _to_utc_datetime_string(row.trade_ts),
+                "calibration_datetime_utc": _to_utc_minute_string(minute_ts),
+                "business_days": "",
+                "maturity_date": (
+                    meta.expiry_date.isoformat()
+                    if meta.expiry_date is not None
+                    else ""
+                ),
+                "expiration_datetime_utc": (
+                    _to_utc_datetime_string(meta.expiry_dt_utc)
+                    if meta.expiry_dt_utc is not None
+                    else ""
+                ),
+                "contract_id": meta.contract_id or "",
+                "option_type": _option_type_name(meta.option_type),
+                "strike": float(meta.strike or 0.0),
+                "price": float(row.price),
+                "spot": float(underlying.price) if underlying is not None else "",
+                "underlying_contract_id": (
+                    underlying.contract_id if underlying is not None else ""
+                ),
+                "underlying_trade_datetime_utc": (
+                    _to_utc_datetime_string(underlying.trade_ts)
+                    if underlying is not None
+                    else ""
+                ),
+                "underlying_staleness_seconds": (
+                    float(staleness_seconds)
+                    if math.isfinite(staleness_seconds)
+                    else ""
+                ),
+                "underlying_match_mode": pricing_context.underlying_match_mode,
+                "percent_strike": (
+                    float(meta.strike or 0.0) / float(underlying.price)
+                    if underlying is not None and underlying.price > 0
+                    else ""
+                ),
+                "pricing_model": pricing_context.pricing_model,
+                "rate_curve_date": "",
+                "continuous_rate": "",
+                "discount_factor": "",
+                "rate_curve_sha256": "",
+                "implied_vol": "",
+                "is_otm": (
+                    "true" if is_otm else "false"
+                    if is_otm is not None
+                    else ""
+                ),
+                "passes_precalib_filter": "false",
+                "filter_reason": reason,
+                "weight": float(row.volume),
+            }
+        )
 
     candidates: List[MinuteOptionCandidate] = []
     for row in option_rows:
         meta = row.meta
         assert meta.contract_type == "option"
 
-        spot_month_code = _resolve_option_target_future_month_code(
-            meta,
-            fallback_target_future_month_code=target_future_month_code,
-        )
-        spot_key = _make_spot_cache_key(meta.underlying, spot_month_code)
-        spot = minute_spot.get(spot_key, last_spot_by_key.get(spot_key))
-        if spot is None or not math.isfinite(spot) or spot <= 0:
-            stats["skip_no_spot"] += 1
-            continue
+        underlying_trade: Optional[UnderlyingTrade] = None
+        underlying_staleness_seconds = math.nan
+        if corrected_black76:
+            spot_month_code = (
+                meta.underlying_future_month_code
+                or _resolve_option_target_future_month_code(
+                    meta,
+                    fallback_target_future_month_code=target_future_month_code,
+                )
+            )
+            spot_key = _make_spot_cache_key(
+                meta.underlying,
+                spot_month_code,
+                meta.underlying_future_year,
+            )
+            underlying_trade = _find_last_prior_underlying_trade(
+                underlying_timelines.get(spot_key, []),
+                row.trade_ts,
+            )
+            if underlying_trade is None:
+                reject(row, "no_prior_underlying")
+                continue
+            underlying_staleness_seconds = float(
+                (
+                    _to_utc_timestamp(row.trade_ts)
+                    - underlying_trade.trade_ts
+                ).total_seconds()
+            )
+            if underlying_staleness_seconds < 0:
+                reject(
+                    row,
+                    "future_underlying_lookup",
+                    underlying=underlying_trade,
+                    staleness_seconds=underlying_staleness_seconds,
+                )
+                continue
+            if (
+                underlying_staleness_seconds
+                > pricing_context.max_underlying_staleness_seconds
+            ):
+                reject(
+                    row,
+                    "stale_underlying",
+                    underlying=underlying_trade,
+                    staleness_seconds=underlying_staleness_seconds,
+                )
+                continue
+            spot = float(underlying_trade.price)
+        else:
+            spot_month_code = _resolve_option_target_future_month_code(
+                meta,
+                fallback_target_future_month_code=target_future_month_code,
+            )
+            legacy_key = _make_spot_cache_key(
+                meta.underlying,
+                spot_month_code,
+                None,
+            )
+            spot = minute_spot.get(
+                legacy_key,
+                last_spot_by_key.get(legacy_key),
+            )
+            if isinstance(spot, UnderlyingTrade):
+                spot = spot.price
+            if spot is None or not math.isfinite(float(spot)) or float(spot) <= 0:
+                stats["skip_no_spot"] += 1
+                continue
+            spot = float(spot)
 
         expiry_date = meta.expiry_date
         expiry_dt_utc = meta.expiry_dt_utc
         if expiry_date is None or expiry_dt_utc is None:
-            stats["skip_tau_nonpositive"] += 1
+            reject(row, "missing_expiry", underlying=underlying_trade)
             continue
 
-        effective_trade_ts = tau_anchor_ts if tau_anchor_ts is not None else row.trade_ts
-        trade_ts_utc = _to_utc_timestamp(effective_trade_ts)
+        surface_anchor_ts = (
+            _to_utc_timestamp(tau_anchor_ts)
+            if tau_anchor_ts is not None
+            else minute_ts_utc
+        )
+        trade_ts_utc = _to_utc_timestamp(row.trade_ts)
         business_days = int(
             calendar.count_business_days(
-                trade_ts_utc.date(),
+                surface_anchor_ts.date(),
                 expiry_date,
                 include_start=False,
                 include_end=True,
             )
         )
         if business_days <= 0:
-            stats["skip_tau_nonpositive"] += 1
+            reject(row, "tau_nonpositive", underlying=underlying_trade)
             continue
 
-        tau = _tau_years_from_trade_to_expiry(trade_ts_utc, expiry_dt_utc, vol_daycount)
+        tau = (
+            _pricing_tau_act365(trade_ts_utc, expiry_dt_utc)
+            if corrected_black76
+            else _tau_years_from_trade_to_expiry(
+                surface_anchor_ts
+                if tau_anchor_ts is not None
+                else trade_ts_utc,
+                expiry_dt_utc,
+                vol_daycount,
+            )
+        )
         if tau <= 0:
-            stats["skip_tau_nonpositive"] += 1
+            reject(row, "tau_nonpositive", underlying=underlying_trade)
             continue
 
         strike = float(meta.strike or 0.0)
         if not math.isfinite(strike) or strike <= 0:
-            stats["skip_iv_fail"] += 1
+            reject(row, "invalid_strike", underlying=underlying_trade)
             continue
+
+        is_otm = _is_otm_option(meta.option_type, strike, spot)
+        if pricing_context.option_filter_mode == "otm_only" and not is_otm:
+            reject(
+                row,
+                "not_otm",
+                underlying=underlying_trade,
+                staleness_seconds=underlying_staleness_seconds,
+                is_otm=False,
+            )
+            continue
+
+        if corrected_black76:
+            assert rate_curve is not None
+            try:
+                curve_point = rate_curve.point(trade_ts_utc.date(), tau)
+            except Exception:
+                reject(
+                    row,
+                    "rate_curve",
+                    underlying=underlying_trade,
+                    staleness_seconds=underlying_staleness_seconds,
+                    is_otm=is_otm,
+                )
+                continue
+            try:
+                lower_bound, upper_bound = black76_no_arbitrage_bounds(
+                    futures_price=spot,
+                    strike=strike,
+                    discount_factor=curve_point.discount_factor,
+                    option_type=meta.option_type,
+                )
+            except Exception:
+                reject(
+                    row,
+                    "price_bounds",
+                    underlying=underlying_trade,
+                    staleness_seconds=underlying_staleness_seconds,
+                    is_otm=is_otm,
+                )
+                continue
+            tolerance = 1.0e-10 * max(1.0, upper_bound)
+            if (
+                float(row.price) < lower_bound - tolerance
+                or float(row.price) > upper_bound + tolerance
+            ):
+                reject(
+                    row,
+                    "price_bounds",
+                    underlying=underlying_trade,
+                    staleness_seconds=underlying_staleness_seconds,
+                    is_otm=is_otm,
+                )
+                continue
+            rate_curve_date = curve_point.curve_date
+            continuous_rate = curve_point.continuous_rate
+            discount_factor = curve_point.discount_factor
+            rate_curve_sha256 = curve_point.source_sha256
+        else:
+            rate_curve_date = None
+            continuous_rate = 0.0
+            discount_factor = 1.0
+            rate_curve_sha256 = ""
 
         candidates.append(
             MinuteOptionCandidate(
                 meta=meta,
                 price=float(row.price),
-                weight=max(float(row.volume), 1.0),
+                weight=float(row.volume),
                 strike=strike,
                 spot=float(spot),
                 tau=float(tau),
                 business_days=business_days,
                 trade_ts=_to_utc_timestamp(row.trade_ts),
+                underlying_trade_ts=(
+                    underlying_trade.trade_ts
+                    if underlying_trade is not None
+                    else None
+                ),
+                underlying_contract_id=(
+                    underlying_trade.contract_id
+                    if underlying_trade is not None
+                    else ""
+                ),
+                underlying_staleness_seconds=underlying_staleness_seconds,
+                pricing_model=pricing_context.pricing_model,
+                rate_curve_date=rate_curve_date,
+                continuous_rate=float(continuous_rate),
+                discount_factor=float(discount_factor),
+                rate_curve_sha256=rate_curve_sha256,
+                is_otm=bool(is_otm),
+                target_datetime_utc=pricing_context.target_datetime_utc,
+                window_side=pricing_context.window_side,
+                window_start_utc=pricing_context.window_start_utc,
+                window_end_utc=pricing_context.window_end_utc,
             )
         )
 
@@ -875,7 +1596,10 @@ def _finalize_minute_surface(
     stats: Dict[str, int],
     precalib_writer: Optional[csv.DictWriter] = None,
     surface_model: str = DEFAULT_SURFACE_MODEL,
+    iv_aggregation_mode: str = DEFAULT_IV_AGGREGATION_MODE,
+    rejected_audit_rows: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
+    iv_aggregation_mode = _normalize_iv_aggregation_mode(iv_aggregation_mode)
     grouped: Dict[int, Dict[float, Dict[str, Any]]] = defaultdict(
         lambda: defaultdict(
             lambda: {
@@ -884,6 +1608,7 @@ def _finalize_minute_surface(
                 "price_weighted_sum": 0.0,
                 "spot_weighted_sum": 0.0,
                 "percent_strike_weighted_sum": 0.0,
+                "iv_observations": [],
             }
         )
     )
@@ -910,6 +1635,10 @@ def _finalize_minute_surface(
         trade_ts = candidate.trade_ts if candidate.trade_ts is not None else minute_ts
         precalib_rows.append(
             {
+                "target_datetime_utc": candidate.target_datetime_utc,
+                "window_side": candidate.window_side,
+                "window_start_utc": candidate.window_start_utc,
+                "window_end_utc": candidate.window_end_utc,
                 "trade_datetime_utc": _to_utc_datetime_string(trade_ts),
                 "calibration_datetime_utc": minute_key,
                 "business_days": int(candidate.business_days),
@@ -918,13 +1647,44 @@ def _finalize_minute_surface(
                     if candidate.meta.expiry_date is not None
                     else ""
                 ),
+                "expiration_datetime_utc": (
+                    _to_utc_datetime_string(candidate.meta.expiry_dt_utc)
+                    if candidate.meta.expiry_dt_utc is not None
+                    else ""
+                ),
                 "contract_id": candidate.meta.contract_id or "",
                 "option_type": _option_type_name(candidate.meta.option_type),
                 "strike": float(candidate.strike),
                 "price": float(candidate.price),
                 "spot": float(candidate.spot),
+                "underlying_contract_id": candidate.underlying_contract_id,
+                "underlying_trade_datetime_utc": (
+                    _to_utc_datetime_string(candidate.underlying_trade_ts)
+                    if candidate.underlying_trade_ts is not None
+                    else ""
+                ),
+                "underlying_staleness_seconds": (
+                    float(candidate.underlying_staleness_seconds)
+                    if math.isfinite(candidate.underlying_staleness_seconds)
+                    else ""
+                ),
+                "underlying_match_mode": (
+                    "last_prior_trade"
+                    if candidate.pricing_model == "black76"
+                    else "minute_vwap_legacy"
+                ),
                 "percent_strike": float(percent_strike),
+                "pricing_model": candidate.pricing_model,
+                "rate_curve_date": (
+                    candidate.rate_curve_date.isoformat()
+                    if candidate.rate_curve_date is not None
+                    else ""
+                ),
+                "continuous_rate": float(candidate.continuous_rate),
+                "discount_factor": float(candidate.discount_factor),
+                "rate_curve_sha256": candidate.rate_curve_sha256,
                 "implied_vol": float(iv),
+                "is_otm": "true" if candidate.is_otm else "false",
                 "passes_precalib_filter": "true" if passes_precalib_filter else "false",
                 "filter_reason": filter_reason,
                 "weight": float(candidate.weight),
@@ -940,6 +1700,9 @@ def _finalize_minute_surface(
         bucket["price_weighted_sum"] += candidate.price * candidate.weight
         bucket["spot_weighted_sum"] += candidate.spot * candidate.weight
         bucket["percent_strike_weighted_sum"] += percent_strike * candidate.weight
+        bucket["iv_observations"].append(
+            (float(iv), float(candidate.weight))
+        )
 
     business_days_list: List[int] = []
     vols: List[List[float]] = []
@@ -952,7 +1715,13 @@ def _finalize_minute_surface(
             weight_sum = float(values["weight_sum"])
             if weight_sum <= 0:
                 continue
-            avg_iv = float(values["iv_weighted_sum"]) / weight_sum
+            if iv_aggregation_mode == "volume_weighted_median":
+                avg_iv = _weighted_median(
+                    [value for value, _ in values["iv_observations"]],
+                    [weight for _, weight in values["iv_observations"]],
+                )
+            else:
+                avg_iv = float(values["iv_weighted_sum"]) / weight_sum
             avg_price = float(values["price_weighted_sum"]) / weight_sum
             avg_spot = float(values["spot_weighted_sum"]) / weight_sum
             avg_pct = float(values["percent_strike_weighted_sum"]) / weight_sum
@@ -980,10 +1749,14 @@ def _finalize_minute_surface(
         percent_strikes.append([float(p["percent_strike"]) for p in points])
         vols.append([float(p["implied_vol"]) for p in points])
 
-    if precalib_writer is not None and precalib_rows:
-        for row in precalib_rows:
+    all_audit_rows = [
+        *(rejected_audit_rows or []),
+        *precalib_rows,
+    ]
+    if precalib_writer is not None and all_audit_rows:
+        for row in all_audit_rows:
             precalib_writer.writerow(row)
-        stats["precalib_rows_written"] += len(precalib_rows)
+        stats["precalib_rows_written"] += len(all_audit_rows)
         stats["precalib_minutes_written"] += 1
 
     if len(business_days_list) < min_expiries_per_minute:
@@ -1012,6 +1785,15 @@ def _finalize_minute_surface(
     results[minute_key] = {
         "surface_model": surface_model,
         "surface_params": params,
+        "surface_audit": {
+            "pricing_model": (
+                candidates[0].pricing_model if candidates else ""
+            ),
+            "iv_aggregation_mode": iv_aggregation_mode,
+            "valid_option_observations": len(precalib_rows),
+            "rejected_option_observations": len(rejected_audit_rows or []),
+            "expiry_slice_count": len(business_days_list),
+        },
     }
     stats["calibrated_minutes"] += 1
 
@@ -1023,6 +1805,7 @@ def _build_rows_for_minute(
     calendar,
     contract_cache: Dict[str, Optional[ContractMeta]],
     stats: Dict[str, int],
+    pricing_model: str = DEFAULT_PRICING_MODEL,
 ) -> List[MinuteTradeRow]:
     rows: List[MinuteTradeRow] = []
 
@@ -1031,7 +1814,10 @@ def _build_rows_for_minute(
         trade_ts: pd.Timestamp = rec.trade_dt
         price = float(rec.price)
         volume_raw = float(rec.volume)
-        volume = max(volume_raw, 1.0) if math.isfinite(volume_raw) else 1.0
+        if not math.isfinite(volume_raw) or volume_raw <= 0:
+            stats["skip_nonpositive_volume"] += 1
+            continue
+        volume = volume_raw
 
         trade_do = TradeDataDO(
             contract_id=ric,
@@ -1048,6 +1834,7 @@ def _build_rows_for_minute(
                     expiry_inference_date=expiry_inference_date,
                     calendar=calendar,
                     expiration_time_utc=expiration_time_utc,
+                    pricing_model=pricing_model,
                 )
             except Exception:
                 stats["skip_contract_parse"] += 1
@@ -1079,6 +1866,36 @@ def _setup_runtime(
     args.model = _normalize_surface_model(getattr(args, "model", DEFAULT_SURFACE_MODEL))
     args.data_range = _normalize_data_range(getattr(args, "data_range", DEFAULT_DATA_RANGE))
     args.run_ts = str(getattr(args, "run_ts", "")).strip() or _default_run_ts()
+    args.pricing_model = _normalize_pricing_model(
+        getattr(args, "pricing_model", DEFAULT_PRICING_MODEL)
+    )
+    args.rate_curve_path = str(
+        getattr(args, "rate_curve_path", DEFAULT_RATE_CURVE_PATH)
+    )
+    args.max_rate_staleness_days = int(
+        getattr(
+            args,
+            "max_rate_staleness_days",
+            DEFAULT_MAX_RATE_STALENESS_DAYS,
+        )
+    )
+    args.max_underlying_staleness_seconds = int(
+        getattr(
+            args,
+            "max_underlying_staleness_seconds",
+            DEFAULT_MAX_UNDERLYING_STALENESS_SECONDS,
+        )
+    )
+    args.underlying_match_mode = str(
+        getattr(args, "underlying_match_mode", "last_prior_trade")
+    )
+    args.option_filter_mode = _normalize_option_filter_mode(
+        getattr(args, "option_filter_mode", DEFAULT_OPTION_FILTER_MODE)
+    )
+    args.iv_aggregation_mode = _normalize_iv_aggregation_mode(
+        getattr(args, "iv_aggregation_mode", DEFAULT_IV_AGGREGATION_MODE)
+    )
+    args.window_audit_json = str(getattr(args, "window_audit_json", ""))
     output_json_path = Path(args.output_json)
     log_path = Path(args.log_file)
     resolved_config_path = Path(
@@ -1101,13 +1918,27 @@ def _setup_runtime(
     )
 
     expiry_inference_date = _parse_data_date(args.data_date)
-    calendar = usd_calendar()
+    pricing_model = args.pricing_model
+    calendar = (
+        cme_treasury_calendar()
+        if pricing_model == "black76"
+        else usd_calendar()
+    )
     vol_daycount = DayCountBusN(
-        f"BUS{int(args.days_in_year)}USD",
+        (
+            f"BUS{int(args.days_in_year)}CME_TREASURY"
+            if pricing_model == "black76"
+            else f"BUS{int(args.days_in_year)}USD"
+        ),
         calendar,
         int(args.days_in_year),
     )
     expiration_time_utc = _parse_expiration_time_utc(args.expiration_time_utc)
+    if pricing_model == "black76":
+        _load_rate_curve(
+            str(args.rate_curve_path),
+            int(args.max_rate_staleness_days),
+        )
 
     files = sorted(glob.glob(args.input_glob, recursive=True))
     if args.max_files and args.max_files > 0:
@@ -1140,11 +1971,15 @@ def resolve_parallel_calibration_workers(
 
     normalized_model = _normalize_surface_model(getattr(args, "model", DEFAULT_SURFACE_MODEL))
     normalized_data_range = _normalize_data_range(data_range)
-    if device == "cpu" and normalized_model == "svi" and normalized_data_range in {"window", "excel"}:
+    if (
+        device == "cpu"
+        and normalized_model in {"svi", "raw"}
+        and normalized_data_range in {"window", "excel"}
+    ):
         return requested
 
     logger.warning(
-        "Ignoring calibration_workers=%d; only CPU SVI window/excel jobs support parallel calibration.",
+        "Ignoring calibration_workers=%d; only CPU SVI/raw window/excel jobs support parallel calibration.",
         requested,
     )
     return 0
@@ -1189,7 +2024,8 @@ def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinut
     stats: Dict[str, int] = defaultdict(int)
     results: Dict[str, Dict[str, Any]] = {}
     contract_cache: Dict[str, Optional[ContractMeta]] = {}
-    last_spot_by_key: Dict[Tuple[str, str], float] = {}
+    last_spot_by_key: Dict[Any, Any] = {}
+    pricing_context = _pricing_context_from_args(args)
     precalib_csv_path = Path(args.precalib_csv)
     precalib_writer: Optional[csv.DictWriter] = None
     precalib_fp = None
@@ -1246,12 +2082,14 @@ def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinut
                     )
 
                     chunk["price"] = pd.to_numeric(chunk["price"], errors="coerce")
-                    chunk["volume"] = pd.to_numeric(chunk["volume"], errors="coerce").fillna(1.0)
+                    chunk["volume"] = pd.to_numeric(chunk["volume"], errors="coerce")
                     chunk["trade_dt"] = pd.to_datetime(chunk["raw_time"], errors="coerce", utc=True)
                     chunk = chunk[
                         chunk["ric"].notna()
                         & chunk["price"].notna()
                         & (chunk["price"] > 0)
+                        & chunk["volume"].notna()
+                        & (chunk["volume"] > 0)
                         & chunk["trade_dt"].notna()
                     ].copy()
                     if chunk.empty:
@@ -1283,6 +2121,7 @@ def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinut
                             calendar=calendar,
                             contract_cache=contract_cache,
                             stats=stats,
+                            pricing_model=pricing_context.pricing_model,
                         )
                         if not rows:
                             stats["total_minutes"] += 1
@@ -1303,7 +2142,10 @@ def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinut
                             stats=stats,
                             precalib_writer=precalib_writer,
                             surface_model=str(args.model),
+                            pricing_context=pricing_context,
                         )
+                        if pricing_context.pricing_model == "black76":
+                            _update_last_underlying_trade(rows, last_spot_by_key)
 
                     if stop_due_to_max_minutes:
                         break
@@ -1326,6 +2168,7 @@ def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinut
                         calendar=calendar,
                         contract_cache=contract_cache,
                         stats=stats,
+                        pricing_model=pricing_context.pricing_model,
                     )
                     if not rows:
                         stats["total_minutes"] += 1
@@ -1346,7 +2189,10 @@ def run_minute_svi_job(args: argparse.Namespace, process_minute_fn: ProcessMinut
                         stats=stats,
                         precalib_writer=precalib_writer,
                         surface_model=str(args.model),
+                        pricing_context=pricing_context,
                     )
+                    if pricing_context.pricing_model == "black76":
+                        _update_last_underlying_trade(rows, last_spot_by_key)
 
             if stop_due_to_max_minutes:
                 logger.info("Stop early due to --max-minutes=%d", args.max_minutes)

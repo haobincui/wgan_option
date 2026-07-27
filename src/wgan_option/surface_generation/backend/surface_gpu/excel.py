@@ -16,6 +16,10 @@ from wgan_option.surface_generation.data_helperd.all import resolve_parallel_cal
 
 
 def run(args):
+    if getattr(args, "pricing_model", "legacy_black_scholes") == "black76":
+        raise ValueError(
+            "Black-76 raw-vol construction requires --device cpu."
+        )
     resolve_parallel_calibration_workers(
         args,
         device="gpu",

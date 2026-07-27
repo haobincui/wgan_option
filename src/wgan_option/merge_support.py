@@ -142,6 +142,47 @@ def resolve_news_source_timezone(
     return requested or generated or DEFAULT_SOURCE_TIMEZONE
 
 
+def _resolved_config_publication_lag_minutes(input_dir: Path) -> Optional[int]:
+    config_path = resolve_surface_resolved_config_path(input_dir)
+    if config_path is None:
+        return None
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    surface_builder = payload.get("surface_builder") or {}
+    generate_surface = (
+        surface_builder.get("generate_surface")
+        if isinstance(surface_builder, Mapping)
+        else {}
+    ) or {}
+    value = (
+        generate_surface.get("publication_availability_lag_minutes")
+        if isinstance(generate_surface, Mapping)
+        else None
+    )
+    if value is None:
+        value = payload.get("publication_availability_lag_minutes")
+    return int(value) if value is not None else None
+
+
+def resolve_publication_availability_lag_minutes(
+    input_dir: Path,
+    requested_lag_minutes: Optional[int] = None,
+) -> int:
+    """Resolve publication availability lag and reject generation/merge drift."""
+
+    generated = _resolved_config_publication_lag_minutes(input_dir)
+    requested = int(requested_lag_minutes) if requested_lag_minutes is not None else None
+    if requested is not None and requested < 0:
+        raise ValueError("publication_availability_lag_minutes must be non-negative.")
+    if generated is not None and generated < 0:
+        raise ValueError("Generated publication_availability_lag_minutes must be non-negative.")
+    if requested is not None and generated is not None and requested != generated:
+        raise ValueError(
+            "Publication availability lag mismatch between merge and surface generation: "
+            f"merge={requested}, surface_resolved_config={generated}, input_dir={input_dir}."
+        )
+    return requested if requested is not None else generated if generated is not None else 0
+
+
 def offset_column_name(offset_minutes: int) -> str:
     return f"timestamp_utc_plus_{int(offset_minutes)}m"
 
@@ -250,6 +291,7 @@ def load_news_base_frame(
     *,
     source_timezone: str,
     offset_minutes: int,
+    publication_availability_lag_minutes: int = 0,
 ) -> pd.DataFrame:
     news_df = pd.read_excel(xlsx_path, engine="openpyxl", dtype=object)
     for column in ("SourceFile", "ArticleID", "HD", "LP", "HD_embedding", "LP_embedding", "HD_dim", "LP_dim"):
@@ -267,13 +309,19 @@ def load_news_base_frame(
         source_timezone=source_timezone,
     )
     utc_ts = pd.to_datetime(parsed.timestamp_utc, utc=True, errors="coerce")
-    shifted = utc_ts + pd.Timedelta(minutes=int(offset_minutes))
+    lag_minutes = int(publication_availability_lag_minutes)
+    if lag_minutes < 0:
+        raise ValueError("publication_availability_lag_minutes must be non-negative.")
+    available_ts = utc_ts + pd.Timedelta(minutes=lag_minutes)
+    shifted = available_ts + pd.Timedelta(minutes=int(offset_minutes))
 
     news_df["source_local_timestamp"] = parsed.source_local_timestamp
     news_df["source_timezone"] = str(source_timezone)
     news_df["source_utc_offset_minutes"] = parsed.utc_offset_minutes
     news_df["timestamp_parse_status"] = parsed.parse_status
-    news_df["timestamp_utc"] = parsed.timestamp_utc
+    news_df["publication_timestamp_utc"] = parsed.timestamp_utc
+    news_df["publication_availability_lag_minutes"] = lag_minutes
+    news_df["timestamp_utc"] = available_ts.map(to_utc_string)
     news_df[offset_column_name(offset_minutes)] = shifted.map(to_utc_string)
     return news_df
 

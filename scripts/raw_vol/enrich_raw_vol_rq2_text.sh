@@ -8,6 +8,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
 ENV_NAME="${ENV_NAME:-py312}"
+PUBLICATION_AVAILABILITY_LAG_MINUTES="${PUBLICATION_AVAILABILITY_LAG_MINUTES:-0}"
 DATASET_DIR="${1:-${DATASET_DIR:-}}"
 FEATURE_DIR="${FEATURE_DIR:-}"
 
@@ -40,6 +41,7 @@ run_python scripts/rq2/enrich_merged_vol.py \
 
 run_python scripts/raw_vol/raw_vol_pipeline.py validate \
   --dataset-dir "${DATASET_DIR}" \
-  --workbook "${DATASET_DIR}/merged_vol_rq2_text.xlsx"
+  --workbook "${DATASET_DIR}/merged_vol_rq2_text.xlsx" \
+  --publication-availability-lag-minutes "${PUBLICATION_AVAILABILITY_LAG_MINUTES}"
 
 echo "Raw-vol RQ2 workbook ready: ${DATASET_DIR}/merged_vol_rq2_text.xlsx"

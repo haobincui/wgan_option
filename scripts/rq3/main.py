@@ -1,4 +1,4 @@
-"""CLI for RQ3 event/no-event volatility analysis."""
+"""RQ3 scheduled-news robustness CLI with legacy diagnostic compatibility."""
 
 from __future__ import annotations
 
@@ -39,7 +39,12 @@ def _default_output_dir(prefix: str) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="RQ3 event/no-event volatility analysis.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "RQ3 scheduled-news conditional predictive robustness. Older "
+            "event/quiet commands are retained only for audit compatibility."
+        )
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     template = subparsers.add_parser("write-event-template", help="Write an empty event calendar CSV template.")
@@ -185,8 +190,8 @@ def build_parser() -> argparse.ArgumentParser:
     scheduled_news = subparsers.add_parser(
         "scheduled-news-regime",
         help=(
-            "Run frozen-model scheduled high-information news versus matched "
-            "ordinary-news analysis."
+            "Run frozen-model all-OOS scheduled-news conditional robustness "
+            "with matched ordinary-news analysis as a secondary diagnostic."
         ),
     )
     scheduled_news.add_argument(
@@ -211,6 +216,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--rq2-experiment",
         default="",
         help="Override the RQ2 frozen-prediction experiment path.",
+    )
+    scheduled_news.add_argument(
+        "--event-calendar",
+        default="",
+        help="Override the frozen scheduled-event calendar path.",
     )
     return parser
 
@@ -323,6 +333,7 @@ def main(argv: Iterable[str] | None = None) -> Path:
             output_dir=args.output_dir or None,
             rq1_experiment_override=args.rq1_experiment or None,
             rq2_experiment_override=args.rq2_experiment or None,
+            event_calendar_override=args.event_calendar or None,
         )
         print(f"RQ3 scheduled-news regime archive written to {output}")
         return output

@@ -533,8 +533,11 @@ class TestPairRollingComparison(unittest.TestCase):
                                 ).isoformat(),
                                 "surface_mae": base + variant_offsets[variant],
                                 "short_atm_mae": base * 0.8 + variant_offsets[variant],
-                                "atm7_abs_err": base * 0.9 + variant_offsets[variant],
+                                "supported_shortest_atm_abs_err": (
+                                    base * 0.9 + variant_offsets[variant]
+                                ),
                                 "energy_score": base,
+                                "variogram_score": base * 0.5,
                                 "coverage_50": 0.5,
                                 "coverage_80": 0.8,
                                 "coverage_90": 0.9,
@@ -543,6 +546,7 @@ class TestPairRollingComparison(unittest.TestCase):
                                 "interval_width_90": 0.03,
                                 "calibration_error": 0.0,
                                 "scenario_spread": 0.01,
+                                "mc_surface_mae_se": 0.0001,
                                 "calendar_violation_rate": 0.0,
                                 "butterfly_violation_rate": 0.0,
                             }
@@ -558,6 +562,37 @@ class TestPairRollingComparison(unittest.TestCase):
                                 "sample_count": pair_count,
                             }
                         )
+            for fold, specification in rq1_pair_experiment.FOLDS.items():
+                pair_count = int(specification["counts"][2])
+                lineage_path = (
+                    root
+                    / "inputs"
+                    / "folds"
+                    / fold
+                    / "pair_lineage_audit.csv"
+                )
+                lineage_path.parent.mkdir(parents=True, exist_ok=True)
+                pd.DataFrame(
+                    {
+                        "fold": [fold] * pair_count,
+                        "split": ["test"] * pair_count,
+                        "surface_pair_id": [
+                            f"{fold}-{index}" for index in range(pair_count)
+                        ],
+                        "exact_embedding_duplicate_with_train": np.zeros(
+                            pair_count,
+                            dtype=int,
+                        ),
+                        "exact_text_duplicate_with_train": np.zeros(
+                            pair_count,
+                            dtype=int,
+                        ),
+                        "near_text_candidate_duplicate_with_train": np.zeros(
+                            pair_count,
+                            dtype=int,
+                        ),
+                    }
+                ).to_csv(lineage_path, index=False)
             registry_path = root / "registry/generate_registry.csv"
             registry_path.parent.mkdir(parents=True, exist_ok=True)
             pd.DataFrame(registry_rows).to_csv(registry_path, index=False)

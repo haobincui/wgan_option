@@ -36,7 +36,6 @@ from .losses import (
     gradient_penalty,
     maturity_smoothness_penalty,
     parameter_count,
-    reconstruction_loss,
     strike_smoothness_penalty,
     weighted_surface_mae,
 )
@@ -69,6 +68,12 @@ def module_state_sha256(module: torch.nn.Module | None) -> str:
         digest.update(str(tuple(value.shape)).encode("ascii"))
         digest.update(value.numpy().tobytes(order="C"))
     return digest.hexdigest()
+
+
+def _finite_mean(values: list[float], *, default: float = 0.0) -> float:
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    return float(np.mean(finite)) if finite.size else float(default)
 
 
 class FilmWGANTrainer(BaseTrainer):
@@ -158,6 +163,17 @@ class FilmWGANTrainer(BaseTrainer):
             raise ValueError(
                 f"Parent generator embedding dimension mismatch: expected {self.bundle.embedding_dim}, "
                 f"found {checkpoint.get('embedding_dim')}."
+            )
+        parent_channels = int(checkpoint.get("current_surface_channels", 1))
+        if parent_channels != int(self.generator.current_surface_channels):
+            raise ValueError(
+                "Parent generator current-surface channel mismatch: "
+                f"expected {self.generator.current_surface_channels}, found {parent_channels}."
+            )
+        parent_support_sha = str(checkpoint.get("surface_support_sha256", ""))
+        if parent_support_sha != str(self.bundle.surface_support_sha256):
+            raise ValueError(
+                "Parent generator raw-support artifact SHA256 does not match the current fold."
             )
         parent_mode = str(
             checkpoint.get(
@@ -281,6 +297,11 @@ class FilmWGANTrainer(BaseTrainer):
         )
         self._atm_short_mask_flat = self._atm_short_mask_surface.reshape(-1)
         surface_height, surface_width = self.bundle.surface_shape
+        current_surface_channels = (
+            2
+            if str(self.config.surface_support_mode).strip().lower() == "raw_observed"
+            else 1
+        )
         deterministic = str(self.config.forecast_mode).strip().lower() == "deterministic"
         generator_noise_dim = 0 if deterministic else int(self.config.noise_dim)
         self.generator = FilmWGANGenerator(
@@ -296,6 +317,7 @@ class FilmWGANTrainer(BaseTrainer):
             conditioning_mode=self.config.conditioning_mode,
             text_dropout=float(self.config.text_dropout),
             text_gate_initial_value=float(self.config.text_gate_initial_value),
+            current_surface_channels=current_surface_channels,
         ).to(self.device)
         self._load_initial_generator_checkpoint()
         if not deterministic:
@@ -311,6 +333,7 @@ class FilmWGANTrainer(BaseTrainer):
                 conditioning_mode=self.config.conditioning_mode,
                 critic_conditioning_mode=self.config.critic_conditioning_mode,
                 text_dropout=float(self.config.text_dropout),
+                current_surface_channels=current_surface_channels,
             ).to(self.device)
         self._initial_generator_state_sha256 = module_state_sha256(self.generator)
         self._initial_critic_state_sha256 = module_state_sha256(self.critic)
@@ -326,6 +349,9 @@ class FilmWGANTrainer(BaseTrainer):
                 ),
                 "text_transform_path": self.bundle.text_transform_path,
                 "text_transform_sha256": self.bundle.text_transform_sha256,
+                "surface_support_path": self.bundle.surface_support_path,
+                "surface_support_sha256": self.bundle.surface_support_sha256,
+                "current_surface_channels": current_surface_channels,
                 "initial_generator_state_sha256": self._initial_generator_state_sha256,
                 "initial_critic_state_sha256": self._initial_critic_state_sha256,
             },
@@ -393,6 +419,7 @@ class FilmWGANTrainer(BaseTrainer):
         current_flat: torch.Tensor,
         target_flat: torch.Tensor,
         has_text: torch.Tensor,
+        support_mask_flat: torch.Tensor,
     ) -> dict[str, float]:
         assert self.generator is not None
         assert self.critic is not None
@@ -416,6 +443,14 @@ class FilmWGANTrainer(BaseTrainer):
             fake_future_flat = reconstruct_future_surface(current_flat, fake_delta)
         fake_future_surface = self._normalize_surface_flat(fake_future_flat)
         real_future_surface = self._normalize_surface_flat(target_flat)
+        support_surface = support_mask_flat.view(
+            support_mask_flat.size(0),
+            1,
+            fake_future_surface.size(2),
+            fake_future_surface.size(3),
+        )
+        fake_future_surface = fake_future_surface * support_surface
+        real_future_surface = real_future_surface * support_surface
 
         fake_scores = self.critic(
             fake_future_surface,
@@ -491,6 +526,7 @@ class FilmWGANTrainer(BaseTrainer):
         current_flat: torch.Tensor,
         target_flat: torch.Tensor,
         has_text: torch.Tensor,
+        support_mask_flat: torch.Tensor,
     ) -> dict[str, float]:
         assert self.generator is not None
         assert self.generator_optimizer is not None
@@ -522,6 +558,13 @@ class FilmWGANTrainer(BaseTrainer):
         )
         fake_future_flat = reconstruct_future_surface(current_flat, fake_delta)
         fake_future_surface = self._normalize_surface_flat(fake_future_flat)
+        support_surface = support_mask_flat.view(
+            support_mask_flat.size(0),
+            1,
+            self.bundle.surface_shape[0],
+            self.bundle.surface_shape[1],
+        )
+        fake_future_surface = fake_future_surface * support_surface
         if self.critic is not None:
             fake_scores = self.critic(
                 fake_future_surface,
@@ -535,16 +578,54 @@ class FilmWGANTrainer(BaseTrainer):
 
         future_surface_level = fake_future_flat.view(current_features.size(0), self.bundle.surface_shape[0], self.bundle.surface_shape[1])
         future_log_surface = torch.log(torch.clamp(future_surface_level, min=1e-4))
-        calendar_penalty = calendar_arbitrage_penalty(future_surface_level, self._strike_grid, self._maturity_days_grid).mean()
-        butterfly_penalty = butterfly_arbitrage_penalty(future_surface_level, self._strike_grid, self._maturity_days_grid).mean()
-        smooth_penalty = strike_smoothness_penalty(future_log_surface, self._strike_grid) + maturity_smoothness_penalty(
-            future_log_surface,
-            self._maturity_days_grid,
+        zero_penalty = torch.zeros(
+            (),
+            device=fake_future_flat.device,
+            dtype=fake_future_flat.dtype,
         )
-        recon_penalty = reconstruction_loss(fake_future_flat, target_flat)
-        recon_penalty_weighted = weighted_surface_mae(fake_future_flat, target_flat, self._recon_weights_flat)
+        calendar_penalty = (
+            calendar_arbitrage_penalty(
+                future_surface_level,
+                self._strike_grid,
+                self._maturity_days_grid,
+            ).mean()
+            if self.config.use_calendar_constraint
+            else zero_penalty
+        )
+        butterfly_penalty = (
+            butterfly_arbitrage_penalty(
+                future_surface_level,
+                self._strike_grid,
+                self._maturity_days_grid,
+            ).mean()
+            if self.config.use_butterfly_constraint
+            else zero_penalty
+        )
+        smooth_penalty = (
+            strike_smoothness_penalty(future_log_surface, self._strike_grid)
+            + maturity_smoothness_penalty(
+                future_log_surface,
+                self._maturity_days_grid,
+            )
+            if self.config.use_smooth_constraint
+            else zero_penalty
+        )
+        recon_penalty = weighted_surface_mae(
+            fake_future_flat,
+            target_flat,
+            support_mask_flat,
+        )
+        recon_penalty_weighted = weighted_surface_mae(
+            fake_future_flat,
+            target_flat,
+            support_mask_flat * self._recon_weights_flat,
+        )
         if self.config.use_atm_short_loss and self._atm_short_mask_flat is not None:
-            atm_short_penalty = atm_short_pure_mae(fake_future_flat, target_flat, self._atm_short_mask_flat)
+            atm_short_penalty = atm_short_pure_mae(
+                fake_future_flat,
+                target_flat,
+                support_mask_flat * self._atm_short_mask_flat,
+            )
         else:
             atm_short_penalty = torch.zeros((), device=fake_future_flat.device, dtype=fake_future_flat.dtype)
 
@@ -617,6 +698,7 @@ class FilmWGANTrainer(BaseTrainer):
         penalty_mean: list[float] = []
         penalty_std: list[float] = []
         weight_entropy: list[float] = []
+        mc_surface_mae_se: list[float] = []
 
         for sample in self.bundle.val_items:
             payload = build_sample_payload(
@@ -652,18 +734,56 @@ class FilmWGANTrainer(BaseTrainer):
             generated_surface = torch.tensor(payload["generated_surface"], dtype=torch.float32, device=self.device)
             current_surface = torch.tensor(payload["current_surface"], dtype=torch.float32, device=self.device)
             target_surface = torch.tensor(payload["target_surface"], dtype=torch.float32, device=self.device)
+            evaluation_support = torch.tensor(
+                sample.evaluation_support_mask,
+                dtype=torch.float32,
+                device=self.device,
+            )
             short_atm_weighted_mae.append(
-                float(weighted_surface_mae(generated_surface, target_surface, self._recon_weights_surface).detach().cpu())
+                float(
+                    weighted_surface_mae(
+                        generated_surface,
+                        target_surface,
+                        self._recon_weights_surface * evaluation_support,
+                    )
+                    .detach()
+                    .cpu()
+                )
             )
             current_short_atm_weighted_mae.append(
-                float(weighted_surface_mae(current_surface, target_surface, self._recon_weights_surface).detach().cpu())
+                float(
+                    weighted_surface_mae(
+                        current_surface,
+                        target_surface,
+                        self._recon_weights_surface * evaluation_support,
+                    )
+                    .detach()
+                    .cpu()
+                )
             )
-            if self._atm_short_mask_surface is not None and float(self._atm_short_mask_surface.sum().item()) > 0.0:
+            supported_atm_mask = (
+                self._atm_short_mask_surface * evaluation_support
+                if self._atm_short_mask_surface is not None
+                else None
+            )
+            if supported_atm_mask is not None and float(supported_atm_mask.sum().item()) > 0.0:
                 gen_atm_pure = float(
-                    atm_short_pure_mae(generated_surface, target_surface, self._atm_short_mask_surface).detach().cpu()
+                    atm_short_pure_mae(
+                        generated_surface,
+                        target_surface,
+                        supported_atm_mask,
+                    )
+                    .detach()
+                    .cpu()
                 )
                 cur_atm_pure = float(
-                    atm_short_pure_mae(current_surface, target_surface, self._atm_short_mask_surface).detach().cpu()
+                    atm_short_pure_mae(
+                        current_surface,
+                        target_surface,
+                        supported_atm_mask,
+                    )
+                    .detach()
+                    .cpu()
                 )
                 atm_short_pure_list.append(gen_atm_pure)
                 current_atm_short_pure_list.append(cur_atm_pure)
@@ -672,54 +792,94 @@ class FilmWGANTrainer(BaseTrainer):
             penalty_mean.append(float(payload["penalty_mean"]))
             penalty_std.append(float(payload["penalty_std"]))
             weight_entropy.append(float(payload["weight_entropy"]))
+            mc_surface_mae_se.append(
+                float(
+                    payload["probabilistic_metrics"][
+                        "mc_surface_mae_se"
+                    ]
+                )
+            )
 
-            weighted_surface = generated_surface.unsqueeze(0)
-            calendar.extend(
-                calendar_arbitrage_penalty(weighted_surface, self._strike_grid, self._maturity_days_grid).detach().cpu().tolist()
-            )
-            butterfly.extend(
-                butterfly_arbitrage_penalty(weighted_surface, self._strike_grid, self._maturity_days_grid).detach().cpu().tolist()
-            )
+            if bool(torch.all(evaluation_support > 0.0)):
+                weighted_surface = generated_surface.unsqueeze(0)
+                calendar.extend(
+                    calendar_arbitrage_penalty(
+                        weighted_surface,
+                        self._strike_grid,
+                        self._maturity_days_grid,
+                    )
+                    .detach()
+                    .cpu()
+                    .tolist()
+                )
+                butterfly.extend(
+                    butterfly_arbitrage_penalty(
+                        weighted_surface,
+                        self._strike_grid,
+                        self._maturity_days_grid,
+                    )
+                    .detach()
+                    .cpu()
+                    .tolist()
+                )
 
         self.generator.train()
-        val_mae = float(np.mean(mae)) if mae else 0.0
-        val_current_mae = float(np.mean(current_mae)) if current_mae else 0.0
-        val_short_atm_weighted_mae = float(np.mean(short_atm_weighted_mae)) if short_atm_weighted_mae else 0.0
-        val_current_short_atm_weighted_mae = (
-            float(np.mean(current_short_atm_weighted_mae)) if current_short_atm_weighted_mae else 0.0
+        val_mae = _finite_mean(mae, default=float("nan"))
+        val_current_mae = _finite_mean(current_mae, default=float("nan"))
+        val_short_atm_weighted_mae = _finite_mean(
+            short_atm_weighted_mae,
+            default=float("nan"),
         )
-        val_atm_short_pure_mae = float(np.mean(atm_short_pure_list)) if atm_short_pure_list else 0.0
-        val_current_atm_short_pure_mae = (
-            float(np.mean(current_atm_short_pure_list)) if current_atm_short_pure_list else 0.0
+        val_current_short_atm_weighted_mae = _finite_mean(
+            current_short_atm_weighted_mae,
+            default=float("nan"),
+        )
+        val_atm_short_pure_mae = _finite_mean(
+            atm_short_pure_list,
+            default=float("nan"),
+        )
+        val_current_atm_short_pure_mae = _finite_mean(
+            current_atm_short_pure_list,
+            default=float("nan"),
         )
         return {
             "val_mae": val_mae,
-            "val_rmse": float(np.mean(rmse)) if rmse else 0.0,
+            "val_rmse": _finite_mean(rmse, default=float("nan")),
             "val_current_mae": val_current_mae,
-            "val_current_rmse": float(np.mean(current_rmse)) if current_rmse else 0.0,
+            "val_current_rmse": _finite_mean(current_rmse, default=float("nan")),
             "val_short_atm_weighted_mae": val_short_atm_weighted_mae,
             "val_current_short_atm_weighted_mae": val_current_short_atm_weighted_mae,
             "val_short_atm_mae_gap_vs_current": val_short_atm_weighted_mae - val_current_short_atm_weighted_mae,
             "val_atm_short_pure_mae": val_atm_short_pure_mae,
             "val_current_atm_short_pure_mae": val_current_atm_short_pure_mae,
             "val_atm_short_pure_mae_gap_vs_current": val_atm_short_pure_mae - val_current_atm_short_pure_mae,
-            "val_atm_short_win_rate_vs_current": float(np.mean(atm_short_win_flags)) if atm_short_win_flags else 0.0,
+            "val_atm_short_win_rate_vs_current": _finite_mean(atm_short_win_flags),
             "val_mae_gap_vs_current": val_mae - val_current_mae,
-            "val_win_rate_vs_current": float(np.mean(win_flags)) if win_flags else 0.0,
-            "val_generated_current_mae": float(np.mean(generated_current_mae)) if generated_current_mae else 0.0,
-            "val_real_current_mae": float(np.mean(real_current_mae)) if real_current_mae else 0.0,
-            "val_calendar": float(np.mean(calendar)) if calendar else 0.0,
-            "val_butterfly": float(np.mean(butterfly)) if butterfly else 0.0,
-            "val_penalty_mean": float(np.mean(penalty_mean)) if penalty_mean else 0.0,
-            "val_penalty_std": float(np.mean(penalty_std)) if penalty_std else 0.0,
-            "val_weight_entropy": float(np.mean(weight_entropy)) if weight_entropy else 0.0,
+            "val_win_rate_vs_current": _finite_mean(win_flags),
+            "val_generated_current_mae": _finite_mean(
+                generated_current_mae,
+                default=float("nan"),
+            ),
+            "val_real_current_mae": _finite_mean(
+                real_current_mae,
+                default=float("nan"),
+            ),
+            "val_calendar": _finite_mean(calendar, default=float("nan")),
+            "val_butterfly": _finite_mean(butterfly, default=float("nan")),
+            "val_penalty_mean": _finite_mean(penalty_mean),
+            "val_penalty_std": _finite_mean(penalty_std),
+            "val_weight_entropy": _finite_mean(weight_entropy),
+            "val_mc_surface_mae_se": _finite_mean(
+                mc_surface_mae_se,
+                default=float("nan"),
+            ),
         }
 
     def _checkpoint_payload(self) -> dict[str, object]:
         assert self.bundle is not None
         assert self.generator is not None
         return {
-            "checkpoint_schema_version": 3,
+            "checkpoint_schema_version": 4,
             "architecture_version": "pair_text_residual_film_v1"
             if self.generator.conditioning_mode == "residual_film"
             else "film_wgan_legacy_v2",
@@ -751,6 +911,9 @@ class FilmWGANTrainer(BaseTrainer):
             "initial_critic_state_sha256": self._initial_critic_state_sha256,
             "text_transform_path": self.bundle.text_transform_path,
             "text_transform_sha256": self.bundle.text_transform_sha256,
+            "surface_support_path": self.bundle.surface_support_path,
+            "surface_support_sha256": self.bundle.surface_support_sha256,
+            "current_surface_channels": int(self.generator.current_surface_channels),
             "backbone_frozen": bool(self._backbone_frozen),
         }
 
@@ -858,29 +1021,29 @@ class FilmWGANTrainer(BaseTrainer):
                 "g_film": [],
             }
             for batch in self.bundle.train_loader:
-                if len(batch) == 6:
-                    (
-                        current_features,
-                        text_features,
-                        _real_delta_norm,
-                        current_flat,
-                        target_flat,
-                        has_text,
-                    ) = batch
+                (
+                    current_features,
+                    text_features,
+                    _real_delta_norm,
+                    current_flat,
+                    target_flat,
+                ) = batch[:5]
+                extra_index = 5
+                if str(self.config.surface_support_mode).strip().lower() == "raw_observed":
+                    support_mask_flat = batch[extra_index]
+                    extra_index += 1
                 else:
-                    (
-                        current_features,
-                        text_features,
-                        _real_delta_norm,
-                        current_flat,
-                        target_flat,
-                    ) = batch
+                    support_mask_flat = torch.ones_like(current_flat)
+                if str(self.config.conditioning_mode).strip().lower() == "residual_film":
+                    has_text = batch[extra_index]
+                else:
                     has_text = torch.ones(current_features.size(0), dtype=torch.float32)
                 current_features = self._to_device(current_features)
                 text_features = self._to_device(text_features)
                 current_flat = self._to_device(current_flat)
                 target_flat = self._to_device(target_flat)
                 has_text = self._to_device(has_text)
+                support_mask_flat = self._to_device(support_mask_flat)
 
                 if self.critic is not None:
                     for _ in range(max(1, int(self.config.critic_iter))):
@@ -890,6 +1053,7 @@ class FilmWGANTrainer(BaseTrainer):
                             current_flat,
                             target_flat,
                             has_text,
+                            support_mask_flat,
                         )
                         for key, value in d_metrics.items():
                             running[key].append(float(value))
@@ -900,6 +1064,7 @@ class FilmWGANTrainer(BaseTrainer):
                     current_flat,
                     target_flat,
                     has_text,
+                    support_mask_flat,
                 )
                 for key, value in g_metrics.items():
                     running[key].append(float(value))

@@ -105,8 +105,16 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
         calendar,
         contract_cache,
         stats,
+        pricing_model="legacy_black_scholes",
     ) -> List[MinuteTradeRow]:
-        del expiry_inference_date, expiration_time_utc, calendar, contract_cache, stats
+        del (
+            expiry_inference_date,
+            expiration_time_utc,
+            calendar,
+            contract_cache,
+            stats,
+            pricing_model,
+        )
         rows: List[MinuteTradeRow] = []
         for rec in minute_df.itertuples(index=False):
             ric = str(rec.ric)
@@ -162,6 +170,7 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
             tau_anchor_ts=None,
             count_stat_key="total_minutes",
             surface_model="svi",
+            pricing_context=None,
         ):
             del (
                 days_in_year,
@@ -173,6 +182,7 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
                 target_future_month_code,
                 precalib_writer,
                 surface_model,
+                pricing_context,
             )
             key = window_common._to_utc_minute_string(minute_ts)
             recorded_calls[key] = {
@@ -211,7 +221,6 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
                 "2026-03-09T14:32:00Z",
                 "2026-03-09T14:33:00Z",
                 "2026-03-09T14:34:00Z",
-                "2026-03-09T14:35:00Z",
             ],
         )
         self.assertEqual(
@@ -222,7 +231,6 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
                 "2026-03-09T14:37:00Z",
                 "2026-03-09T14:38:00Z",
                 "2026-03-09T14:39:00Z",
-                "2026-03-09T14:40:00Z",
             ],
         )
         self.assertEqual(
@@ -271,16 +279,16 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
             self.assertEqual(set(recorded_calls.keys()), {backward_key, forward_key})
             self.assertEqual(
                 recorded_calls[backward_key]["unique_row_minutes"],
-                ["2026-03-09T14:30:00Z", "2026-03-09T14:34:00Z", "2026-03-09T14:35:00Z"],
+                ["2026-03-09T14:30:00Z", "2026-03-09T14:34:00Z"],
             )
             self.assertEqual(
                 recorded_calls[forward_key]["unique_row_minutes"],
-                ["2026-03-09T14:35:00Z", "2026-03-09T14:36:00Z", "2026-03-09T14:40:00Z"],
+                ["2026-03-09T14:35:00Z", "2026-03-09T14:36:00Z"],
             )
-            self.assertEqual(recorded_calls[backward_key]["row_count"], 3)
-            self.assertEqual(recorded_calls[forward_key]["row_count"], 4)
-            self.assertEqual(recorded_calls[backward_key]["last_spot_by_key"], {("TY", "H"): 100.0})
-            self.assertEqual(recorded_calls[forward_key]["last_spot_by_key"], {("TY", "H"): 101.0})
+            self.assertEqual(recorded_calls[backward_key]["row_count"], 2)
+            self.assertEqual(recorded_calls[forward_key]["row_count"], 3)
+            self.assertEqual(recorded_calls[backward_key]["last_spot_by_key"], {})
+            self.assertEqual(recorded_calls[forward_key]["last_spot_by_key"], {("TY", "H"): 100.0})
             self.assertEqual(recorded_calls[backward_key]["tau_anchor_ts"], backward_key)
             self.assertEqual(recorded_calls[forward_key]["tau_anchor_ts"], forward_key)
             self.assertEqual(recorded_calls[backward_key]["count_stat_key"], "window_surface_attempts")
@@ -299,22 +307,20 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
             self.assertEqual(
                 surfaces[target_key]["backward"]["surface_params"],
                 {
-                    "row_count": 3,
+                    "row_count": 2,
                     "unique_row_minutes": [
                         "2026-03-09T14:30:00Z",
                         "2026-03-09T14:34:00Z",
-                        "2026-03-09T14:35:00Z",
                     ],
                 },
             )
             self.assertEqual(
                 surfaces[target_key]["forward"]["surface_params"],
                 {
-                    "row_count": 4,
+                    "row_count": 3,
                     "unique_row_minutes": [
                         "2026-03-09T14:35:00Z",
                         "2026-03-09T14:36:00Z",
-                        "2026-03-09T14:40:00Z",
                     ],
                 },
             )
@@ -412,6 +418,7 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
                 tau_anchor_ts=None,
                 count_stat_key="total_minutes",
                 surface_model="svi",
+                pricing_context=None,
             ):
                 del (
                     rows,
@@ -426,6 +433,7 @@ class TestGenerateSurfaceWindowLogic(unittest.TestCase):
                     precalib_writer,
                     tau_anchor_ts,
                     surface_model,
+                    pricing_context,
                 )
                 stats[count_stat_key] += 1
                 key = window_common._to_utc_minute_string(minute_ts)

@@ -18,8 +18,13 @@ LOG_PATH="${LOG_DIR}/training_matrix_${RUN_TS}.log"
 PID_PATH="${LOG_DIR}/training_matrix_${RUN_TS}.pid"
 mkdir -p "${LOG_DIR}"
 
-nohup setsid bash scripts/rq2_pair/resume_training_matrix.sh \
-  --experiment-root "${EXPERIMENT_ROOT}" \
+nohup setsid env \
+  EXPERIMENT_ROOT="${EXPERIMENT_ROOT}" \
+  GPU_IDS="${GPU_IDS:-0 1}" \
+  RUNS_PER_GPU="${RUNS_PER_GPU:-2}" \
+  ENV_NAME="${ENV_NAME:-py312}" \
+  PYTHONUNBUFFERED=1 \
+  bash scripts/rq2_pair/run_training_matrix_parallel.sh \
   >"${LOG_PATH}" 2>&1 < /dev/null &
 PID=$!
 printf '%s\n' "${PID}" >"${PID_PATH}"
@@ -28,3 +33,5 @@ echo "experiment_root=${EXPERIMENT_ROOT}"
 echo "pid=${PID}"
 echo "log=${LOG_PATH}"
 echo "pid_file=${PID_PATH}"
+echo "gpu_ids=${GPU_IDS:-0 1}"
+echo "runs_per_gpu=${RUNS_PER_GPU:-2}"

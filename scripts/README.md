@@ -17,6 +17,19 @@ raw option files
 
 ## Main Script Areas
 
+- `scripts/rq123`
+  - canonical corrected raw-vol RQ1-RQ3 orchestration
+  - background/resume/monitor/final-validation/package entrypoints
+- `scripts/rq1_pair`
+  - pair-level LP versus controlled no-text rolling experiment
+  - shared Stage-A parent and residual Stage-B continuation
+- `scripts/rq2_pair`
+  - train-fold-only BoW log-count and ChatGPT-score representation tests
+- `scripts/rq3`
+  - frozen all-OOS conditional predictive-robustness analysis
+  - scheduled-vs-ordinary matching retained as secondary robustness
+- `scripts/raw_vol`
+  - corrected Black76 raw-vol dataset construction and hard-stop audits
 - `scripts/generate_surface`
   - unified minute surface-generation CLI
   - supports `--model {svi,sabr,cubic,raw}` and `--data_range {all,window,excel}`
@@ -28,6 +41,32 @@ raw option files
   - runs saved checkpoints on selected workbook samples
 - `scripts/analyze_error`
   - computes error distributions and bootstrap summaries from saved checkpoints
+
+## Canonical Corrected Run
+
+Run from the repository root:
+
+```bash
+GPU_IDS="0 1" RUNS_PER_GPU=2 \
+bash scripts/rq123/start_corrected_pipeline_background.sh
+```
+
+Monitor:
+
+```bash
+bash scripts/rq123/monitor_corrected_pipeline.sh
+```
+
+The corrected workflow fixes `Europe/London` Factiva timestamps, disjoint
+`[t-5,t)` / `[t,t+5)` windows, CME TY option expiry, Black76 with frozen rates
+and prior futures, OTM filtering, fold-train-only raw support, strict text
+lineage, and dependence-aware RQ1-RQ3 inference.
+
+RQ dataset construction reads the 728 daily 2022-2023 `0#TY+` files only. It
+does not read `ty_plus_merged.csv.gz`, avoiding duplicate source traversal.
+
+Superseded RQ orchestration is preserved under
+`scripts/archive/pre_corrected_20260727/`; it is not a current entrypoint.
 
 ## Script-Level READMEs
 

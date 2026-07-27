@@ -32,6 +32,7 @@ class FilmWGANTrainConfig:
     text_permutation_seed: int = 20260722
     sample_unit: str = "article_row"
     news_workbook_path: str = "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx"
+    text_lineage_mode: str = "legacy"
     text_pooling_mode: str = "mean_l2"
     pair_text_feature_path: str = ""
     text_preprocessing_mode: str = "coordinate_zscore"
@@ -39,6 +40,14 @@ class FilmWGANTrainConfig:
     text_pca_components: int = 128
     text_pca_whiten: bool = False
     text_output_dim: int = 128
+    surface_support_mode: str = "full_grid"
+    surface_support_path: str = ""
+    support_grid_quantile_low: float = 0.05
+    support_grid_quantile_high: float = 0.95
+    support_strike_bins: int = 16
+    support_maturity_bins: int = 16
+    support_min_train_pair_cells: int = 1
+    report_atm7_metric: bool = True
     min_samples_for_training: int = 2
 
     normalize_current_surface: bool = True
@@ -136,6 +145,7 @@ class FilmWGANSampleConfig:
     text_permutation_seed: int = 20260722
     sample_unit: str = "article_row"
     news_workbook_path: str = "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx"
+    text_lineage_mode: str = "legacy"
     text_pooling_mode: str = "mean_l2"
     pair_text_feature_path: str = ""
     text_preprocessing_mode: str = "coordinate_zscore"
@@ -143,6 +153,14 @@ class FilmWGANSampleConfig:
     text_pca_components: int = 128
     text_pca_whiten: bool = False
     text_output_dim: int = 128
+    surface_support_mode: str = "full_grid"
+    surface_support_path: str = ""
+    support_grid_quantile_low: float = 0.05
+    support_grid_quantile_high: float = 0.95
+    support_strike_bins: int = 16
+    support_maturity_bins: int = 16
+    support_min_train_pair_cells: int = 1
+    report_atm7_metric: bool = True
 
     checkpoint_path: str = ""
     seed: int = 42
@@ -183,6 +201,7 @@ _SHARED_GENERATE_FIELDS = {
     "text_permutation_seed",
     "sample_unit",
     "news_workbook_path",
+    "text_lineage_mode",
     "text_pooling_mode",
     "pair_text_feature_path",
     "text_preprocessing_mode",
@@ -190,6 +209,14 @@ _SHARED_GENERATE_FIELDS = {
     "text_pca_components",
     "text_pca_whiten",
     "text_output_dim",
+    "surface_support_mode",
+    "surface_support_path",
+    "support_grid_quantile_low",
+    "support_grid_quantile_high",
+    "support_strike_bins",
+    "support_maturity_bins",
+    "support_min_train_pair_cells",
+    "report_atm7_metric",
     "seed",
     "cuda",
 }
@@ -221,6 +248,11 @@ def _validate_common_fields(config: FilmWGANTrainConfig | FilmWGANSampleConfig) 
     sample_unit = str(config.sample_unit).strip().lower()
     if sample_unit not in {"article_row", "surface_pair"}:
         raise ValueError("sample_unit must be one of ['article_row', 'surface_pair'].")
+    lineage_mode = str(config.text_lineage_mode).strip().lower()
+    if lineage_mode not in {"legacy", "strict"}:
+        raise ValueError("text_lineage_mode must be one of ['legacy', 'strict'].")
+    if lineage_mode == "strict" and sample_unit != "surface_pair":
+        raise ValueError("text_lineage_mode=strict requires sample_unit=surface_pair.")
     pooling_mode = str(config.text_pooling_mode).strip().lower()
     allowed_pooling_modes = {"mean_l2", "bow_log_count_l2", "mean_scores"}
     if pooling_mode not in allowed_pooling_modes:
@@ -237,6 +269,28 @@ def _validate_common_fields(config: FilmWGANTrainConfig | FilmWGANSampleConfig) 
         raise ValueError("text_pca_components must be positive.")
     if int(config.text_output_dim) <= 0:
         raise ValueError("text_output_dim must be positive.")
+    support_mode = str(config.surface_support_mode).strip().lower()
+    if support_mode not in {"full_grid", "raw_observed"}:
+        raise ValueError("surface_support_mode must be one of ['full_grid', 'raw_observed'].")
+    if support_mode == "raw_observed":
+        if sample_unit != "surface_pair":
+            raise ValueError("surface_support_mode=raw_observed requires sample_unit=surface_pair.")
+        if not str(config.surface_support_path).strip():
+            raise ValueError("surface_support_mode=raw_observed requires surface_support_path.")
+        if int(config.support_strike_bins) < 2 or int(config.support_maturity_bins) < 2:
+            raise ValueError("Raw support grids require at least two strike and maturity bins.")
+        if int(config.support_min_train_pair_cells) < 1:
+            raise ValueError("support_min_train_pair_cells must be positive.")
+        if not (
+            0.0
+            <= float(config.support_grid_quantile_low)
+            < float(config.support_grid_quantile_high)
+            <= 1.0
+        ):
+            raise ValueError(
+                "Support quantiles must satisfy 0 <= support_grid_quantile_low "
+                "< support_grid_quantile_high <= 1."
+            )
     if preprocessing_mode in {"pca", "zscore_pad"} and bool(
         getattr(config, "normalize_text_embedding", False)
     ):
@@ -294,6 +348,18 @@ def _validate_train_fields(config: FilmWGANTrainConfig) -> None:
         raise ValueError("eval_calibration_levels must contain values strictly between 0 and 1.")
     if float(config.arbitrage_violation_tolerance) < 0.0:
         raise ValueError("arbitrage_violation_tolerance must be non-negative.")
+    if str(config.surface_support_mode).strip().lower() == "raw_observed" and any(
+        (
+            bool(config.use_calendar_constraint),
+            bool(config.use_butterfly_constraint),
+            bool(config.use_smooth_constraint),
+        )
+    ):
+        raise ValueError(
+            "raw_observed support uses an irregular per-sample mask; calendar, butterfly, "
+            "and smoothness penalties must be disabled unless support-aware edge penalties "
+            "are explicitly implemented."
+        )
 
 
 def _validate_sample_fields(config: FilmWGANSampleConfig) -> None:

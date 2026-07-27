@@ -43,7 +43,7 @@ class TestRQ2PairFeatures(unittest.TestCase):
             "credit risk",
             "validationonly phrase",
             "testonlytoken surprise",
-            "",
+            "late test article",
         ]
         news = pd.DataFrame(
             {
@@ -90,7 +90,7 @@ class TestRQ2PairFeatures(unittest.TestCase):
                     "cache_json",
                     "cache_json",
                     "cache_json",
-                    "empty_text",
+                    "cache_json",
                 ],
             }
         )
@@ -224,7 +224,7 @@ class TestRQ2PairFeatures(unittest.TestCase):
             audit = pd.read_csv(artifacts.audit_path).set_index(
                 "surface_pair_id"
             )
-            self.assertEqual(int(audit.loc["p6", "empty_text_count"]), 1)
+            self.assertEqual(int(audit.loc["p6", "empty_text_count"]), 0)
             self.assertTrue(bool(audit.loc["p6", "sentiment_all_zero"]))
 
     def test_zscore_pad_reaches_shared_dimension(self):
@@ -278,10 +278,10 @@ class TestRQ2StatisticsAndImport(unittest.TestCase):
                         ),
                         "surface_mae": offset + pair_index * 0.001,
                         "short_atm_mae": offset + 0.01,
-                        "atm7_abs_err": offset + 0.02,
+                        "supported_shortest_atm_abs_err": offset + 0.02,
                         "current_mae": 0.10,
                         "current_atm_short_pure_mae": 0.11,
-                        "current_atm7_abs_err": 0.12,
+                        "current_supported_shortest_atm_abs_err": 0.12,
                     }
                 )
         return pd.DataFrame(rows)
@@ -388,7 +388,7 @@ class TestRQ2StatisticsAndImport(unittest.TestCase):
                     for metric in (
                         "surface_mae",
                         "short_atm_mae",
-                        "atm7_abs_err",
+                        "supported_shortest_atm_abs_err",
                     ):
                         frame[metric] = frame[metric] + seed_effect
                     frame.to_csv(summary, index=False)

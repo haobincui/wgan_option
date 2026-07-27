@@ -1,0 +1,31 @@
+{
+  "generated_at_utc": "2026-07-27T21:13:26.159033+00:00",
+  "generator": "scripts/raw_vol/build_reference_data.py",
+  "sources": [
+    {
+      "category": "treasury_curve",
+      "relative_path": "us_treasury_daily_par_yield_curve_2022_official.csv",
+      "sha256": "c33cb2758e5e34c2c23b7ab759d18681091860f3f9e5960112859f64f31cd814",
+      "url": "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/2022/all?type=daily_treasury_yield_curve&field_tdr_date_value=2022&page&_format=csv"
+    },
+    {
+      "category": "treasury_curve",
+      "relative_path": "us_treasury_daily_par_yield_curve_2023_official.csv",
+      "sha256": "edb7f3904e11dcaa502cdcc03ad9b1b16c893802d166ce9bc5fa1118251249d4",
+      "url": "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/2023/all?type=daily_treasury_yield_curve&field_tdr_date_value=2023&page&_format=csv"
+    },
+    {
+      "category": "treasury_curve_combined",
+      "relative_path": "us_treasury_par_yield_curve_2022_2023.csv",
+      "sha256": "919f4d288e6f5212156f7fafadfba76b208698d9c091669c3aaff7c30f305db8",
+      "url": ""
+    },
+    {
+      "category": "cme_ty_expiry_rule_reference",
+      "notes": "Rule-derived quarterly/serial dates; weekly options are excluded.",
+      "relative_path": "cme_ty_monthly_expirations_2022_2024.csv",
+      "sha256": "41ccef88d9b03968a315ac88526820f2cdfcde01c8938519f080cf634f4602e3",
+      "url": "https://www.cmegroup.com/rulebook/CBOT/II/19A.pdf"
+    }
+  ]
+}

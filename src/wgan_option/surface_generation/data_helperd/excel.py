@@ -101,6 +101,12 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Timezone for PD+ET source timestamps before converting to UTC.",
     )
     excel_parser.add_argument(
+        "--publication-availability-lag-minutes",
+        type=int,
+        default=int(config_defaults.get("publication_availability_lag_minutes", 0)),
+        help="Non-negative delay from the reported publication minute to model availability.",
+    )
+    excel_parser.add_argument(
         "--max-target-datetimes",
         type=int,
         default=int(config_defaults.get("max_target_datetimes", 0)),
@@ -120,6 +126,11 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     args.date_column = str(excel_args.date_column)
     args.time_column = str(excel_args.time_column)
     args.source_timezone = str(excel_args.source_timezone)
+    args.publication_availability_lag_minutes = int(
+        excel_args.publication_availability_lag_minutes
+    )
+    if args.publication_availability_lag_minutes < 0:
+        raise ValueError("publication_availability_lag_minutes must be non-negative.")
     args.max_target_datetimes = int(excel_args.max_target_datetimes)
     args.window_minutes = int(excel_args.window_minutes)
     return args
@@ -166,6 +177,10 @@ def _load_target_datetimes_from_excel(args: argparse.Namespace) -> Tuple[List[pd
         source_timezone=args.source_timezone,
     )
     utc_ts = pd.to_datetime(parsed.timestamp_utc, utc=True, errors="coerce")
+    publication_lag_minutes = int(
+        getattr(args, "publication_availability_lag_minutes", 0)
+    )
+    utc_ts = utc_ts + pd.Timedelta(minutes=publication_lag_minutes)
 
     parsed_mask = utc_ts.notna()
     parsed_rows = int(parsed_mask.sum())
@@ -200,6 +215,7 @@ def _load_target_datetimes_from_excel(args: argparse.Namespace) -> Tuple[List[pd
         "invalid_rows": invalid_rows,
         "deduped_targets": deduped_count,
         "final_targets_used": final_targets_used,
+        "publication_availability_lag_minutes": publication_lag_minutes,
         "parse_status_counts": {
             str(key): int(value)
             for key, value in parsed.parse_status.value_counts(dropna=False).items()
@@ -228,13 +244,17 @@ def run_excel_job(
     logger.info("  excel_rows_total=%d", stats["excel_rows_total"])
     logger.info("  parsed_rows=%d", stats["parsed_rows"])
     logger.info("  invalid_rows=%d", stats["invalid_rows"])
-    logger.info("  parse_status_counts=%s", stats["parse_status_counts"])
+    logger.info("  parse_status_counts=%s", stats.get("parse_status_counts", {}))
     logger.info("  deduped_targets=%d", stats["deduped_targets"])
     logger.info("  final_targets_used=%d", stats["final_targets_used"])
     logger.info("  source_xlsx=%s", Path(args.target_xlsx))
     logger.info("  source_sheet=%s", args.sheet_name)
     logger.info("  source_columns=(%s, %s)", args.date_column, args.time_column)
     logger.info("  source_timezone=%s", args.source_timezone)
+    logger.info(
+        "  publication_availability_lag_minutes=%d",
+        int(getattr(args, "publication_availability_lag_minutes", 0)),
+    )
 
     if target_datetimes:
         min_target = min(target_datetimes)

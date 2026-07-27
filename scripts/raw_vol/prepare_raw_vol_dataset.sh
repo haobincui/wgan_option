@@ -10,7 +10,11 @@ cd "${REPO_ROOT}"
 ENV_NAME="${ENV_NAME:-py312}"
 DEVICE="${DEVICE:-cpu}"
 CONFIG_PATH="${CONFIG_PATH:-configs/surface_builder/raw/generate_surface-raw-excel-rq.yaml}"
+OPTION_DATA_GLOB="${OPTION_DATA_GLOB:-data/raw/option_data/0#TY+/0#TY+_202[23]-*.csv.gz}"
+TARGET_XLSX="${TARGET_XLSX:-data/raw/text_embedding/news_with_openai_embeddings_large.xlsx}"
+RATE_CURVE_PATH="${RATE_CURVE_PATH:-data/reference/us_treasury_par_yield_curve_2022_2023.csv}"
 SOURCE_TIMEZONE="${SOURCE_TIMEZONE:-Europe/London}"
+PUBLICATION_AVAILABILITY_LAG_MINUTES="${PUBLICATION_AVAILABILITY_LAG_MINUTES:-0}"
 RUN_TS="${RUN_TS:-raw_vol_$(date -u +%Y%m%d-%H%M%S)}"
 WINDOW_MINUTES="${WINDOW_MINUTES:-3}"
 MIN_STRIKES_PER_EXPIRY="${MIN_STRIKES_PER_EXPIRY:-3}"
@@ -36,22 +40,28 @@ activate_env
 python scripts/generate_surface/main.py generate_surface \
   --device "${DEVICE}" \
   --config "${CONFIG_PATH}" \
+  --input-glob "${OPTION_DATA_GLOB}" \
   --model raw \
   --data-range excel \
   --run-ts "${RUN_TS}" \
+  --target-xlsx "${TARGET_XLSX}" \
+  --rate-curve-path "${RATE_CURVE_PATH}" \
   --source-timezone "${SOURCE_TIMEZONE}" \
+  --publication-availability-lag-minutes "${PUBLICATION_AVAILABILITY_LAG_MINUTES}" \
   --window-minutes "${WINDOW_MINUTES}" \
   --min-strikes-per-expiry "${MIN_STRIKES_PER_EXPIRY}"
 
 python scripts/merge_file/merge_vol.py \
   --input-dir "${DATASET_DIR}" \
-  --source-timezone "${SOURCE_TIMEZONE}"
+  --source-timezone "${SOURCE_TIMEZONE}" \
+  --publication-availability-lag-minutes "${PUBLICATION_AVAILABILITY_LAG_MINUTES}"
 
 python scripts/raw_vol/raw_vol_pipeline.py validate \
   --dataset-dir "${DATASET_DIR}" \
   --window-minutes "${WINDOW_MINUTES}" \
   --min-strikes-per-expiry "${MIN_STRIKES_PER_EXPIRY}" \
   --source-timezone "${SOURCE_TIMEZONE}" \
+  --publication-availability-lag-minutes "${PUBLICATION_AVAILABILITY_LAG_MINUTES}" \
   --min-usable-pairs "${MIN_USABLE_PAIRS}" \
   --warn-usable-pairs "${WARN_USABLE_PAIRS}"
 

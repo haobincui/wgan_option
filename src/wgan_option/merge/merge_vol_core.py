@@ -27,6 +27,7 @@ from wgan_option.merge_support import (
     normalize_optional_text,
     offset_column_name,
     resolve_existing_path,
+    resolve_publication_availability_lag_minutes,
     resolve_news_source_timezone,
     resolve_surface_csv_path,
     resolve_surface_json_path,
@@ -64,6 +65,8 @@ PAIR_AUDIT_HEADERS = [
     "source_timezone",
     "source_utc_offset_minutes",
     "timestamp_parse_status",
+    "publication_timestamp_utc",
+    "publication_availability_lag_minutes",
     "news_timestamp_utc",
     "current_snapshot_time_utc",
     "target_snapshot_time_utc",
@@ -87,6 +90,8 @@ PAIR_AUDIT_HEADERS = [
     "target_has_svi",
     "current_svi_slice_count",
     "target_svi_slice_count",
+    "current_surface_param_json",
+    "target_surface_param_json",
     "current_surface_flat",
     "target_surface_flat",
     "current_raw_point_count",
@@ -156,6 +161,8 @@ GAN_HEADERS = [
     "source_timezone",
     "source_utc_offset_minutes",
     "timestamp_parse_status",
+    "publication_timestamp_utc",
+    "publication_availability_lag_minutes",
     "news_timestamp_utc",
     "current_snapshot_time_utc",
     "target_snapshot_time_utc",
@@ -171,6 +178,8 @@ GAN_HEADERS = [
     "strike_grid",
     "maturity_days_grid",
     "surface_shape",
+    "current_surface_param_json",
+    "target_surface_param_json",
     "current_surface_flat",
     "target_surface_flat",
     "current_weighted_iv_rmse",
@@ -305,6 +314,12 @@ def _base_pair_fields(news_row: pd.Series) -> Dict[str, Any]:
         ),
         "timestamp_parse_status": normalize_optional_text(
             news_row.get("timestamp_parse_status", "")
+        ),
+        "publication_timestamp_utc": normalize_optional_text(
+            news_row.get("publication_timestamp_utc", "")
+        ),
+        "publication_availability_lag_minutes": int(
+            news_row.get("publication_availability_lag_minutes", 0)
         ),
         "news_timestamp_utc": normalize_optional_text(news_row.get("timestamp_utc", "")),
         "hd_text": normalize_optional_text(news_row.get("HD", "")),
@@ -480,6 +495,7 @@ def _evaluate_side(
         "surface_slice_count": len(slices),
         "has_svi": has_surface,
         "svi_slice_count": len(slices),
+        "surface_param_json": side_row["surface_param_json"],
         "surface_flat": side_row["surface_flat"],
         "raw_point_count": raw_point_count,
         "raw_point_pass_count": raw_point_pass_count,
@@ -500,6 +516,7 @@ def build_vol_workbook_frames(
     *,
     news_xlsx_path: Path = DEFAULT_NEWS_XLSX_PATH,
     source_timezone: Optional[str] = None,
+    publication_availability_lag_minutes: Optional[int] = None,
     offset_minutes: int = DEFAULT_OFFSET_MINUTES,
     strike_bins: int = DEFAULT_STRIKE_BINS,
     maturity_bins: int = DEFAULT_MATURITY_BINS,
@@ -514,12 +531,21 @@ def build_vol_workbook_frames(
     if not input_dir.is_dir():
         raise NotADirectoryError(f"Input path must be a directory: {input_dir}")
     source_timezone = resolve_news_source_timezone(input_dir, source_timezone)
+    publication_availability_lag_minutes = resolve_publication_availability_lag_minutes(
+        input_dir,
+        publication_availability_lag_minutes,
+    )
 
     news_xlsx_path = resolve_existing_path(Path(news_xlsx_path), "News xlsx")
     csv_path = resolve_surface_csv_path(input_dir)
     json_path = resolve_surface_json_path(input_dir)
 
-    news_df = load_news_base_frame(news_xlsx_path, source_timezone=source_timezone, offset_minutes=offset_minutes)
+    news_df = load_news_base_frame(
+        news_xlsx_path,
+        source_timezone=source_timezone,
+        offset_minutes=offset_minutes,
+        publication_availability_lag_minutes=publication_availability_lag_minutes,
+    )
     csv_df = load_precalib_csv(csv_path)
     json_direction_map = load_json_direction_map(json_path)
     csv_groups = {
@@ -596,6 +622,8 @@ def build_vol_workbook_frames(
                 "target_has_svi": target_metrics["has_svi"],
                 "current_svi_slice_count": current_metrics["svi_slice_count"],
                 "target_svi_slice_count": target_metrics["svi_slice_count"],
+                "current_surface_param_json": current_metrics["surface_param_json"],
+                "target_surface_param_json": target_metrics["surface_param_json"],
                 "current_surface_flat": current_metrics["surface_flat"],
                 "target_surface_flat": target_metrics["surface_flat"],
                 "current_raw_point_count": current_metrics["raw_point_count"],

@@ -89,7 +89,13 @@ def _process_minute(
     tau_anchor_ts: Optional[pd.Timestamp] = None,
     count_stat_key: str = "total_minutes",
     surface_model: str = "svi",
+    pricing_context=None,
 ) -> None:
+    if pricing_context is not None and pricing_context.pricing_model == "black76":
+        raise ValueError(
+            "Black-76 raw-vol construction requires --device cpu; "
+            "the GPU backend implements only the legacy Black-Scholes inversion."
+        )
     del days_in_year
     stats[count_stat_key] += 1
 
@@ -132,6 +138,10 @@ def _process_minute(
 
 def run(args):
     ensure_cuda_available("gpu")
+    if getattr(args, "pricing_model", "legacy_black_scholes") == "black76":
+        raise ValueError(
+            "Black-76 raw-vol construction requires --device cpu."
+        )
     resolve_parallel_calibration_workers(
         args,
         device="gpu",

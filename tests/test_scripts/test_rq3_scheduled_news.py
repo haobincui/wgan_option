@@ -8,6 +8,8 @@ import pandas as pd
 
 from scripts.rq3.scheduled_news_regime import (
     MATCH_COVARIATES,
+    POINT_METRICS,
+    build_all_oos_inference,
     build_fomc_case_study,
     build_inference,
     label_information_regimes,
@@ -74,6 +76,10 @@ def _pair(pair_id: str, stamp: str, *, fold: str = "2023Q1") -> dict:
 
 
 class TestRQ3ScheduledNews(unittest.TestCase):
+    def test_raw_point_metrics_exclude_unsupported_7d_atm(self):
+        self.assertNotIn("atm7_abs_err", POINT_METRICS)
+        self.assertIn("supported_shortest_atm_abs_err", POINT_METRICS)
+
     def test_frozen_2023_calendar_schema_and_timezone(self):
         path = ROOT / "data/reference/rq3_scheduled_macro_events_2023.csv"
         calendar = load_event_calendar(path)
@@ -307,6 +313,78 @@ class TestRQ3ScheduledNews(unittest.TestCase):
             float(summary.iloc[0]["mean_scheduled_news_increment"]),
             0.2,
         )
+
+    def test_all_oos_conditional_effect_uses_clustered_scheduled_indicator(self):
+        average_rows = []
+        seed_rows = []
+        for index in range(80):
+            scheduled = int(index % 5 == 0)
+            day = f"2023-03-{index % 28 + 1:02d}"
+            noise = 0.01 * np.sin(float(index))
+            advantage = 0.02 + 0.08 * scheduled + noise
+            base = {
+                "window": "primary_0_5",
+                "fold": "2023Q1" if index < 40 else "2023Q2",
+                "surface_pair_id": f"pair_{index}",
+                "current_snapshot_time_utc": f"{day}T14:00:00Z",
+                "contrast": "lp_vs_continued_no_text",
+                "contrast_family": "primary",
+                "focal_model": "lp",
+                "baseline_model": "continued_no_text",
+                "metric": "surface_mae",
+                "difference_direction": "baseline_minus_focal",
+                "positive_means_focal_better": True,
+                "regime": (
+                    "scheduled_news"
+                    if scheduled
+                    else "ordinary_news_candidate"
+                ),
+                "scheduled_news_indicator": scheduled,
+                "event_id": f"event_{index}" if scheduled else "",
+                "event_family": (
+                    "FOMC" if scheduled and index % 2 == 0 else
+                    ("CPI" if scheduled else "")
+                ),
+                "release_time_utc": (
+                    f"{day}T14:00:00Z" if scheduled else ""
+                ),
+                "release_trading_day": day if scheduled else "",
+                "minutes_from_release": 0.0 if scheduled else np.nan,
+                "nearest_event_minutes": 0.0 if scheduled else 120.0,
+                "inference_cluster_day": day,
+                "current_surface_mean": 0.2 + 0.001 * index,
+                "current_surface_std": 0.03,
+                "current_supported_shortest_atm": 0.19,
+                "current_weighted_iv_rmse": 0.002,
+                "recent_surface_level_std_24h": 0.01,
+                "current_supported_cell_fraction": 0.5,
+                "text_advantage": advantage,
+                "focal_error": 0.1 - advantage,
+                "baseline_error": 0.1,
+                "seed_count": 3,
+                "positive_seed_count": 3,
+            }
+            average_rows.append(base)
+            for seed in (42, 202, 404):
+                seed_rows.append({**base, "seed": seed})
+        result = build_all_oos_inference(
+            pd.DataFrame(average_rows),
+            pd.DataFrame(seed_rows),
+        )
+        self.assertEqual(len(result), 1)
+        self.assertGreater(
+            float(result.iloc[0]["conditional_scheduled_effect"]),
+            0.05,
+        )
+        self.assertEqual(
+            int(
+                result.iloc[0][
+                    "positive_seed_scheduled_increment_count"
+                ]
+            ),
+            3,
+        )
+        self.assertGreater(int(result.iloc[0]["gw_df"]), 0)
 
 
 if __name__ == "__main__":

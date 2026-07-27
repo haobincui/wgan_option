@@ -6,6 +6,22 @@ The repository is being developed as part of a PhD thesis chapter, so the code i
 
 At a high level, the project asks how news embeddings and option-surface representations can be combined to study and forecast changes in bond-option volatility structure. The current repo supports both vol-surface workflows and SVI-parameter workflows, plus the supporting analysis steps needed to inspect model behavior after training.
 
+The thesis-facing RQ1-RQ3 workflow now uses corrected raw TY option implied-vol
+points as its primary local-support representation. The canonical background
+entrypoint is:
+
+```bash
+GPU_IDS="0 1" RUNS_PER_GPU=2 \
+bash scripts/rq123/start_corrected_pipeline_background.sh
+```
+
+This workflow enforces Factiva `Europe/London` timestamps, non-overlapping
+five-minute current/target windows, CME TY option expiry, Black76 with frozen
+rates and prior futures, OTM filtering, train-fold-only support masks, strict
+text lineage, and rolling development inference. Raw-vol 7-day ATM is not
+reported because it lies below observed maturity support. RQ3 is a conditional
+predictive robustness analysis, not a causal event study.
+
 ## Architecture Overview
 
 The main executable flow is:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,14 @@ def _write_json(payload: Any, path: Path) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, ensure_ascii=True)
         handle.write("\n")
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _discover(path: Path, pattern: str) -> Path | None:
@@ -168,6 +177,145 @@ def _resolved_source_timezone(dataset_dir: Path) -> str:
     return str(generate.get("source_timezone") or "").strip()
 
 
+def _resolved_generate_settings(dataset_dir: Path) -> dict[str, Any]:
+    config_path = dataset_dir / "surface-resolved_config.yaml"
+    if not config_path.is_file():
+        return {}
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    surface_builder = payload.get("surface_builder") or {}
+    generate = (
+        surface_builder.get("generate_surface")
+        if isinstance(surface_builder, dict)
+        else {}
+    ) or {}
+    return dict(generate) if isinstance(generate, dict) else {}
+
+
+def _temporal_audit_summary(dataset_dir: Path) -> dict[str, Any]:
+    path = dataset_dir / "window_temporal_audit.json"
+    if not path.is_file():
+        return {
+            "temporal_audit_path": str(path),
+            "temporal_audit_exists": False,
+            "temporal_audit_target_count": 0,
+            "current_target_trade_overlap_count": -1,
+            "post_origin_current_trade_count": -1,
+            "temporal_audit_ok": False,
+        }
+    payload = _read_json(path)
+    rows = list(payload.values()) if isinstance(payload, dict) else []
+    overlap = sum(
+        int(row.get("current_target_trade_overlap_count", 0))
+        for row in rows
+        if isinstance(row, dict)
+    )
+    post_origin = sum(
+        int(row.get("post_origin_current_trade_count", 0))
+        for row in rows
+        if isinstance(row, dict)
+    )
+    statuses = {
+        str(row.get("status", ""))
+        for row in rows
+        if isinstance(row, dict)
+    }
+    return {
+        "temporal_audit_path": str(path),
+        "temporal_audit_exists": True,
+        "temporal_audit_target_count": len(rows),
+        "current_target_trade_overlap_count": int(overlap),
+        "post_origin_current_trade_count": int(post_origin),
+        "temporal_audit_statuses": sorted(statuses),
+        "temporal_audit_ok": bool(
+            rows
+            and overlap == 0
+            and post_origin == 0
+            and statuses <= {"ok"}
+        ),
+    }
+
+
+def _precalibration_audit_summary(
+    dataset_dir: Path,
+    *,
+    expected_rate_curve_sha256: str,
+) -> dict[str, Any]:
+    path = _discover(dataset_dir, "surface-raw-excel-precalib-points.csv")
+    if path is None or not path.is_file():
+        return {
+            "precalibration_audit_path": "",
+            "precalibration_audit_exists": False,
+            "precalibration_accepted_rows": 0,
+            "precalibration_corrected_inputs_ok": False,
+        }
+    columns = [
+        "pricing_model",
+        "underlying_match_mode",
+        "underlying_staleness_seconds",
+        "is_otm",
+        "passes_precalib_filter",
+        "weight",
+        "rate_curve_sha256",
+    ]
+    frame = pd.read_csv(path, usecols=columns, low_memory=False)
+    accepted_flag = frame["passes_precalib_filter"].astype(str).str.lower().isin(
+        {"true", "1", "1.0"}
+    )
+    accepted = frame[accepted_flag].copy()
+    staleness = pd.to_numeric(
+        accepted["underlying_staleness_seconds"],
+        errors="coerce",
+    )
+    weights = pd.to_numeric(accepted["weight"], errors="coerce")
+    is_otm = accepted["is_otm"].astype(str).str.lower().isin(
+        {"true", "1", "1.0"}
+    )
+    checks = {
+        "pricing_model_black76": bool(
+            len(accepted)
+            and accepted["pricing_model"].astype(str).str.lower().eq(
+                "black76"
+            ).all()
+        ),
+        "underlying_last_prior_trade": bool(
+            len(accepted)
+            and accepted["underlying_match_mode"].astype(str).eq(
+                "last_prior_trade"
+            ).all()
+        ),
+        "underlying_staleness_within_60s": bool(
+            len(accepted)
+            and staleness.notna().all()
+            and staleness.ge(0.0).all()
+            and staleness.le(60.0).all()
+        ),
+        "otm_only": bool(len(accepted) and is_otm.all()),
+        "positive_volume_weights": bool(
+            len(accepted) and weights.notna().all() and weights.gt(0.0).all()
+        ),
+        "frozen_rate_curve_sha_present": bool(
+            len(accepted)
+            and accepted["rate_curve_sha256"].astype(str).str.len().eq(64).all()
+        ),
+        "frozen_rate_curve_sha_match": bool(
+            len(accepted)
+            and expected_rate_curve_sha256
+            and accepted["rate_curve_sha256"]
+            .astype(str)
+            .eq(expected_rate_curve_sha256)
+            .all()
+        ),
+    }
+    return {
+        "precalibration_audit_path": str(path),
+        "precalibration_audit_exists": True,
+        "precalibration_total_rows": int(len(frame)),
+        "precalibration_accepted_rows": int(len(accepted)),
+        **checks,
+        "precalibration_corrected_inputs_ok": all(checks.values()),
+    }
+
+
 def validate_dataset(args: argparse.Namespace) -> int:
     dataset_dir = Path(args.dataset_dir).expanduser()
     workbook_path = Path(args.workbook).expanduser() if args.workbook else dataset_dir / "merged_vol.xlsx"
@@ -179,12 +327,58 @@ def validate_dataset(args: argparse.Namespace) -> int:
     usable_pairs = int(workbook.get("usable_pairs", 0))
     expected_timezone = str(args.source_timezone).strip()
     resolved_timezone = _resolved_source_timezone(dataset_dir)
+    generate_settings = _resolved_generate_settings(dataset_dir)
+    expected_lag = int(args.publication_availability_lag_minutes)
+    resolved_lag = int(
+        generate_settings.get("publication_availability_lag_minutes", -1)
+    )
+    rate_curve_value = str(generate_settings.get("rate_curve_path", "")).strip()
+    rate_curve_path = Path(rate_curve_value).expanduser()
+    if rate_curve_value and not rate_curve_path.is_absolute():
+        rate_curve_path = Path.cwd() / rate_curve_path
+    rate_curve_sha256 = (
+        _sha256(rate_curve_path)
+        if rate_curve_value and rate_curve_path.is_file()
+        else ""
+    )
     workbook_timezones = list(workbook.get("news_source_timezones") or [])
     timezone_ok = (
         resolved_timezone == expected_timezone
         and workbook_timezones == [expected_timezone]
     )
+    corrected_config_ok = bool(
+        str(generate_settings.get("pricing_model", "")).lower() == "black76"
+        and str(generate_settings.get("underlying_match_mode", ""))
+        == "last_prior_trade"
+        and str(generate_settings.get("option_filter_mode", "")) == "otm_only"
+        and str(generate_settings.get("iv_aggregation_mode", ""))
+        == "volume_weighted_median"
+        and int(generate_settings.get("window_minutes", -1))
+        == int(args.window_minutes)
+        and int(generate_settings.get("min_strikes_per_expiry", -1))
+        == int(args.min_strikes_per_expiry)
+        and int(generate_settings.get("min_expiries_per_minute", 0)) >= 2
+        and int(
+            generate_settings.get(
+                "max_underlying_staleness_seconds",
+                -1,
+            )
+        )
+        == 60
+        and bool(rate_curve_sha256)
+        and resolved_lag == expected_lag
+    )
+    temporal = _temporal_audit_summary(dataset_dir)
+    precalibration = _precalibration_audit_summary(
+        dataset_dir,
+        expected_rate_curve_sha256=rate_curve_sha256,
+    )
     usable_ok = usable_pairs >= int(args.min_usable_pairs)
+    corrected_inputs_ok = bool(
+        corrected_config_ok
+        and temporal["temporal_audit_ok"]
+        and precalibration["precalibration_corrected_inputs_ok"]
+    )
     validation = {
         "created_at_utc": _now_utc(),
         "dataset_dir": str(dataset_dir),
@@ -195,19 +389,31 @@ def validate_dataset(args: argparse.Namespace) -> int:
         "min_strikes_per_expiry": args.min_strikes_per_expiry,
         "expected_news_source_timezone": expected_timezone,
         "surface_news_source_timezone": resolved_timezone,
+        "expected_publication_availability_lag_minutes": expected_lag,
+        "resolved_publication_availability_lag_minutes": resolved_lag,
+        "resolved_rate_curve_path": str(rate_curve_path),
+        "resolved_rate_curve_sha256": rate_curve_sha256,
         "workbook_news_source_timezones": workbook_timezones,
         "timezone_validation_ok": bool(timezone_ok),
+        "corrected_generate_config_ok": corrected_config_ok,
+        **temporal,
+        **precalibration,
+        "corrected_raw_inputs_ok": corrected_inputs_ok,
         **_surface_json_summary(surface_json),
         **workbook,
         "training_hard_stop_threshold": int(args.min_usable_pairs),
         "low_power_warning_threshold": int(args.warn_usable_pairs),
         "status": (
             "ok"
-            if usable_ok and timezone_ok
+            if usable_ok and timezone_ok and corrected_inputs_ok
             else (
                 "failed_timezone_mismatch"
                 if not timezone_ok
-                else "failed_low_usable_pairs"
+                else (
+                    "failed_corrected_input_audit"
+                    if not corrected_inputs_ok
+                    else "failed_low_usable_pairs"
+                )
             )
         ),
         "warning": "low_power" if usable_pairs < int(args.warn_usable_pairs) else "",
@@ -299,6 +505,11 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--window-minutes", type=int, default=0)
     validate.add_argument("--min-strikes-per-expiry", type=int, default=0)
     validate.add_argument("--source-timezone", default="Europe/London")
+    validate.add_argument(
+        "--publication-availability-lag-minutes",
+        type=int,
+        default=0,
+    )
     validate.add_argument("--min-usable-pairs", type=int, default=100)
     validate.add_argument("--warn-usable-pairs", type=int, default=1000)
     validate.add_argument("--no-fail", action="store_true")

@@ -33,6 +33,7 @@ from film_wgan.data import (  # noqa: E402
     load_film_wgan_samples,
 )
 from film_wgan.text_transform import sha256_file  # noqa: E402
+from film_wgan.text_lineage import write_text_lineage_artifacts  # noqa: E402
 
 DEFAULT_CONFIG = ROOT / "configs/film_wgan/train_rq1_pair_textbase.yaml"
 DEFAULT_WORKBOOK = (
@@ -99,9 +100,14 @@ FOLDS = {
         "counts": (2900, 365, 378),
     },
 }
-POINT_METRICS = ("surface_mae", "short_atm_mae", "atm7_abs_err")
+POINT_METRICS = (
+    "surface_mae",
+    "short_atm_mae",
+    "supported_shortest_atm_abs_err",
+)
 PROBABILISTIC_METRICS = (
     "energy_score",
+    "variogram_score",
     "coverage_50",
     "coverage_80",
     "coverage_90",
@@ -110,6 +116,7 @@ PROBABILISTIC_METRICS = (
     "interval_width_90",
     "calibration_error",
     "scenario_spread",
+    "mc_surface_mae_se",
 )
 FINANCIAL_METRICS = ("calendar_violation_rate", "butterfly_violation_rate")
 CONTRASTS = (
@@ -195,6 +202,47 @@ def _fold_counts(root: Path, fold: str) -> tuple[int, int, int]:
         int((lineage["split"].astype(str) == split).sum())
         for split in ("train", "val", "test")
     )
+
+
+def _annotate_cross_split_text_duplicates(
+    pair_rows: list[dict[str, Any]],
+    text_lineage_rows: pd.DataFrame,
+) -> pd.DataFrame:
+    frame = pd.DataFrame(pair_rows)
+    lineage = text_lineage_rows.set_index("sample_id", drop=False)
+    definitions = {
+        "exact_embedding_duplicate_with_train": "embedding_sha256",
+        "exact_text_duplicate_with_train": "lp_text_sha256",
+        "near_text_candidate_duplicate_with_train": (
+            "near_duplicate_cluster_id"
+        ),
+    }
+
+    def _pair_values(source_sample_ids: str, column: str) -> set[str]:
+        sample_ids = json.loads(str(source_sample_ids))
+        values = set()
+        for sample_id in sample_ids:
+            if sample_id not in lineage.index:
+                raise ValueError(f"Missing text-lineage audit row for {sample_id}.")
+            value = str(lineage.loc[sample_id, column])
+            if value and value != "nan":
+                values.add(value)
+        return values
+
+    for output_column, lineage_column in definitions.items():
+        pair_values = [
+            _pair_values(value, lineage_column)
+            for value in frame["source_sample_ids"]
+        ]
+        train_values: set[str] = set()
+        for split, values in zip(frame["split"].astype(str), pair_values):
+            if split == "train":
+                train_values.update(values)
+        frame[output_column] = [
+            int(split != "train" and bool(values & train_values))
+            for split, values in zip(frame["split"].astype(str), pair_values)
+        ]
+    return frame
 
 
 def _variant_overrides(
@@ -414,6 +462,7 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
         "inputs/data",
         "inputs/folds",
         "inputs/docs",
+        "inputs/audit",
         "training_runs",
         "logs",
         "registry",
@@ -444,6 +493,11 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
     shutil.copy2(source_config, copied_config)
     shutil.copy2(source_workbook, copied_workbook)
     shutil.copy2(source_news, copied_news)
+    text_audit_paths = write_text_lineage_artifacts(
+        news_workbook_path=copied_news,
+        output_dir=root / "inputs/audit/text_lineage",
+    )
+    text_lineage_rows = pd.read_csv(text_audit_paths["row_audit"])
     if SUMMARY_DOCUMENT.is_file():
         shutil.copy2(SUMMARY_DOCUMENT, root / "inputs/docs/research_logic_review.md")
     git_state = subprocess.run(
@@ -503,10 +557,12 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
         manifest_path = fold_root / "split_manifest.csv"
         manifest.to_csv(manifest_path, index=False)
         transform_path = fold_root / "text_transform.npz"
+        surface_support_path = fold_root / "raw_surface_support.json"
         fold_training = dict(training)
         fold_training.update(
             split_manifest_path=str(manifest_path),
             text_transform_path=str(transform_path),
+            surface_support_path=str(surface_support_path),
             text_embedding_mode="lp",
             sample_unit="surface_pair",
             text_preprocessing_mode="pca",
@@ -541,6 +597,18 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
                         "target_snapshot_time_utc": sample.target_snapshot_time_utc,
                         "news_count": sample.metadata["news_count"],
                         "unique_embedding_count": sample.metadata["unique_embedding_count"],
+                        "excluded_source_sample_ids": json.dumps(
+                            sample.metadata.get("excluded_source_sample_ids", [])
+                        ),
+                        "excluded_text_lineage_reasons": json.dumps(
+                            sample.metadata.get("excluded_text_lineage_reasons", [])
+                        ),
+                        "supported_cell_count": int(
+                            sample.metadata.get("evaluation_supported_cell_count", 0)
+                        ),
+                        "supported_cell_fraction": float(
+                            sample.metadata.get("evaluation_supported_fraction", 0.0)
+                        ),
                         "source_sample_ids": json.dumps(sample.metadata["source_sample_ids"]),
                         "article_ids": json.dumps(sample.metadata["article_ids"]),
                     }
@@ -562,7 +630,14 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
                         "permutation_seed": int(shuffled_config.text_permutation_seed),
                     }
                 )
-        pd.DataFrame(pair_rows).to_csv(fold_root / "pair_lineage_audit.csv", index=False)
+        pair_lineage_frame = _annotate_cross_split_text_duplicates(
+            pair_rows,
+            text_lineage_rows,
+        )
+        pair_lineage_frame.to_csv(
+            fold_root / "pair_lineage_audit.csv",
+            index=False,
+        )
         pd.DataFrame(permutation_rows).to_csv(
             fold_root / "text_permutation_mapping.csv",
             index=False,
@@ -573,6 +648,8 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             "test_pairs": bundle.test_samples,
             "excluded_rows": int((manifest["split"] == "excluded").sum()),
             "text_transform_sha256": sha256_file(transform_path),
+            "surface_support_sha256": sha256_file(surface_support_path),
+            "surface_support_path": str(surface_support_path),
         }
 
     input_rows = []
@@ -596,6 +673,10 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             "source_workbook": str(source_workbook),
             "source_workbook_sha256": sha256_file(source_workbook),
             "news_source_timezone": EXPECTED_NEWS_SOURCE_TIMEZONE,
+            "text_lineage_manifest": str(text_audit_paths["manifest"]),
+            "text_lineage_manifest_sha256": sha256_file(
+                text_audit_paths["manifest"]
+            ),
             "models": list(VARIANTS),
             "seeds": list(SEEDS),
             "folds": fold_validation,
@@ -1104,6 +1185,68 @@ def _cluster_bootstrap(
     return observed, float(lower), float(upper), float(p_two)
 
 
+def _dm_hac_daily(
+    frame: pd.DataFrame,
+    *,
+    max_lag: int = 5,
+) -> dict[str, float | int]:
+    daily = (
+        frame.groupby("trading_day", sort=True)["difference"]
+        .mean()
+        .to_numpy(dtype=np.float64)
+    )
+    count = len(daily)
+    if count < 2:
+        return {
+            "daily_observations": count,
+            "hac_max_lag": 0,
+            "mean_daily_difference": (
+                float(daily.mean()) if count else float("nan")
+            ),
+            "hac_standard_error": float("nan"),
+            "dm_hac_statistic": float("nan"),
+            "p_two_sided": float("nan"),
+            "p_one_sided_focal_better": float("nan"),
+        }
+    lag_limit = min(int(max_lag), count - 1)
+    centered = daily - float(daily.mean())
+    long_run_variance = float(np.dot(centered, centered) / count)
+    for lag in range(1, lag_limit + 1):
+        covariance = float(
+            np.dot(centered[lag:], centered[:-lag]) / count
+        )
+        long_run_variance += (
+            2.0
+            * (1.0 - lag / float(lag_limit + 1))
+            * covariance
+        )
+    standard_error = float(
+        np.sqrt(max(long_run_variance, 0.0) / count)
+    )
+    mean = float(daily.mean())
+    statistic = (
+        mean / standard_error
+        if standard_error > 0.0
+        else float("inf") if mean > 0.0
+        else float("-inf") if mean < 0.0
+        else 0.0
+    )
+    distribution = stats.t(df=count - 1)
+    return {
+        "daily_observations": count,
+        "hac_max_lag": lag_limit,
+        "mean_daily_difference": mean,
+        "hac_standard_error": standard_error,
+        "dm_hac_statistic": statistic,
+        "p_two_sided": float(
+            2.0 * distribution.sf(abs(statistic))
+        ),
+        "p_one_sided_focal_better": float(
+            distribution.sf(statistic)
+        ),
+    }
+
+
 def _holm_adjust(values: Sequence[float]) -> list[float]:
     array = np.asarray(values, dtype=np.float64)
     order = np.argsort(array)
@@ -1166,7 +1309,14 @@ def _write_result_summary(
         "variants": list(VARIANTS),
         "primary_metrics": json.loads(primary.to_json(orient="records")),
         "model_overall_point_metrics": json.loads(
-            overall[["variant", "surface_mae", "short_atm_mae", "atm7_abs_err"]].to_json(
+            overall[
+                [
+                    "variant",
+                    "surface_mae",
+                    "short_atm_mae",
+                    "supported_shortest_atm_abs_err",
+                ]
+            ].to_json(
                 orient="records"
             )
         ),
@@ -1176,8 +1326,15 @@ def _write_result_summary(
             "all_point_metric_contrasts": str(
                 root / "final_tables/development_rq1_point_metric_contrasts.csv"
             ),
+            "dm_hac_tests": str(
+                root / "comparisons/development_dm_hac_tests.csv"
+            ),
             "seed_level_tests": str(
                 root / "comparisons/development_seed_level_tests.csv"
+            ),
+            "duplicate_sensitivity": str(
+                root
+                / "final_tables/development_rq1_duplicate_sensitivity.csv"
             ),
         },
     }
@@ -1239,6 +1396,23 @@ def build_comparison(args: argparse.Namespace) -> Path:
         summary["variant"] = str(record.variant)
         rows.append(summary)
     samples = pd.concat(rows, ignore_index=True)
+    duplicate_audits = []
+    duplicate_columns = [
+        "fold",
+        "surface_pair_id",
+        "exact_embedding_duplicate_with_train",
+        "exact_text_duplicate_with_train",
+        "near_text_candidate_duplicate_with_train",
+    ]
+    for fold in FOLDS:
+        lineage = pd.read_csv(_fold_dir(root, fold) / "pair_lineage_audit.csv")
+        duplicate_audits.append(lineage[duplicate_columns])
+    samples = samples.merge(
+        pd.concat(duplicate_audits, ignore_index=True),
+        on=["fold", "surface_pair_id"],
+        how="left",
+        validate="many_to_one",
+    )
     expected_rows = (
         sum(_fold_counts(root, fold)[2] for fold in FOLDS)
         * len(SEEDS)
@@ -1256,6 +1430,9 @@ def build_comparison(args: argparse.Namespace) -> Path:
         row.update({metric: float(group[metric].mean()) for metric in metric_columns})
         summary_rows.append(row)
     model_summary = pd.DataFrame(summary_rows)
+    model_summary["financial_metric_status"] = (
+        "not_reported_for_irregular_raw_support"
+    )
     model_summary.to_csv(root / "comparisons/development_model_metrics_by_fold_seed.csv", index=False)
 
     difference_rows = []
@@ -1282,6 +1459,21 @@ def build_comparison(args: argparse.Namespace) -> Path:
                         "baseline_error": float(getattr(row, f"{metric}_baseline")),
                         "difference": float(
                             getattr(row, f"{metric}_baseline") - getattr(row, f"{metric}_focal")
+                        ),
+                        "exact_embedding_duplicate_with_train": int(
+                            getattr(
+                                row,
+                                "exact_embedding_duplicate_with_train_focal",
+                            )
+                        ),
+                        "exact_text_duplicate_with_train": int(
+                            getattr(row, "exact_text_duplicate_with_train_focal")
+                        ),
+                        "near_text_candidate_duplicate_with_train": int(
+                            getattr(
+                                row,
+                                "near_text_candidate_duplicate_with_train_focal",
+                            )
                         ),
                     }
                 )
@@ -1360,6 +1552,7 @@ def build_comparison(args: argparse.Namespace) -> Path:
     seed_tests.to_csv(root / "comparisons/development_seed_level_tests.csv", index=False)
 
     bootstrap_rows = []
+    dm_rows = []
     for (contrast, focal, baseline, metric), group in differences.groupby(
         ["contrast", "focal_variant", "baseline_variant", "metric"],
         sort=True,
@@ -1396,6 +1589,17 @@ def build_comparison(args: argparse.Namespace) -> Path:
                 "bootstrap_seed": int(args.bootstrap_seed),
             }
         )
+        dm_rows.append(
+            {
+                "contrast": contrast,
+                "focal_variant": focal,
+                "baseline_variant": baseline,
+                "metric": metric,
+                "difference_direction": "baseline_minus_focal",
+                "positive_means_focal_better": True,
+                **_dm_hac_daily(seed_average, max_lag=5),
+            }
+        )
     bootstrap = pd.DataFrame(bootstrap_rows)
     bootstrap["p_holm_within_contrast"] = np.nan
     for _contrast, indexes in bootstrap.groupby("contrast").groups.items():
@@ -1404,6 +1608,90 @@ def build_comparison(args: argparse.Namespace) -> Path:
             bootstrap.loc[index_list, "p_two_sided"].tolist()
         )
     bootstrap.to_csv(root / "comparisons/development_cluster_bootstrap_ci.csv", index=False)
+    pd.DataFrame(dm_rows).to_csv(
+        root / "comparisons/development_dm_hac_tests.csv",
+        index=False,
+    )
+
+    duplicate_sensitivity_rows = []
+    incremental = differences[differences["contrast"] == "incremental_text"]
+    duplicate_policies = {
+        "all_pairs": np.ones(len(incremental), dtype=bool),
+        "exclude_exact_embedding_seen_in_train": (
+            incremental["exact_embedding_duplicate_with_train"].to_numpy() == 0
+        ),
+        "exclude_exact_text_seen_in_train": (
+            incremental["exact_text_duplicate_with_train"].to_numpy() == 0
+        ),
+        "exclude_any_exact_duplicate_seen_in_train": (
+            (
+                incremental["exact_embedding_duplicate_with_train"].to_numpy()
+                + incremental["exact_text_duplicate_with_train"].to_numpy()
+            )
+            == 0
+        ),
+        "exclude_near_text_seen_in_train": (
+            incremental[
+                "near_text_candidate_duplicate_with_train"
+            ].to_numpy()
+            == 0
+        ),
+        "exclude_any_exact_or_near_duplicate_seen_in_train": (
+            (
+                incremental["exact_embedding_duplicate_with_train"].to_numpy()
+                + incremental["exact_text_duplicate_with_train"].to_numpy()
+                + incremental[
+                    "near_text_candidate_duplicate_with_train"
+                ].to_numpy()
+            )
+            == 0
+        ),
+    }
+    for policy, keep_mask in duplicate_policies.items():
+        policy_frame = incremental.loc[keep_mask].copy()
+        for metric, metric_frame in policy_frame.groupby("metric", sort=True):
+            seed_average = (
+                metric_frame.groupby(
+                    [
+                        "fold",
+                        "surface_pair_id",
+                        "current_snapshot_time_utc",
+                        "trading_day",
+                    ],
+                    as_index=False,
+                )["difference"]
+                .mean()
+            )
+            stable_offset = int(
+                hashlib.sha256(f"{policy}|{metric}".encode()).hexdigest()[:8],
+                16,
+            )
+            mean_diff, ci_low, ci_high, p_two = _cluster_bootstrap(
+                seed_average,
+                iterations=int(args.bootstrap_iterations),
+                seed=int(args.bootstrap_seed) + stable_offset,
+            )
+            duplicate_sensitivity_rows.append(
+                {
+                    "policy": policy,
+                    "metric": metric,
+                    "pair_count": int(len(seed_average)),
+                    "trading_day_clusters": int(
+                        seed_average["trading_day"].nunique()
+                    ),
+                    "mean_no_text_minus_text": mean_diff,
+                    "ci_95_lower": ci_low,
+                    "ci_95_upper": ci_high,
+                    "p_two_sided": p_two,
+                    "p_one_sided_text_better": (
+                        p_two / 2.0 if mean_diff > 0.0 else 1.0 - p_two / 2.0
+                    ),
+                }
+            )
+    pd.DataFrame(duplicate_sensitivity_rows).to_csv(
+        root / "final_tables/development_rq1_duplicate_sensitivity.csv",
+        index=False,
+    )
 
     primary = bootstrap[
         (bootstrap["contrast"] == "incremental_text")
@@ -1426,7 +1714,14 @@ def build_comparison(args: argparse.Namespace) -> Path:
         ["variant", "fold", "seed", "n_pairs", *PROBABILISTIC_METRICS]
     ].to_csv(root / "final_tables/development_rq1_probabilistic_metrics.csv", index=False)
     model_summary[
-        ["variant", "fold", "seed", "n_pairs", *FINANCIAL_METRICS]
+        [
+            "variant",
+            "fold",
+            "seed",
+            "n_pairs",
+            "financial_metric_status",
+            *FINANCIAL_METRICS,
+        ]
     ].to_csv(root / "final_tables/development_rq1_financial_consistency.csv", index=False)
     _write_result_summary(
         root,
@@ -1451,6 +1746,9 @@ def build_comparison(args: argparse.Namespace) -> Path:
         "primary_baseline_variant": CONTINUATION_VARIANT,
         "primary_difference_direction": "continued_no_text_error_minus_text_error",
         "positive_means_text_better": True,
+        "financial_consistency_status": (
+            "not_reported_for_irregular_raw_support"
+        ),
     }
     _write_json(root / "validation_summary.json", status)
     readme = f"""# RQ1 Raw-Vol Pair-Level Text Rolling Development
@@ -1488,6 +1786,13 @@ Parent/continuation diagnostics:
 Primary three-metric summary: `final_tables/development_rq1_primary_all_metrics.csv`
 Machine-readable summary: `final_tables/development_rq1_result_summary.json`
 All point-metric contrasts: `final_tables/development_rq1_point_metric_contrasts.csv`
+DM/HAC tests: `comparisons/development_dm_hac_tests.csv`
+Exact/near-duplicate sensitivity:
+`final_tables/development_rq1_duplicate_sensitivity.csv`
+
+Raw-vol metrics are evaluated only on the fold-train observed-support mask.
+Unsupported 7-day ATM and broad-grid static-arbitrage metrics are not reported
+for this irregular local-support experiment.
 """
     (root / "README.md").write_text(readme, encoding="utf-8")
     _build_manifest(root)

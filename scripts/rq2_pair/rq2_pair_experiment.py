@@ -63,11 +63,15 @@ MODEL_VARIANTS = {
     "bow": NEW_BOW,
     "llm_sentiment": NEW_SENTIMENT,
 }
-POINT_METRICS = ("surface_mae", "short_atm_mae", "atm7_abs_err")
+POINT_METRICS = (
+    "surface_mae",
+    "short_atm_mae",
+    "supported_shortest_atm_abs_err",
+)
 CURRENT_METRICS = {
     "surface_mae": "current_mae",
     "short_atm_mae": "current_atm_short_pure_mae",
-    "atm7_abs_err": "current_atm7_abs_err",
+    "supported_shortest_atm_abs_err": "current_supported_shortest_atm_abs_err",
 }
 PRIMARY_CONTRASTS = (
     ("lp", "bow", "lp_vs_bow"),
@@ -689,6 +693,7 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             "pair_lineage_audit.csv",
             "text_transform.npz",
             "text_transform_metadata.json",
+            "raw_surface_support.json",
         ):
             _link_or_copy(
                 source_fold / filename,
@@ -726,6 +731,7 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             fold_training = dict(training_base)
             fold_training.update(
                 split_manifest_path=str(target_fold / "split_manifest.csv"),
+                surface_support_path=str(target_fold / "raw_surface_support.json"),
                 **_representation_settings(root, fold, variant),
             )
             config_path = _fold_config(root, fold, variant)
@@ -1422,7 +1428,7 @@ def _validate_model_matching(samples: pd.DataFrame) -> None:
         "target_snapshot_time_utc",
         "current_mae",
         "current_atm_short_pure_mae",
-        "current_atm7_abs_err",
+        "current_supported_shortest_atm_abs_err",
     ]
     for model in MODEL_VARIANTS:
         frame = samples[samples["model"] == model].sort_values(
@@ -1678,7 +1684,7 @@ def _build_inference_tables(
     bootstrap.loc[primary_mask, "p_holm_two_sided"] = _holm_adjust(
         bootstrap.loc[primary_mask, "p_two_sided"].tolist()
     )
-    for metric in ("short_atm_mae", "atm7_abs_err"):
+    for metric in ("short_atm_mae", "supported_shortest_atm_abs_err"):
         mask = bootstrap["metric"] == metric
         bootstrap.loc[mask, "holm_family"] = f"secondary_{metric}_all_contrasts"
         bootstrap.loc[mask, "p_holm_two_sided"] = _holm_adjust(
@@ -1820,10 +1826,16 @@ def build_comparison(args: argparse.Namespace) -> Path:
             n_pairs=("surface_pair_id", "size"),
             surface_mae=("surface_mae", "mean"),
             short_atm_mae=("short_atm_mae", "mean"),
-            atm7_abs_err=("atm7_abs_err", "mean"),
+            supported_shortest_atm_abs_err=(
+                "supported_shortest_atm_abs_err",
+                "mean",
+            ),
             current_surface_mae=("current_mae", "mean"),
             current_short_atm_mae=("current_atm_short_pure_mae", "mean"),
-            current_atm7_abs_err=("current_atm7_abs_err", "mean"),
+            current_supported_shortest_atm_abs_err=(
+                "current_supported_shortest_atm_abs_err",
+                "mean",
+            ),
         )
     )
     model_overall.to_csv(
@@ -2104,7 +2116,11 @@ def monitor_results(args: argparse.Namespace) -> Path:
         "generated_model_fold_seed_results": generated_count,
         "expected_generated_model_fold_seed_results": 48,
         "generated_sample_rows": generated_samples,
-        "expected_generated_sample_rows": 19164,
+        "expected_generated_sample_rows": (
+            len(MODEL_VARIANTS)
+            * len(SEEDS)
+            * sum(_fold_counts(root, fold)[2] for fold in FOLDS)
+        ),
         "comparison_status": status,
         "required_output_count": len(required_outputs),
         "missing_outputs": missing_outputs,

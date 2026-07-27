@@ -11,6 +11,7 @@ ENV_NAME="${ENV_NAME:-py312}"
 DEVICE="${DEVICE:-cpu}"
 CONFIG_PATH="${CONFIG_PATH:-configs/surface_builder/raw/generate_surface-raw-excel-rq.yaml}"
 SOURCE_TIMEZONE="${SOURCE_TIMEZONE:-Europe/London}"
+PUBLICATION_AVAILABILITY_LAG_MINUTES="${PUBLICATION_AVAILABILITY_LAG_MINUTES:-0}"
 SCAN_TS="${SCAN_TS:-$(date -u +%Y%m%d-%H%M%S)}"
 SCAN_ROOT="${SCAN_ROOT:-data/processed/raw-excel/coverage_scan_${SCAN_TS}}"
 WINDOW_CANDIDATES="${WINDOW_CANDIDATES:-3 5 10 15 30 60}"
@@ -47,17 +48,20 @@ run_one() {
     --data-range excel \
     --run-ts "${run_ts}" \
     --source-timezone "${SOURCE_TIMEZONE}" \
+    --publication-availability-lag-minutes "${PUBLICATION_AVAILABILITY_LAG_MINUTES}" \
     --window-minutes "${window}" \
     --min-strikes-per-expiry "${min_strikes}"
 
   python scripts/merge_file/merge_vol.py \
     --input-dir "${dataset_dir}" \
-    --source-timezone "${SOURCE_TIMEZONE}"
+    --source-timezone "${SOURCE_TIMEZONE}" \
+    --publication-availability-lag-minutes "${PUBLICATION_AVAILABILITY_LAG_MINUTES}"
   python scripts/raw_vol/raw_vol_pipeline.py validate \
     --dataset-dir "${dataset_dir}" \
     --window-minutes "${window}" \
     --min-strikes-per-expiry "${min_strikes}" \
     --source-timezone "${SOURCE_TIMEZONE}" \
+    --publication-availability-lag-minutes "${PUBLICATION_AVAILABILITY_LAG_MINUTES}" \
     --min-usable-pairs "${MIN_USABLE_PAIRS}" \
     --warn-usable-pairs "${WARN_USABLE_PAIRS}" \
     --coverage-csv "${COVERAGE_CSV}" \

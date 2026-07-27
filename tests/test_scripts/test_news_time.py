@@ -15,6 +15,8 @@ for path in (ROOT, SRC):
 
 from wgan_option.merge_support import (
     DEFAULT_SOURCE_TIMEZONE,
+    load_news_base_frame,
+    resolve_publication_availability_lag_minutes,
     resolve_news_source_timezone,
 )
 from wgan_option.news_time import parse_news_timestamps
@@ -64,6 +66,45 @@ class TestFactivaNewsTime(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "timezone mismatch"):
                 resolve_news_source_timezone(root, "America/New_York")
+
+    def test_publication_availability_lag_shifts_current_and_target(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workbook = root / "news.xlsx"
+            pd.DataFrame(
+                {"PD": ["30 December 2023"], "ET": ["07:35"]}
+            ).to_excel(workbook, index=False)
+            frame = load_news_base_frame(
+                workbook,
+                source_timezone="Europe/London",
+                offset_minutes=5,
+                publication_availability_lag_minutes=2,
+            )
+            self.assertEqual(
+                frame.loc[0, "publication_timestamp_utc"],
+                "2023-12-30T07:35:00Z",
+            )
+            self.assertEqual(frame.loc[0, "timestamp_utc"], "2023-12-30T07:37:00Z")
+            self.assertEqual(
+                frame.loc[0, "timestamp_utc_plus_5m"],
+                "2023-12-30T07:42:00Z",
+            )
+
+    def test_merge_rejects_publication_lag_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "surface-resolved_config.yaml").write_text(
+                "surface_builder:\n"
+                "  generate_surface:\n"
+                "    publication_availability_lag_minutes: 2\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                resolve_publication_availability_lag_minutes(root, None),
+                2,
+            )
+            with self.assertRaisesRegex(ValueError, "lag mismatch"):
+                resolve_publication_availability_lag_minutes(root, 1)
 
 
 if __name__ == "__main__":

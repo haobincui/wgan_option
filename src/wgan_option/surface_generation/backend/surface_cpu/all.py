@@ -36,15 +36,24 @@ from wgan_option.surface_generation.data_helperd.all import (  # noqa: E402
 from quantlib.calculation.analytics.models.analytical.equity.formula import (  # noqa: E402
     black_scholes_implied_vol,
 )
+from wgan_option.market.black76 import black76_implied_vol  # noqa: E402
 
 
 def _compute_implied_vols_cpu(candidates: List[MinuteOptionCandidate]) -> List[Optional[float]]:
     implied_vols: List[Optional[float]] = []
     for candidate in candidates:
         try:
-            implied_vols.append(
-                float(
-                    black_scholes_implied_vol(
+            if candidate.pricing_model == "black76":
+                implied_vol = black76_implied_vol(
+                    price=candidate.price,
+                    futures_price=candidate.spot,
+                    strike=candidate.strike,
+                    tau=candidate.tau,
+                    discount_factor=candidate.discount_factor,
+                    option_type=candidate.meta.option_type,
+                )
+            else:
+                implied_vol = black_scholes_implied_vol(
                         price=candidate.price,
                         strike=candidate.strike,
                         option_type=candidate.meta.option_type,
@@ -53,8 +62,7 @@ def _compute_implied_vols_cpu(candidates: List[MinuteOptionCandidate]) -> List[O
                         r=0.0,
                         q=0.0,
                     )
-                )
-            )
+            implied_vols.append(float(implied_vol))
         except Exception:
             implied_vols.append(None)
     return implied_vols
@@ -77,19 +85,35 @@ def _process_minute(
     tau_anchor_ts: Optional[pd.Timestamp] = None,
     count_stat_key: str = "total_minutes",
     surface_model: str = "svi",
+    pricing_context=None,
 ) -> None:
     del days_in_year
     stats[count_stat_key] += 1
 
-    minute_spot, option_rows = _collect_minute_spot(
-        rows=rows,
-        target_future_month_code=target_future_month_code,
-        last_spot_by_key=last_spot_by_key,
-        stats=stats,
+    corrected_black76 = (
+        pricing_context is not None
+        and pricing_context.pricing_model == "black76"
     )
+    if corrected_black76:
+        minute_spot = {}
+        option_rows = [
+            row for row in rows if row.meta.contract_type == "option"
+        ]
+        stats["future_rows"] += sum(
+            row.meta.contract_type == "future" for row in rows
+        )
+        stats["option_rows"] += len(option_rows)
+    else:
+        minute_spot, option_rows = _collect_minute_spot(
+            rows=rows,
+            target_future_month_code=target_future_month_code,
+            last_spot_by_key=last_spot_by_key,
+            stats=stats,
+        )
     if not option_rows:
         return
 
+    rejected_audit_rows: List[Dict[str, Any]] = []
     valuation_date, candidates = _prepare_option_candidates(
         minute_ts=minute_ts,
         option_rows=option_rows,
@@ -100,6 +124,9 @@ def _process_minute(
         calendar=calendar,
         stats=stats,
         tau_anchor_ts=tau_anchor_ts,
+        all_rows=rows,
+        pricing_context=pricing_context,
+        rejected_audit_rows=rejected_audit_rows,
     )
     implied_vols = _compute_implied_vols_cpu(candidates)
     _finalize_minute_surface(
@@ -115,6 +142,12 @@ def _process_minute(
         stats=stats,
         precalib_writer=precalib_writer,
         surface_model=surface_model,
+        iv_aggregation_mode=(
+            pricing_context.iv_aggregation_mode
+            if pricing_context is not None
+            else "volume_weighted_mean"
+        ),
+        rejected_audit_rows=rejected_audit_rows,
     )
 
 

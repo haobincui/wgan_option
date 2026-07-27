@@ -51,6 +51,15 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
             f"then {DEFAULT_SOURCE_TIMEZONE} for legacy inputs."
         ),
     )
+    parser.add_argument(
+        "--publication-availability-lag-minutes",
+        type=int,
+        default=None,
+        help=(
+            "Delay from the reported Factiva minute to model availability. "
+            "Defaults to the surface resolved config, then 0 for legacy inputs."
+        ),
+    )
     parser.add_argument("--offset-minutes", type=int, default=DEFAULT_OFFSET_MINUTES, help="Forward direction offset in minutes.")
     parser.add_argument("--strike-bins", type=int, default=DEFAULT_STRIKE_BINS, help="Number of moneyness bins.")
     parser.add_argument("--maturity-bins", type=int, default=DEFAULT_MATURITY_BINS, help="Number of maturity bins.")
@@ -68,6 +77,7 @@ def main(argv: Optional[Iterable[str]] = None) -> Path:
         input_dir,
         news_xlsx_path=Path(args.news_xlsx).expanduser(),
         source_timezone=args.source_timezone,
+        publication_availability_lag_minutes=args.publication_availability_lag_minutes,
         offset_minutes=int(args.offset_minutes),
         strike_bins=int(args.strike_bins),
         maturity_bins=int(args.maturity_bins),

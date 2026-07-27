@@ -7,6 +7,7 @@ cd "${REPO_ROOT}"
 RUN_TS="${RUN_TS:-$(date -u +%Y%m%d-%H%M%S)}"
 ENV_NAME="${ENV_NAME:-py312}"
 CONFIG_PATH="${CONFIG_PATH:-configs/rq3/scheduled_news_regime_raw_vol.yaml}"
+EVENT_CALENDAR_PATH="${EVENT_CALENDAR_PATH:-}"
 RQ1_EXPERIMENT="${RQ1_EXPERIMENT:-}"
 RQ2_EXPERIMENT="${RQ2_EXPERIMENT:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/experiments/rq3_scheduled_news_regime_raw_vol_${RUN_TS}}"
@@ -55,6 +56,7 @@ PID_PATH="${LOG_DIR}/rq3_scheduled_news_regime_${RUN_TS}.pid"
 nohup setsid env \
   ENV_NAME="${ENV_NAME}" \
   CONFIG_PATH="${CONFIG_PATH}" \
+  EVENT_CALENDAR_PATH="${EVENT_CALENDAR_PATH}" \
   OUTPUT_DIR="${OUTPUT_DIR}" \
   RQ1_EXPERIMENT="${RQ1_EXPERIMENT}" \
   RQ2_EXPERIMENT="${RQ2_EXPERIMENT}" \

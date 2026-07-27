@@ -199,17 +199,35 @@ def build_pair_articles(
             if sentiment is None:
                 raise ValueError(f"No ChatGPT sentiment score for {sample_id}.")
             source_file = _clean_string(source.get("SourceFile", ""))
+            article_text = _clean_string(source.get("LP", ""))
+            if not article_text:
+                raise ValueError(
+                    f"Strict RQ2 lineage cannot use empty LP text for {sample_id}."
+                )
+            source_embedding = _parse_vector(source.get("LP_embedding", ""))
+            if source_embedding.size <= 0 or not np.all(np.isfinite(source_embedding)):
+                raise ValueError(
+                    f"Strict RQ2 lineage requires a finite LP embedding for {sample_id}."
+                )
             if str(sentiment["article_id"]).strip() not in {"", article_id}:
                 raise ValueError(f"Sentiment ArticleID lineage mismatch for {sample_id}.")
             if str(sentiment["source_file"]).strip() not in {"", source_file}:
                 raise ValueError(f"Sentiment SourceFile lineage mismatch for {sample_id}.")
+            if str(sentiment["parse_status"]).strip().lower() not in {
+                "cache_json",
+                "json",
+            }:
+                raise ValueError(
+                    f"Sentiment score for {sample_id} is not reproducible/usable: "
+                    f"parse_status={sentiment['parse_status']!r}."
+                )
             by_article.append(
                 PairArticle(
                     news_row_id=news_row_id,
                     sample_id=sample_id,
                     article_id=article_id,
                     source_file=source_file,
-                    text=_clean_string(source.get("LP", "")),
+                    text=article_text,
                     embedding_sha256=_embedding_sha(source),
                     sentiment=np.asarray(sentiment["vector"], dtype=np.float32),
                     sentiment_parse_status=str(sentiment["parse_status"]),

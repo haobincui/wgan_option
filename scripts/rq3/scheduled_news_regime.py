@@ -20,15 +20,31 @@ import pandas as pd
 import yaml
 from scipy import stats
 
-
 ROOT = Path(__file__).resolve().parents[2]
+SRC = ROOT / "src"
+for path in (ROOT, SRC):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+from film_wgan.support import (
+    RawSurfaceSupportArtifact,
+    raw_support_mask,
+    reconstruct_raw_surface,
+)
+
 
 REQUIRED_MODELS = ("continued_no_text", "lp", "bow", "llm_sentiment")
-POINT_METRICS = ("surface_mae", "short_atm_mae", "atm7_abs_err")
+POINT_METRICS = (
+    "surface_mae",
+    "short_atm_mae",
+    "supported_shortest_atm_abs_err",
+)
 CURRENT_METRICS = {
     "surface_mae": "current_mae",
     "short_atm_mae": "current_atm_short_pure_mae",
-    "atm7_abs_err": "current_atm7_abs_err",
+    "supported_shortest_atm_abs_err": (
+        "current_supported_shortest_atm_abs_err"
+    ),
 }
 CONTRASTS = (
     ("lp", "continued_no_text", "lp_vs_continued_no_text", "primary"),
@@ -59,22 +75,24 @@ MATCH_COVARIATES = (
     "weekday_cos",
     "current_surface_mean",
     "current_surface_std",
-    "current_atm7",
+    "current_supported_shortest_atm",
     "current_short_atm_mean",
     "current_strike_slope",
     "current_term_slope",
     "current_curvature",
     "current_weighted_iv_rmse",
     "current_surface_slice_count",
+    "current_supported_cell_fraction",
     "recent_surface_level_std_24h",
     "news_count",
 )
 CONDITIONAL_COVARIATES = (
     "current_surface_mean",
     "current_surface_std",
-    "current_atm7",
+    "current_supported_shortest_atm",
     "current_weighted_iv_rmse",
     "recent_surface_level_std_24h",
+    "current_supported_cell_fraction",
 )
 
 
@@ -375,47 +393,112 @@ def load_frozen_predictions(
     return combined, pd.DataFrame(audit_rows)
 
 
-def _surface_features(row: Any) -> dict[str, float]:
-    strikes = np.asarray(_parse_list(row.strike_grid), dtype=np.float64)
-    maturities = np.asarray(
-        _parse_list(row.maturity_days_grid),
-        dtype=np.float64,
-    )
-    surface = np.asarray(
-        _parse_list(row.current_surface_flat),
-        dtype=np.float64,
-    )
-    if strikes.size == 0 or maturities.size == 0:
-        raise ValueError("Surface grid is empty while building RQ3 covariates.")
-    expected = int(strikes.size * maturities.size)
-    if surface.size != expected:
-        raise ValueError(
-            f"Current surface size {surface.size} does not match grid {expected}."
+def _masked_mean(values: np.ndarray, mask: np.ndarray) -> float:
+    selected = np.asarray(values, dtype=np.float64)[np.asarray(mask, dtype=bool)]
+    return float(np.mean(selected)) if selected.size else float("nan")
+
+
+def _surface_features(
+    row: Any,
+    *,
+    support_artifact: RawSurfaceSupportArtifact | None = None,
+) -> dict[str, float]:
+    if support_artifact is None:
+        strikes = np.asarray(_parse_list(row.strike_grid), dtype=np.float64)
+        maturities = np.asarray(
+            _parse_list(row.maturity_days_grid),
+            dtype=np.float64,
         )
-    matrix = surface.reshape((maturities.size, strikes.size))
-    atm_index = int(np.argmin(np.abs(strikes - 1.0)))
-    shortest_index = int(np.argmin(maturities))
-    short_mask = maturities <= 90.0
-    atm_mask = np.abs(strikes - 1.0) <= 0.06
-    low_count = max(1, strikes.size // 4)
-    high_count = max(1, strikes.size // 4)
-    center_mask = np.abs(strikes - 1.0) <= 0.06
-    wing_mask = np.abs(strikes - 1.0) >= 0.18
-    short_atm = matrix[np.ix_(short_mask, atm_mask)]
-    center = matrix[:, center_mask]
-    wings = matrix[:, wing_mask]
+        surface = np.asarray(
+            _parse_list(row.current_surface_flat),
+            dtype=np.float64,
+        )
+        if strikes.size == 0 or maturities.size == 0:
+            raise ValueError("Surface grid is empty while building RQ3 covariates.")
+        expected = int(strikes.size * maturities.size)
+        if surface.size != expected:
+            raise ValueError(
+                f"Current surface size {surface.size} does not match grid {expected}."
+            )
+        matrix = surface.reshape((maturities.size, strikes.size))
+        support = np.ones_like(matrix, dtype=bool)
+    else:
+        strikes = np.asarray(support_artifact.strike_grid, dtype=np.float64)
+        maturities = np.asarray(
+            support_artifact.maturity_days_grid,
+            dtype=np.float64,
+        )
+        params = row.current_surface_param_json
+        matrix = reconstruct_raw_surface(
+            params,
+            strike_grid=strikes,
+            maturity_days_grid=maturities,
+        ).astype(np.float64)
+        support = raw_support_mask(
+            params,
+            strike_grid=strikes,
+            maturity_days_grid=maturities,
+        )
+        if not np.any(support):
+            raise ValueError(
+                "Current raw surface has no cells inside its frozen fold support."
+            )
+
+    supported_locations = np.argwhere(support)
+    shortest_index = int(np.min(supported_locations[:, 0]))
+    strike_candidates = np.flatnonzero(support[shortest_index])
+    atm_index = int(
+        strike_candidates[
+            np.argmin(np.abs(strikes[strike_candidates] - 1.0))
+        ]
+    )
+    short_atm_mask = (
+        support
+        & (maturities[:, None] <= 90.0)
+        & (np.abs(strikes[None, :] - 1.0) <= 0.06)
+    )
+    supported_strikes = strikes[np.any(support, axis=0)]
+    supported_maturities = maturities[np.any(support, axis=1)]
+    strike_low, strike_high = np.quantile(supported_strikes, [0.25, 0.75])
+    maturity_low, maturity_high = np.quantile(
+        supported_maturities,
+        [0.25, 0.75],
+    )
+    low_strike_mask = support & (strikes[None, :] <= strike_low)
+    high_strike_mask = support & (strikes[None, :] >= strike_high)
+    low_maturity_mask = support & (maturities[:, None] <= maturity_low)
+    high_maturity_mask = support & (maturities[:, None] >= maturity_high)
+    center_mask = support & (np.abs(strikes[None, :] - 1.0) <= 0.06)
+    wing_cutoff = float(
+        np.quantile(np.abs(supported_strikes - 1.0), 0.75)
+    )
+    wing_mask = support & (
+        np.abs(strikes[None, :] - 1.0) >= wing_cutoff
+    )
     return {
-        "current_surface_mean": float(np.mean(matrix)),
-        "current_surface_std": float(np.std(matrix)),
-        "current_atm7": float(matrix[shortest_index, atm_index]),
-        "current_short_atm_mean": float(np.mean(short_atm)),
+        "current_surface_mean": _masked_mean(matrix, support),
+        "current_surface_std": float(np.std(matrix[support])),
+        "current_supported_shortest_atm": float(
+            matrix[shortest_index, atm_index]
+        ),
+        "current_supported_shortest_maturity_days": float(
+            maturities[shortest_index]
+        ),
+        "current_short_atm_mean": _masked_mean(matrix, short_atm_mask),
         "current_strike_slope": float(
-            np.mean(matrix[:, -high_count:]) - np.mean(matrix[:, :low_count])
+            _masked_mean(matrix, high_strike_mask)
+            - _masked_mean(matrix, low_strike_mask)
         ),
         "current_term_slope": float(
-            np.mean(matrix[-1, :]) - np.mean(matrix[0, :])
+            _masked_mean(matrix, high_maturity_mask)
+            - _masked_mean(matrix, low_maturity_mask)
         ),
-        "current_curvature": float(np.mean(wings) - np.mean(center)),
+        "current_curvature": float(
+            _masked_mean(matrix, wing_mask)
+            - _masked_mean(matrix, center_mask)
+        ),
+        "current_supported_cell_count": int(np.sum(support)),
+        "current_supported_cell_fraction": float(np.mean(support)),
     }
 
 
@@ -424,21 +507,25 @@ def build_forecast_origin_covariates(
     pair_frame: pd.DataFrame,
     *,
     sheet_name: str = "gan_input_ready",
+    support_artifact_paths: Mapping[str, str | Path] | None = None,
 ) -> pd.DataFrame:
-    """Build matching covariates without reading target surfaces or errors."""
+    """Build forecast-origin covariates without target surfaces or errors."""
 
     workbook = _require_file(workbook_path, "raw-vol source workbook")
     required_columns = [
         "sample_id",
         "current_snapshot_time_utc",
         "target_snapshot_time_utc",
-        "strike_grid",
-        "maturity_days_grid",
-        "current_surface_flat",
         "current_weighted_iv_rmse",
         "current_surface_slice_count",
         "pair_quality_label",
     ]
+    if support_artifact_paths:
+        required_columns.append("current_surface_param_json")
+    else:
+        required_columns.extend(
+            ["strike_grid", "maturity_days_grid", "current_surface_flat"]
+        )
     source = pd.read_excel(
         workbook,
         sheet_name=sheet_name,
@@ -460,21 +547,45 @@ def build_forecast_origin_covariates(
     if source.empty:
         raise ValueError("No frozen test pairs matched the raw-vol workbook.")
 
+    artifacts = {
+        str(fold): RawSurfaceSupportArtifact.load(
+            _require_file(path, f"{fold} raw support artifact")
+        )
+        for fold, path in (support_artifact_paths or {}).items()
+    }
+    pair_folds = (
+        pair_frame[["fold", "surface_pair_id"]]
+        .drop_duplicates()
+        .set_index("surface_pair_id")["fold"]
+        .astype(str)
+    )
+    if pair_folds.index.duplicated().any():
+        raise ValueError("A surface pair appears in more than one RQ3 fold.")
+
     rows: list[dict[str, Any]] = []
     for pair_id, group in source.groupby("surface_pair_id", sort=False):
         first = group.iloc[0]
-        for column in (
+        invariant_columns = [
             "current_snapshot_time_utc",
             "target_snapshot_time_utc",
-            "strike_grid",
-            "maturity_days_grid",
-            "current_surface_flat",
-        ):
+            (
+                "current_surface_param_json"
+                if artifacts
+                else "current_surface_flat"
+            ),
+        ]
+        for column in invariant_columns:
             if group[column].astype(str).nunique(dropna=False) != 1:
                 raise ValueError(
                     f"Surface pair {pair_id} has inconsistent workbook {column}."
                 )
-        features = _surface_features(first)
+        fold = str(pair_folds.loc[str(pair_id)])
+        if artifacts and fold not in artifacts:
+            raise ValueError(f"Missing raw support artifact for fold={fold}.")
+        features = _surface_features(
+            first,
+            support_artifact=artifacts.get(fold),
+        )
         stamp = pd.Timestamp(first["current_snapshot_time_utc"])
         if stamp.tzinfo is None:
             stamp = stamp.tz_localize("UTC")
@@ -483,6 +594,7 @@ def build_forecast_origin_covariates(
         minute = stamp.hour * 60 + stamp.minute + stamp.second / 60.0
         weekday = stamp.weekday()
         row = {
+            "fold": fold,
             "surface_pair_id": str(pair_id),
             "current_snapshot_time_utc": _canonical_timestamp(stamp),
             "target_snapshot_time_utc": _canonical_timestamp(
@@ -504,6 +616,11 @@ def build_forecast_origin_covariates(
             ).iloc[0],
             "pair_quality_label": str(first["pair_quality_label"]),
             "source_row_count": int(len(group)),
+            "raw_support_artifact_sha256": (
+                _sha256_file(support_artifact_paths[fold])
+                if support_artifact_paths
+                else ""
+            ),
             **features,
         }
         rows.append(row)
@@ -540,7 +657,7 @@ def build_forecast_origin_covariates(
         ["fold", "surface_pair_id", "news_count"]
     ].drop_duplicates(["fold", "surface_pair_id"])
     covariates = lineage.merge(
-        covariates,
+        covariates.drop(columns=["fold"]),
         on="surface_pair_id",
         validate="one_to_one",
     )
@@ -957,6 +1074,585 @@ def build_loss_differentials(samples: pd.DataFrame) -> pd.DataFrame:
         utc=True,
     ).dt.date.astype(str)
     return output
+
+
+def build_all_oos_conditional_rows(
+    differences: pd.DataFrame,
+    covariates: pd.DataFrame,
+    calendar: pd.DataFrame,
+    *,
+    windows: Mapping[str, Mapping[str, int]],
+    ordinary_buffer_minutes: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Label every OOS pair and retain both seed and seed-averaged losses."""
+
+    seed_frames: list[pd.DataFrame] = []
+    covariate_columns = [
+        column
+        for column in covariates.columns
+        if column
+        not in {
+            "current_snapshot_time_utc",
+            "target_snapshot_time_utc",
+            "news_count",
+        }
+    ]
+    for window_name, window in windows.items():
+        labeled = label_information_regimes(
+            covariates,
+            calendar,
+            pre_window_minutes=int(window["pre_minutes"]),
+            post_window_minutes=int(window["post_minutes"]),
+            ordinary_buffer_minutes=int(ordinary_buffer_minutes),
+        )
+        label_columns = [
+            *covariate_columns,
+            "regime",
+            "event_id",
+            "event_family",
+            "release_time_utc",
+            "release_trading_day",
+            "minutes_from_release",
+            "nearest_event_minutes",
+        ]
+        frame = differences.merge(
+            labeled[label_columns],
+            on=["fold", "surface_pair_id"],
+            how="left",
+            validate="many_to_one",
+        )
+        if frame["regime"].isna().any():
+            raise ValueError(
+                f"Missing all-OOS regime labels for window={window_name}."
+            )
+        frame["window"] = str(window_name)
+        frame["scheduled_news_indicator"] = (
+            frame["regime"].astype(str).eq("scheduled_news").astype(int)
+        )
+        current_day = pd.to_datetime(
+            frame["current_snapshot_time_utc"],
+            utc=True,
+        ).dt.date.astype(str)
+        release_day = frame["release_trading_day"].fillna("").astype(str)
+        frame["inference_cluster_day"] = np.where(
+            frame["scheduled_news_indicator"].eq(1)
+            & release_day.str.strip().ne(""),
+            release_day,
+            current_day,
+        )
+        frame["text_advantage"] = frame["difference"].astype(float)
+        seed_frames.append(frame)
+
+    seed_rows = pd.concat(seed_frames, ignore_index=True)
+    identity = [
+        "window",
+        "fold",
+        "surface_pair_id",
+        "current_snapshot_time_utc",
+        "contrast",
+        "contrast_family",
+        "focal_model",
+        "baseline_model",
+        "metric",
+        "difference_direction",
+        "positive_means_focal_better",
+        "regime",
+        "scheduled_news_indicator",
+        "event_id",
+        "event_family",
+        "release_time_utc",
+        "release_trading_day",
+        "minutes_from_release",
+        "nearest_event_minutes",
+        "inference_cluster_day",
+    ]
+    carried = [
+        column
+        for column in covariate_columns
+        if column not in {"fold", "surface_pair_id"}
+    ]
+    average_rows = (
+        seed_rows.groupby([*identity, *carried], as_index=False, dropna=False)
+        .agg(
+            text_advantage=("text_advantage", "mean"),
+            focal_error=("focal_error", "mean"),
+            baseline_error=("baseline_error", "mean"),
+            seed_count=("seed", "nunique"),
+            positive_seed_count=(
+                "text_advantage",
+                lambda values: int(
+                    np.sum(np.asarray(values, dtype=np.float64) > 0.0)
+                ),
+            ),
+        )
+    )
+    return seed_rows, average_rows
+
+
+def _scaled_numeric_controls(
+    frame: pd.DataFrame,
+    columns: Sequence[str],
+) -> tuple[np.ndarray, list[str]]:
+    arrays: list[np.ndarray] = []
+    names: list[str] = []
+    for column in columns:
+        values = pd.to_numeric(frame[column], errors="coerce").to_numpy(
+            dtype=np.float64
+        )
+        finite = np.isfinite(values)
+        fill = float(np.median(values[finite])) if np.any(finite) else 0.0
+        values = np.where(finite, values, fill)
+        scale = float(np.std(values))
+        if scale <= 1e-10:
+            continue
+        arrays.append((values - float(np.mean(values))) / scale)
+        names.append(str(column))
+    if not arrays:
+        return np.empty((len(frame), 0), dtype=np.float64), []
+    return np.column_stack(arrays), names
+
+
+def _cluster_robust_covariance(
+    x: np.ndarray,
+    residual: np.ndarray,
+    clusters: Sequence[str],
+) -> tuple[np.ndarray, int]:
+    cluster_values = np.asarray([str(value) for value in clusters])
+    unique_clusters = np.unique(cluster_values)
+    bread = np.linalg.pinv(x.T @ x)
+    meat = np.zeros((x.shape[1], x.shape[1]), dtype=np.float64)
+    for cluster in unique_clusters:
+        mask = cluster_values == cluster
+        score = x[mask].T @ residual[mask]
+        meat += np.outer(score, score)
+    covariance = bread @ meat @ bread
+    n = int(len(residual))
+    k = int(x.shape[1])
+    g = int(len(unique_clusters))
+    if g > 1 and n > k:
+        covariance *= (g / (g - 1.0)) * ((n - 1.0) / (n - k))
+    return covariance, g
+
+
+def _all_oos_conditional_regression(
+    frame: pd.DataFrame,
+    *,
+    covariates: Sequence[str] = CONDITIONAL_COVARIATES,
+) -> dict[str, Any]:
+    """Estimate the support-weighted scheduled-news conditional effect."""
+
+    data = frame[np.isfinite(frame["text_advantage"].to_numpy(float))].copy()
+    scheduled = data["scheduled_news_indicator"].to_numpy(dtype=np.float64)
+    if len(data) < 4 or np.unique(scheduled).size != 2:
+        return {
+            "conditional_scheduled_effect": float("nan"),
+            "conditional_cluster_se": float("nan"),
+            "conditional_t_statistic": float("nan"),
+            "conditional_p_two_sided": float("nan"),
+            "conditional_p_one_sided_focal_more_valuable": float("nan"),
+            "conditional_ci_95_lower": float("nan"),
+            "conditional_ci_95_upper": float("nan"),
+            "conditional_observations": int(len(data)),
+            "conditional_clusters": 0,
+            "conditional_rank": 0,
+            "event_family_reference": "",
+            "event_family_fixed_effect_count": 0,
+            "fold_fixed_effect_count": 0,
+            "forecast_origin_control_count": 0,
+        }
+
+    control_x, control_names = _scaled_numeric_controls(data, covariates)
+    fold_frame = pd.get_dummies(
+        data["fold"].astype(str),
+        prefix="fold",
+        drop_first=True,
+        dtype=float,
+    )
+    scheduled_families = sorted(
+        {
+            str(value)
+            for value in data.loc[
+                data["scheduled_news_indicator"].eq(1),
+                "event_family",
+            ]
+            if str(value).strip()
+        }
+    )
+    family_reference = scheduled_families[0] if scheduled_families else ""
+    family_names = scheduled_families[1:]
+    family_x = np.column_stack(
+        [
+            (
+                data["scheduled_news_indicator"].eq(1)
+                & data["event_family"].astype(str).eq(family)
+            ).to_numpy(dtype=np.float64)
+            for family in family_names
+        ]
+    ) if family_names else np.empty((len(data), 0), dtype=np.float64)
+    fold_x = fold_frame.to_numpy(dtype=np.float64)
+    x = np.column_stack(
+        [
+            np.ones(len(data), dtype=np.float64),
+            scheduled,
+            family_x,
+            fold_x,
+            control_x,
+        ]
+    )
+    names = [
+        "intercept",
+        "scheduled_news_indicator",
+        *[f"event_family[{value}]" for value in family_names],
+        *fold_frame.columns.astype(str).tolist(),
+        *[f"control[{value}]" for value in control_names],
+    ]
+    y = data["text_advantage"].to_numpy(dtype=np.float64)
+    beta = np.linalg.pinv(x.T @ x) @ x.T @ y
+    residual = y - x @ beta
+    covariance, cluster_count = _cluster_robust_covariance(
+        x,
+        residual,
+        data["inference_cluster_day"].astype(str).tolist(),
+    )
+
+    contrast = np.zeros(x.shape[1], dtype=np.float64)
+    contrast[1] = 1.0
+    scheduled_count = max(int(np.sum(scheduled)), 1)
+    for offset, family in enumerate(family_names, start=2):
+        contrast[offset] = float(
+            np.sum(
+                (scheduled == 1.0)
+                & data["event_family"].astype(str).eq(family).to_numpy()
+            )
+            / scheduled_count
+        )
+    estimate = float(contrast @ beta)
+    variance = float(contrast @ covariance @ contrast)
+    standard_error = (
+        float(np.sqrt(max(variance, 0.0)))
+        if cluster_count > 1
+        else float("nan")
+    )
+    statistic = (
+        estimate / standard_error
+        if np.isfinite(standard_error) and standard_error > 0.0
+        else float("nan")
+    )
+    distribution = stats.t(df=max(cluster_count - 1, 1))
+    critical = float(distribution.ppf(0.975))
+    return {
+        "conditional_scheduled_effect": estimate,
+        "conditional_cluster_se": standard_error,
+        "conditional_t_statistic": statistic,
+        "conditional_p_two_sided": (
+            float(2.0 * distribution.sf(abs(statistic)))
+            if np.isfinite(statistic)
+            else float("nan")
+        ),
+        "conditional_p_one_sided_focal_more_valuable": (
+            float(distribution.sf(statistic))
+            if np.isfinite(statistic)
+            else float("nan")
+        ),
+        "conditional_ci_95_lower": (
+            estimate - critical * standard_error
+            if np.isfinite(standard_error)
+            else float("nan")
+        ),
+        "conditional_ci_95_upper": (
+            estimate + critical * standard_error
+            if np.isfinite(standard_error)
+            else float("nan")
+        ),
+        "conditional_observations": int(len(data)),
+        "conditional_clusters": int(cluster_count),
+        "conditional_rank": int(np.linalg.matrix_rank(x)),
+        "conditional_design_columns": json.dumps(names),
+        "event_family_reference": family_reference,
+        "event_family_fixed_effect_count": int(len(family_names)),
+        "fold_fixed_effect_count": int(fold_x.shape[1]),
+        "forecast_origin_control_count": int(control_x.shape[1]),
+    }
+
+
+def _newey_west_long_run_covariance(
+    values: np.ndarray,
+    *,
+    max_lag: int,
+) -> tuple[np.ndarray, int]:
+    matrix = np.asarray(values, dtype=np.float64)
+    count = int(matrix.shape[0])
+    if count < 2:
+        return np.full((matrix.shape[1], matrix.shape[1]), np.nan), 0
+    lag_limit = min(int(max_lag), count - 1)
+    centered = matrix - np.mean(matrix, axis=0, keepdims=True)
+    covariance = centered.T @ centered / count
+    for lag in range(1, lag_limit + 1):
+        gamma = centered[lag:].T @ centered[:-lag] / count
+        weight = 1.0 - lag / float(lag_limit + 1)
+        covariance += weight * (gamma + gamma.T)
+    return covariance, lag_limit
+
+
+def _giacomini_white_test(
+    frame: pd.DataFrame,
+    *,
+    max_lag: int = 5,
+    covariates: Sequence[str] = CONDITIONAL_COVARIATES,
+) -> dict[str, Any]:
+    """Test E[h_t * loss_difference_t] = 0 using daily HAC moments."""
+
+    data = frame[np.isfinite(frame["text_advantage"].to_numpy(float))].copy()
+    control_x, control_names = _scaled_numeric_controls(data, covariates)
+    fold_x = pd.get_dummies(
+        data["fold"].astype(str),
+        prefix="fold",
+        drop_first=True,
+        dtype=float,
+    ).to_numpy(dtype=np.float64)
+    instruments = np.column_stack(
+        [
+            np.ones(len(data), dtype=np.float64),
+            data["scheduled_news_indicator"].to_numpy(dtype=np.float64),
+            control_x,
+            fold_x,
+        ]
+    )
+    instrument_names = [
+        "intercept",
+        "scheduled_news_indicator",
+        *[f"control[{value}]" for value in control_names],
+        *[
+            f"fold_instrument_{index + 1}"
+            for index in range(fold_x.shape[1])
+        ],
+    ]
+    moments = instruments * data["text_advantage"].to_numpy(float)[:, None]
+    moment_frame = pd.DataFrame(moments, columns=instrument_names)
+    moment_frame["cluster_day"] = data["inference_cluster_day"].astype(str).to_numpy()
+    daily = (
+        moment_frame.groupby("cluster_day", sort=True)[instrument_names]
+        .mean()
+        .to_numpy(dtype=np.float64)
+    )
+    long_run, lag_limit = _newey_west_long_run_covariance(
+        daily,
+        max_lag=max_lag,
+    )
+    if len(daily) < 2 or not np.all(np.isfinite(long_run)):
+        return {
+            "gw_statistic": float("nan"),
+            "gw_df": 0,
+            "gw_p_value": float("nan"),
+            "gw_daily_observations": int(len(daily)),
+            "gw_hac_max_lag": int(lag_limit),
+            "gw_instruments": json.dumps(instrument_names),
+        }
+    mean_moment = np.mean(daily, axis=0)
+    rank = int(np.linalg.matrix_rank(long_run, tol=1e-10))
+    statistic = float(
+        len(daily) * mean_moment @ np.linalg.pinv(long_run) @ mean_moment
+    )
+    return {
+        "gw_statistic": statistic,
+        "gw_df": rank,
+        "gw_p_value": (
+            float(stats.chi2.sf(statistic, df=rank))
+            if rank > 0
+            else float("nan")
+        ),
+        "gw_daily_observations": int(len(daily)),
+        "gw_hac_max_lag": int(lag_limit),
+        "gw_instruments": json.dumps(instrument_names),
+    }
+
+
+def build_all_oos_inference(
+    average_rows: pd.DataFrame,
+    seed_rows: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build thesis-facing all-OOS conditional predictive-ability results."""
+
+    rows: list[dict[str, Any]] = []
+    grouping = [
+        "window",
+        "contrast",
+        "contrast_family",
+        "focal_model",
+        "baseline_model",
+        "metric",
+    ]
+    for keys, group in average_rows.groupby(grouping, sort=True):
+        (
+            window,
+            contrast,
+            contrast_family,
+            focal_model,
+            baseline_model,
+            metric,
+        ) = keys
+        selected_seed_rows = seed_rows[
+            seed_rows["window"].astype(str).eq(str(window))
+            & seed_rows["contrast"].astype(str).eq(str(contrast))
+            & seed_rows["metric"].astype(str).eq(str(metric))
+        ]
+        seed_effects = []
+        for _seed, seed_group in selected_seed_rows.groupby("seed", sort=True):
+            scheduled_values = seed_group.loc[
+                seed_group["scheduled_news_indicator"].eq(1),
+                "text_advantage",
+            ]
+            other_values = seed_group.loc[
+                seed_group["scheduled_news_indicator"].eq(0),
+                "text_advantage",
+            ]
+            seed_effects.append(
+                float(scheduled_values.mean() - other_values.mean())
+                if len(scheduled_values) and len(other_values)
+                else float("nan")
+            )
+        scheduled_values = group.loc[
+            group["scheduled_news_indicator"].eq(1),
+            "text_advantage",
+        ]
+        other_values = group.loc[
+            group["scheduled_news_indicator"].eq(0),
+            "text_advantage",
+        ]
+        rows.append(
+            {
+                "analysis_type": "all_oos_conditional_predictive_robustness",
+                "window": str(window),
+                "contrast": str(contrast),
+                "contrast_family": str(contrast_family),
+                "focal_model": str(focal_model),
+                "baseline_model": str(baseline_model),
+                "metric": str(metric),
+                "difference_direction": "baseline_minus_focal",
+                "positive_means_focal_better": True,
+                "all_oos_text_advantage_mean": float(
+                    group["text_advantage"].mean()
+                ),
+                "scheduled_text_advantage_mean": float(
+                    scheduled_values.mean()
+                ),
+                "non_scheduled_text_advantage_mean": float(
+                    other_values.mean()
+                ),
+                "unadjusted_scheduled_increment": float(
+                    scheduled_values.mean() - other_values.mean()
+                ),
+                "oos_pair_count": int(group["surface_pair_id"].nunique()),
+                "scheduled_pair_count": int(
+                    group.loc[
+                        group["scheduled_news_indicator"].eq(1),
+                        "surface_pair_id",
+                    ].nunique()
+                ),
+                "scheduled_release_count": int(
+                    group.loc[
+                        group["scheduled_news_indicator"].eq(1),
+                        "event_id",
+                    ].nunique()
+                ),
+                "scheduled_release_day_count": int(
+                    group.loc[
+                        group["scheduled_news_indicator"].eq(1),
+                        "inference_cluster_day",
+                    ].nunique()
+                ),
+                "seed_count": int(
+                    selected_seed_rows["seed"].nunique()
+                ),
+                "positive_seed_scheduled_increment_count": int(
+                    np.sum(np.asarray(seed_effects, dtype=float) > 0.0)
+                ),
+                "seed_scheduled_increments": json.dumps(seed_effects),
+                **_all_oos_conditional_regression(group),
+                **_giacomini_white_test(group, max_lag=5),
+            }
+        )
+    output = pd.DataFrame(rows)
+    output["holm_family"] = ""
+    output["conditional_p_holm_two_sided"] = np.nan
+    representation_mask = (
+        output["window"].eq("primary_0_5")
+        & output["metric"].eq("surface_mae")
+        & output["contrast"].isin(["lp_vs_bow", "lp_vs_llm_sentiment"])
+    )
+    output.loc[
+        representation_mask,
+        "holm_family",
+    ] = "rq3_secondary_representation_surface"
+    output.loc[
+        representation_mask,
+        "conditional_p_holm_two_sided",
+    ] = _holm_adjust(
+        output.loc[
+            representation_mask,
+            "conditional_p_two_sided",
+        ].tolist()
+    )
+    return output
+
+
+def build_overall_dm_hac(differences: pd.DataFrame) -> pd.DataFrame:
+    """Run unconditional equal-accuracy diagnostics on all OOS pairs."""
+
+    pair_average = (
+        differences.groupby(
+            [
+                "fold",
+                "surface_pair_id",
+                "current_snapshot_time_utc",
+                "contrast",
+                "contrast_family",
+                "focal_model",
+                "baseline_model",
+                "metric",
+            ],
+            as_index=False,
+        )
+        .agg(
+            text_advantage=("difference", "mean"),
+            seed_count=("seed", "nunique"),
+        )
+    )
+    pair_average["trading_day"] = pd.to_datetime(
+        pair_average["current_snapshot_time_utc"],
+        utc=True,
+    ).dt.date.astype(str)
+    rows: list[dict[str, Any]] = []
+    grouping = [
+        "contrast",
+        "contrast_family",
+        "focal_model",
+        "baseline_model",
+        "metric",
+    ]
+    for keys, group in pair_average.groupby(grouping, sort=True):
+        daily = (
+            group.groupby("trading_day", sort=True)["text_advantage"]
+            .mean()
+            .to_numpy(dtype=float)
+        )
+        rows.append(
+            {
+                "contrast": keys[0],
+                "contrast_family": keys[1],
+                "focal_model": keys[2],
+                "baseline_model": keys[3],
+                "metric": keys[4],
+                "difference_direction": "baseline_minus_focal",
+                "positive_means_focal_better": True,
+                "mean_text_advantage": float(
+                    group["text_advantage"].mean()
+                ),
+                "pair_count": int(group["surface_pair_id"].nunique()),
+                **_dm_hac(daily, max_lag=5),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def build_matched_set_differences(
@@ -1438,12 +2134,14 @@ def build_inference(
     secondary_metric_mask = (
         inference["analysis_type"].eq("scheduled_news")
         & inference["window"].eq("primary_0_5")
-        & inference["metric"].isin(["short_atm_mae", "atm7_abs_err"])
+        & inference["metric"].isin(
+            ["short_atm_mae", "supported_shortest_atm_abs_err"]
+        )
         & inference["contrast"].isin(
             ["lp_vs_continued_no_text", "lp_vs_bow", "lp_vs_llm_sentiment"]
         )
     )
-    for metric in ("short_atm_mae", "atm7_abs_err"):
+    for metric in ("short_atm_mae", "supported_shortest_atm_abs_err"):
         mask = secondary_metric_mask & inference["metric"].eq(metric)
         inference.loc[mask, "holm_family"] = f"secondary_metric_{metric}"
         inference.loc[mask, "p_holm_two_sided"] = _holm_adjust(
@@ -1732,6 +2430,7 @@ def _archive_inputs(
     rq2_path: Path,
     workbook_path: Path,
     calendar_path: Path,
+    support_artifact_paths: Mapping[str, Path],
 ) -> pd.DataFrame:
     specs = [
         ("config", config_path, output_root / "inputs/configs/source_config.yaml"),
@@ -1756,6 +2455,14 @@ def _archive_inputs(
             output_root / "inputs/event_calendars/scheduled_macro_events.csv",
         ),
     ]
+    for fold, source in sorted(support_artifact_paths.items()):
+        specs.append(
+            (
+                f"raw_support_artifact_{fold}",
+                source,
+                output_root / f"inputs/support_artifacts/{fold}.json",
+            )
+        )
     rows = []
     for category, source, target in specs:
         method = _link_or_copy(source, target)
@@ -1793,7 +2500,7 @@ def _git_state() -> str:
 
 
 def _write_documentation(output_root: Path, config: Mapping[str, Any]) -> None:
-    readme = f"""# RQ3 Scheduled High-Information News Regime
+    readme = f"""# RQ3 Conditional Predictive Robustness
 
 This archive is a frozen-model post-processing analysis of the completed
 raw-vol RQ1/RQ2 rolling-development predictions.
@@ -1802,18 +2509,32 @@ Primary contrast:
 
 ```text
 text_advantage = no_text_error - LP_error
-scheduled_news_increment =
-  text_advantage(scheduled_news) - text_advantage(matched_ordinary_news)
-positive => LP is relatively more valuable during scheduled news
+
+text_advantage ~ scheduled_news_indicator
+                 + event-family fixed effects
+                 + fold fixed effects
+                 + forecast-origin controls
+
+positive conditional scheduled effect
+=> LP is relatively more valuable during scheduled-news windows
 ```
 
 Primary metric: `surface_mae`
 
 Primary window: `[0,+5]` minutes relative to a frozen scheduled release.
 
-No model is retrained, no seed is selected, and matching never uses a target
-surface or forecast error. FOMC results are meeting-level development evidence.
-The no-news zero-text workflow is not part of this primary archive.
+All out-of-sample pairs enter the primary conditional regression. Inference is
+clustered by release/trading day and accompanied by a Giacomini-White
+conditional predictive-ability test and an overall Diebold-Mariano/HAC test.
+Greedy scheduled-vs-ordinary matching is retained only as secondary robustness.
+
+All forecast-origin surface controls are reconstructed on each fold's frozen,
+train-only raw-vol support grid. The unsupported raw-vol 7-day ATM metric is
+not reported; the supported shortest-maturity ATM error is used instead.
+
+No model is retrained and no seed, checkpoint, event window, or event family is
+selected using RQ3 errors. This is predictive-regime evidence, not a causal
+event-study estimate. FOMC results remain meeting-level development evidence.
 
 Bootstrap iterations: {int(config['bootstrap_iterations'])}
 Bootstrap seed: {int(config['bootstrap_seed'])}
@@ -1821,21 +2542,27 @@ Bootstrap seed: {int(config['bootstrap_seed'])}
     methodology = """# Methodology
 
 1. Validate RQ1 and RQ2 duplicated LP/no-text predictions at tolerance 1e-8.
-2. Compute forecast-origin raw-vol surface covariates from current surfaces.
-3. Freeze scheduled-event labels before joining forecast errors.
-4. Define ordinary news as at least 60 minutes from every scheduled release.
-5. Match within rolling fold and a 15-minute time-of-day caliper without
-   replacement.
-6. Calculate baseline-minus-LP error differences for every seed and pair.
-7. Average across the three registered seeds.
-8. Estimate the scheduled-news increment using release/trading-day clustered
-   bootstrap, cluster sign randomization, conditional matched-set regression,
-   and DM/HAC daily diagnostics.
-9. Report FOMC by meeting and run date-shift, same-clock, and shuffled-text
-   placebos.
+2. Validate matching fold-train raw-support artifacts from RQ1 and RQ2.
+3. Reconstruct forecast-origin covariates only inside observed raw support.
+4. Freeze scheduled-event labels before joining forecast errors.
+5. Calculate baseline-minus-LP loss differences for all OOS pairs and seeds.
+6. Average differences across the three registered seeds at pair level.
+7. Estimate the scheduled-news coefficient with event-family and fold fixed
+   effects plus forecast-origin controls and release/trading-day clustered SE.
+8. Report the Giacomini-White HAC moment test and overall DM/HAC diagnostic.
+9. As secondary robustness, define ordinary news as at least 60 minutes from
+   scheduled releases and match within fold/time/weekday without replacement.
+10. Report FOMC by meeting and date-shift, same-clock, and shuffled-text
+    placebos.
 
-The design is a conditional predictive-ability analysis, not a causal estimate
-of semantic news effects.
+Primary metrics are `surface_mae`, `short_atm_mae`, and
+`supported_shortest_atm_abs_err`. Raw-vol `atm7_abs_err` is deliberately
+excluded because seven days falls below the empirical maturity support.
+
+The design is a conditional predictive-ability analysis. It does not identify
+the causal effect of a release or its semantic content. A causal official
+release study would require pre/post official-release surfaces and an external
+surprise measure.
 """
     (output_root / "README.md").write_text(readme, encoding="utf-8")
     docs = output_root / "docs"
@@ -1893,6 +2620,7 @@ def run_scheduled_news_regime(
     output_dir: str | Path | None = None,
     rq1_experiment_override: str | Path | None = None,
     rq2_experiment_override: str | Path | None = None,
+    event_calendar_override: str | Path | None = None,
 ) -> Path:
     """Run the complete frozen-prediction RQ3 archive pipeline."""
 
@@ -1928,7 +2656,9 @@ def run_scheduled_news_regime(
         config.get("workbook_path")
         or str(rq2_experiment / "inputs/data/merged_vol_rq2_text.xlsx")
     )
-    calendar_path = _resolve_path(config["event_calendar_path"])
+    calendar_path = _resolve_path(
+        event_calendar_override or config["event_calendar_path"]
+    )
     output_root = (
         _resolve_path(output_dir)
         if output_dir
@@ -2010,6 +2740,37 @@ def run_scheduled_news_regime(
             _git_state(),
             encoding="utf-8",
         )
+        rq1_support_paths = {
+            path.parent.name: path
+            for path in sorted(
+                (rq1_experiment / "inputs/folds").glob(
+                    "*/raw_surface_support.json"
+                )
+            )
+        }
+        rq2_support_paths = {
+            path.parent.name: path
+            for path in sorted(
+                (rq2_experiment / "inputs/folds").glob(
+                    "*/raw_surface_support.json"
+                )
+            )
+        }
+        if not rq1_support_paths:
+            raise FileNotFoundError(
+                f"RQ1 has no frozen raw support artifacts: {rq1_experiment}"
+            )
+        if set(rq1_support_paths) != set(rq2_support_paths):
+            raise ValueError(
+                "RQ1/RQ2 raw support fold sets do not match: "
+                f"{sorted(rq1_support_paths)} vs {sorted(rq2_support_paths)}."
+            )
+        for fold, rq1_support in rq1_support_paths.items():
+            rq2_support = rq2_support_paths[fold]
+            if _sha256_file(rq1_support) != _sha256_file(rq2_support):
+                raise ValueError(
+                    f"RQ1/RQ2 raw support artifact mismatch for fold={fold}."
+                )
         _archive_inputs(
             output_root,
             config_path=source_config,
@@ -2017,6 +2778,7 @@ def run_scheduled_news_regime(
             rq2_path=_require_file(rq2_metrics, "RQ2 frozen metrics"),
             workbook_path=_require_file(workbook, "raw-vol workbook"),
             calendar_path=_require_file(calendar_path, "event calendar"),
+            support_artifact_paths=rq1_support_paths,
         )
 
         _update_status(
@@ -2057,6 +2819,7 @@ def run_scheduled_news_regime(
             workbook,
             pair_frame,
             sheet_name=str(config.get("workbook_sheet_name", "gan_input_ready")),
+            support_artifact_paths=rq1_support_paths,
         )
         covariates.to_csv(
             output_root / "inputs/forecast_origin_covariates.csv",
@@ -2092,6 +2855,66 @@ def run_scheduled_news_regime(
                 "The registered primary design requires 1:1 no-replacement "
                 "matching; set match_ratio=1."
             )
+
+        _update_status(
+            output_root,
+            status="running",
+            phase="all_oos_conditional_predictive_analysis",
+            started_at_utc=started,
+        )
+        all_oos_seed_rows, all_oos_average_rows = (
+            build_all_oos_conditional_rows(
+                differences,
+                covariates,
+                calendar,
+                windows=windows,
+                ordinary_buffer_minutes=ordinary_buffer,
+            )
+        )
+        all_oos_seed_rows.to_csv(
+            output_root
+            / "comparisons/development_rq3_all_oos_seed_rows.csv",
+            index=False,
+        )
+        all_oos_average_rows.to_csv(
+            output_root
+            / "comparisons/development_rq3_all_oos_conditional_rows.csv",
+            index=False,
+        )
+        all_oos_inference = build_all_oos_inference(
+            all_oos_average_rows,
+            all_oos_seed_rows,
+        )
+        all_oos_inference.to_csv(
+            output_root
+            / "comparisons/development_rq3_conditional_predictive_ability.csv",
+            index=False,
+        )
+        all_oos_inference[
+            [
+                "analysis_type",
+                "window",
+                "contrast",
+                "metric",
+                "gw_statistic",
+                "gw_df",
+                "gw_p_value",
+                "gw_daily_observations",
+                "gw_hac_max_lag",
+                "gw_instruments",
+            ]
+        ].to_csv(
+            output_root
+            / "comparisons/development_rq3_giacomini_white_tests.csv",
+            index=False,
+        )
+        overall_dm = build_overall_dm_hac(differences)
+        overall_dm.to_csv(
+            output_root
+            / "comparisons/development_rq3_overall_dm_hac.csv",
+            index=False,
+        )
+
         all_labeled = []
         all_manifests = []
         all_balance = []
@@ -2251,12 +3074,12 @@ def run_scheduled_news_regime(
         )
         inference.to_csv(
             output_root
-            / "comparisons/development_rq3_primary_cluster_bootstrap.csv",
+            / "comparisons/development_rq3_secondary_matched_cluster_bootstrap.csv",
             index=False,
         )
         conditional.to_csv(
             output_root
-            / "comparisons/development_rq3_conditional_predictive_ability.csv",
+            / "comparisons/development_rq3_secondary_matched_conditional_regression.csv",
             index=False,
         )
         inference_keys = [
@@ -2399,32 +3222,39 @@ def run_scheduled_news_regime(
             index=False,
         )
 
-        primary_table = combined_inference[
-            combined_inference["analysis_type"].eq("scheduled_news")
-            & combined_inference["window"].eq("primary_0_5")
-            & combined_inference["contrast"].eq(
+        primary_table = all_oos_inference[
+            all_oos_inference["window"].eq("primary_0_5")
+            & all_oos_inference["contrast"].eq(
                 "lp_vs_continued_no_text"
             )
-            & combined_inference["metric"].eq("surface_mae")
+            & all_oos_inference["metric"].eq("surface_mae")
         ].copy()
-        secondary_table = combined_inference[
-            combined_inference["analysis_type"].eq("scheduled_news")
-            & combined_inference["window"].eq("primary_0_5")
+        secondary_table = all_oos_inference[
+            all_oos_inference["window"].eq("primary_0_5")
             & ~(
-                combined_inference["contrast"].eq(
+                all_oos_inference["contrast"].eq(
                     "lp_vs_continued_no_text"
                 )
-                & combined_inference["metric"].eq("surface_mae")
+                & all_oos_inference["metric"].eq("surface_mae")
             )
+        ].copy()
+        matched_secondary_table = combined_inference[
+            combined_inference["analysis_type"].eq("scheduled_news")
+            & combined_inference["window"].eq("primary_0_5")
         ].copy()
         primary_table.to_csv(
             output_root
-            / "final_tables/development_thesis_rq3_primary_scheduled_news.csv",
+            / "final_tables/development_rq3_primary_conditional_robustness.csv",
             index=False,
         )
         secondary_table.to_csv(
             output_root
-            / "final_tables/development_thesis_rq3_secondary_metrics.csv",
+            / "final_tables/development_rq3_secondary_all_oos.csv",
+            index=False,
+        )
+        matched_secondary_table.to_csv(
+            output_root
+            / "final_tables/development_rq3_secondary_matched_news.csv",
             index=False,
         )
         fomc_summary.to_csv(
@@ -2438,9 +3268,15 @@ def run_scheduled_news_regime(
             index=False,
         )
 
-        primary_release_count = int(primary_manifest["event_id"].nunique())
+        primary_all_oos_rows = all_oos_average_rows[
+            all_oos_average_rows["window"].eq("primary_0_5")
+            & all_oos_average_rows["scheduled_news_indicator"].eq(1)
+        ]
+        primary_release_count = int(
+            primary_all_oos_rows["event_id"].nunique()
+        )
         primary_release_days = int(
-            primary_manifest["release_trading_day"].nunique()
+            primary_all_oos_rows["inference_cluster_day"].nunique()
         )
         balance_flags = int(
             balance_frame[
@@ -2507,18 +3343,22 @@ def run_scheduled_news_regime(
         minimum_release_days = int(config.get("minimum_release_days", 20))
         support = bool(
             primary_row
-            and float(primary_row["mean_scheduled_news_increment"]) > 0.0
-            and float(primary_row["ci_95_lower"]) > 0.0
+            and float(primary_row["conditional_scheduled_effect"]) > 0.0
+            and float(primary_row["conditional_ci_95_lower"]) > 0.0
             and float(
                 primary_row[
                     "conditional_p_one_sided_focal_more_valuable"
                 ]
             )
             < 0.05
-            and int(primary_row["positive_seed_direction_count"]) >= 2
+            and float(primary_row["gw_p_value"]) < 0.05
+            and int(
+                primary_row[
+                    "positive_seed_scheduled_increment_count"
+                ]
+            )
+            >= 2
             and primary_release_days >= minimum_release_days
-            and event_family_stable
-            and placebo_null
         )
         validation = {
             "status": "ok",
@@ -2536,7 +3376,7 @@ def run_scheduled_news_regime(
             "seeds": sorted(int(value) for value in samples["seed"].unique()),
             "folds": sorted(samples["fold"].astype(str).unique()),
             "primary_scheduled_pair_count": int(
-                primary_labeled["regime"].eq("scheduled_news").sum()
+                primary_all_oos_rows["surface_pair_id"].nunique()
             ),
             "primary_matched_set_count": int(
                 primary_manifest["matched_set_id"].nunique()
@@ -2544,7 +3384,7 @@ def run_scheduled_news_regime(
             "primary_release_count": primary_release_count,
             "primary_release_day_count": primary_release_days,
             "primary_event_families": sorted(
-                primary_manifest["event_family"].astype(str).unique()
+                primary_all_oos_rows["event_family"].astype(str).unique()
             ),
             "ordinary_buffer_minutes": ordinary_buffer,
             "time_caliper_minutes": caliper,
@@ -2555,10 +3395,21 @@ def run_scheduled_news_regime(
             "event_family_direction_stable": event_family_stable,
             "placebo_null_requirement_passed": placebo_null,
             "full_support_primary_rule": support,
+            "primary_analysis": "all_oos_conditional_predictive_robustness",
+            "secondary_analysis": (
+                "greedy_matched_scheduled_vs_ordinary_news"
+            ),
             "known_limitations": [
                 "2023 rolling-development evidence, not 2024+ confirmation",
                 "FOMC is an underpowered meeting-level case study",
-                "7d ATM must be interpreted separately from surface MAE",
+                (
+                    "raw-vol 7d ATM is not reported because 7d lies below "
+                    "observed maturity support"
+                ),
+                (
+                    "scheduled-news labels identify a predictive regime, "
+                    "not a causal semantic-news effect"
+                ),
                 "lead-text placebo unavailable in frozen predictions",
                 "no-news quiet requires separate mixed-data retraining",
             ],

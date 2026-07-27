@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import asdict, dataclass
@@ -96,11 +97,30 @@ def prepare_condition_tensors(
         current_features_flat = normalize_surface_tensor(current_flat, normalization.current_log_mean, normalization.current_log_std)
     else:
         current_features_flat = torch.log(torch.clamp(current_flat, min=1e-4))
+    current_support = torch.tensor(
+        (
+            np.asarray(sample.current_support_mask, dtype=np.float32)
+            if sample.current_support_mask is not None
+            else np.ones(sample.surface_shape, dtype=np.float32)
+        ).reshape(1, -1),
+        dtype=torch.float32,
+        device=device,
+    )
+    current_features_flat = torch.where(
+        current_support > 0.0,
+        current_features_flat,
+        torch.zeros_like(current_features_flat),
+    )
     if normalize_text_embedding:
         text_features = normalize_tensor(text_embedding, normalization.text_mean, normalization.text_std)
     else:
         text_features = text_embedding
     current_features = current_features_flat.view(1, 1, height, width)
+    if sample.current_support_mask is not None:
+        current_features = torch.cat(
+            [current_features, current_support.view(1, 1, height, width)],
+            dim=1,
+        )
     return current_flat, current_features, text_features
 
 
@@ -135,7 +155,15 @@ def generate_surface_scenarios(
         draw_count = 1 if int(noise_dim) <= 0 else max(1, int(mc_samples))
         for draw_idx in range(draw_count):
             generator_noise = torch.Generator(device="cpu")
-            generator_noise.manual_seed(int(seed) + int(sample.global_index) + draw_idx * 1000003)
+            seed_payload = (
+                f"{int(seed)}|{sample.surface_pair_id}|{int(draw_idx)}"
+            ).encode("utf-8")
+            draw_seed = int.from_bytes(
+                hashlib.sha256(seed_payload).digest()[:8],
+                byteorder="big",
+                signed=False,
+            ) % (2**63 - 1)
+            generator_noise.manual_seed(draw_seed)
             noise = torch.randn((1, int(noise_dim)), generator=generator_noise, dtype=torch.float32).to(device)
             fake_delta_norm = generator(
                 current_features,
@@ -185,11 +213,18 @@ def energy_score(
     surface_stack: np.ndarray,
     target_surface: np.ndarray,
     weights: np.ndarray,
+    support_mask: np.ndarray | None = None,
 ) -> float:
     """Weighted multivariate energy score in per-grid-cell IV units."""
 
     scenarios = np.asarray(surface_stack, dtype=np.float64).reshape(len(surface_stack), -1)
     target = np.asarray(target_surface, dtype=np.float64).reshape(1, -1)
+    if support_mask is not None:
+        mask = np.asarray(support_mask, dtype=bool).reshape(-1)
+        scenarios = scenarios[:, mask]
+        target = target[:, mask]
+    if scenarios.shape[1] == 0:
+        return float("nan")
     normalized_weights = np.asarray(weights, dtype=np.float64).reshape(-1)
     scale = math.sqrt(float(scenarios.shape[1]))
     target_distances = np.linalg.norm(scenarios - target, axis=1) / scale
@@ -199,23 +234,91 @@ def energy_score(
     return float(normalized_weights @ target_distances - 0.5 * normalized_weights @ pair_distances @ normalized_weights)
 
 
+def variogram_score(
+    surface_stack: np.ndarray,
+    target_surface: np.ndarray,
+    weights: np.ndarray,
+    *,
+    support_mask: np.ndarray | None = None,
+    order: float = 0.5,
+) -> float:
+    """Local-neighbour variogram score for spatial dependence across the IV grid."""
+
+    scenarios = np.asarray(surface_stack, dtype=np.float64)
+    target = np.asarray(target_surface, dtype=np.float64)
+    if scenarios.ndim != 3 or target.shape != scenarios.shape[1:]:
+        raise ValueError("Variogram score expects scenarios [draw, maturity, strike].")
+    mask = (
+        np.asarray(support_mask, dtype=bool)
+        if support_mask is not None
+        else np.ones(target.shape, dtype=bool)
+    )
+    pair_terms: list[np.ndarray] = []
+    target_terms: list[np.ndarray] = []
+    if target.shape[1] > 1:
+        valid = mask[:, 1:] & mask[:, :-1]
+        if np.any(valid):
+            pair_terms.append(np.abs(scenarios[:, :, 1:] - scenarios[:, :, :-1])[:, valid] ** float(order))
+            target_terms.append(np.abs(target[:, 1:] - target[:, :-1])[valid] ** float(order))
+    if target.shape[0] > 1:
+        valid = mask[1:, :] & mask[:-1, :]
+        if np.any(valid):
+            pair_terms.append(np.abs(scenarios[:, 1:, :] - scenarios[:, :-1, :])[:, valid] ** float(order))
+            target_terms.append(np.abs(target[1:, :] - target[:-1, :])[valid] ** float(order))
+    if not pair_terms:
+        return float("nan")
+    scenario_differences = np.concatenate(pair_terms, axis=1)
+    target_differences = np.concatenate(target_terms)
+    expected_differences = np.asarray(weights, dtype=np.float64) @ scenario_differences
+    return float(np.mean(np.square(target_differences - expected_differences)))
+
+
 def _probabilistic_metrics(
     *,
     surface_stack: np.ndarray,
     target_surface: np.ndarray,
     weights: np.ndarray,
     calibration_levels: Sequence[float],
+    support_mask: np.ndarray | None = None,
 ) -> dict[str, float]:
     flat_stack = np.asarray(surface_stack, dtype=np.float64).reshape(len(surface_stack), -1)
     flat_target = np.asarray(target_surface, dtype=np.float64).reshape(-1)
+    flat_mask = (
+        np.asarray(support_mask, dtype=bool).reshape(-1)
+        if support_mask is not None
+        else np.ones(flat_target.shape, dtype=bool)
+    )
+    flat_stack = flat_stack[:, flat_mask]
+    flat_target = flat_target[flat_mask]
+    if flat_target.size == 0:
+        return {
+            "energy_score": float("nan"),
+            "variogram_score": float("nan"),
+            "scenario_spread": float("nan"),
+            "effective_scenario_count": float(1.0 / np.sum(np.square(weights))),
+            "calibration_error": float("nan"),
+            "mc_surface_mae_se": float("nan"),
+        }
     weighted_mean = _weighted_mean(flat_stack, weights)
     scale = math.sqrt(float(flat_stack.shape[1]))
     spread = float(np.sum(weights * (np.linalg.norm(flat_stack - weighted_mean, axis=1) / scale)))
     metrics: dict[str, float] = {
         "energy_score": energy_score(flat_stack, flat_target, weights),
+        "variogram_score": variogram_score(
+            surface_stack,
+            target_surface,
+            weights,
+            support_mask=support_mask,
+        ),
         "scenario_spread": spread,
         "effective_scenario_count": float(1.0 / np.sum(np.square(weights))),
     }
+    scenario_mae = np.mean(np.abs(flat_stack - flat_target.reshape(1, -1)), axis=1)
+    metrics["mc_surface_mae_se"] = (
+        float(np.std(scenario_mae, ddof=1) / math.sqrt(float(scenario_mae.size)))
+        if scenario_mae.size > 1
+        else 0.0
+    )
     calibration_errors: list[float] = []
     for raw_level in calibration_levels:
         level = float(raw_level)
@@ -233,8 +336,16 @@ def _probabilistic_metrics(
     return metrics
 
 
-def _surface_metrics(predicted: np.ndarray, target: np.ndarray) -> dict[str, float]:
+def _surface_metrics(
+    predicted: np.ndarray,
+    target: np.ndarray,
+    support_mask: np.ndarray | None = None,
+) -> dict[str, float]:
     diff = np.asarray(predicted, dtype=np.float64) - np.asarray(target, dtype=np.float64)
+    if support_mask is not None:
+        diff = diff[np.asarray(support_mask, dtype=bool)]
+    if diff.size == 0:
+        return {"mae": float("nan"), "rmse": float("nan"), "max_abs": float("nan")}
     return {
         "mae": float(np.mean(np.abs(diff))),
         "rmse": float(np.sqrt(np.mean(diff**2))),
@@ -263,10 +374,19 @@ def _short_atm_metrics(
     target_surface: np.ndarray,
     recon_weights_surface: torch.Tensor | None,
     atm_short_mask_surface: torch.Tensor | None,
+    support_mask: np.ndarray | None = None,
 ) -> dict[str, float]:
     generated_tensor = torch.tensor(np.asarray(generated_surface, dtype=np.float32), dtype=torch.float32)
     current_tensor = torch.tensor(np.asarray(current_surface, dtype=np.float32), dtype=torch.float32)
     target_tensor = torch.tensor(np.asarray(target_surface, dtype=np.float32), dtype=torch.float32)
+    support_tensor = torch.tensor(
+        (
+            np.asarray(support_mask, dtype=np.float32)
+            if support_mask is not None
+            else np.ones_like(target_surface, dtype=np.float32)
+        ),
+        dtype=torch.float32,
+    )
 
     metrics = {
         "short_atm_weighted_mae": 0.0,
@@ -279,11 +399,12 @@ def _short_atm_metrics(
         "atm_short_pure_win_flag_vs_current": 0.0,
     }
     if recon_weights_surface is not None:
+        supported_weights = recon_weights_surface * support_tensor
         generated_weighted = float(
-            weighted_surface_mae(generated_tensor, target_tensor, recon_weights_surface).detach().cpu()
+            weighted_surface_mae(generated_tensor, target_tensor, supported_weights).detach().cpu()
         )
         current_weighted = float(
-            weighted_surface_mae(current_tensor, target_tensor, recon_weights_surface).detach().cpu()
+            weighted_surface_mae(current_tensor, target_tensor, supported_weights).detach().cpu()
         )
         metrics.update(
             {
@@ -293,12 +414,17 @@ def _short_atm_metrics(
                 "short_atm_weighted_win_flag_vs_current": 1.0 if generated_weighted < current_weighted else 0.0,
             }
         )
-    if atm_short_mask_surface is not None and float(atm_short_mask_surface.sum().item()) > 0.0:
+    supported_atm_mask = (
+        atm_short_mask_surface * support_tensor
+        if atm_short_mask_surface is not None
+        else None
+    )
+    if supported_atm_mask is not None and float(supported_atm_mask.sum().item()) > 0.0:
         generated_pure = float(
-            atm_short_pure_mae(generated_tensor, target_tensor, atm_short_mask_surface).detach().cpu()
+            atm_short_pure_mae(generated_tensor, target_tensor, supported_atm_mask).detach().cpu()
         )
         current_pure = float(
-            atm_short_pure_mae(current_tensor, target_tensor, atm_short_mask_surface).detach().cpu()
+            atm_short_pure_mae(current_tensor, target_tensor, supported_atm_mask).detach().cpu()
         )
         metrics.update(
             {
@@ -306,6 +432,15 @@ def _short_atm_metrics(
                 "current_atm_short_pure_mae": current_pure,
                 "atm_short_pure_mae_gap_vs_current": generated_pure - current_pure,
                 "atm_short_pure_win_flag_vs_current": 1.0 if generated_pure < current_pure else 0.0,
+            }
+        )
+    elif support_mask is not None:
+        metrics.update(
+            {
+                "atm_short_pure_mae": float("nan"),
+                "current_atm_short_pure_mae": float("nan"),
+                "atm_short_pure_mae_gap_vs_current": float("nan"),
+                "atm_short_pure_win_flag_vs_current": float("nan"),
             }
         )
     return metrics
@@ -327,24 +462,42 @@ def summarize_surface_scenarios(
     recon_weights_surface: torch.Tensor | None = None,
     atm_short_mask_surface: torch.Tensor | None = None,
     residual_blend_alpha: float = 1.0,
+    support_mask: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    penalties = total_arbitrage_penalty(
-        torch.tensor(surface_stack, dtype=torch.float32),
-        torch.tensor(np.asarray(strike_grid, dtype=np.float32), dtype=torch.float32),
-        torch.tensor(np.asarray(maturity_days_grid, dtype=np.float32), dtype=torch.float32),
-    ).detach().cpu().numpy().astype(np.float64)
-    weights, effective_beta = reweight_scenarios(
-        penalties,
-        beta_mode=reweight_beta_mode,
-        beta_value=float(reweight_beta),
+    surface_stack = np.asarray(surface_stack, dtype=np.float64)
+    current_surface = np.asarray(current_surface, dtype=np.float32)
+    target_surface = np.asarray(target_surface, dtype=np.float32)
+    resolved_support = (
+        np.asarray(support_mask, dtype=bool)
+        if support_mask is not None
+        else np.ones(target_surface.shape, dtype=bool)
     )
+    if resolved_support.shape != target_surface.shape:
+        raise ValueError(
+            f"support_mask shape {resolved_support.shape} does not match target {target_surface.shape}."
+        )
+    full_rectangular_support = bool(np.all(resolved_support))
+    if full_rectangular_support:
+        penalties = total_arbitrage_penalty(
+            torch.tensor(surface_stack, dtype=torch.float32),
+            torch.tensor(np.asarray(strike_grid, dtype=np.float32), dtype=torch.float32),
+            torch.tensor(np.asarray(maturity_days_grid, dtype=np.float32), dtype=torch.float32),
+        ).detach().cpu().numpy().astype(np.float64)
+        weights, effective_beta = reweight_scenarios(
+            penalties,
+            beta_mode=reweight_beta_mode,
+            beta_value=float(reweight_beta),
+        )
+    else:
+        # Static-arbitrage penalties require a complete rectangular surface.
+        penalties = np.zeros(surface_stack.shape[0], dtype=np.float64)
+        weights = np.full(surface_stack.shape[0], 1.0 / float(surface_stack.shape[0]))
+        effective_beta = 0.0
     normalized_aggregation = str(aggregation_mode).strip().lower()
     if normalized_aggregation != "weighted_mean":
         raise ValueError(f"Unsupported aggregation_mode: {aggregation_mode}")
     weighted_mean_surface = _weighted_mean(surface_stack, weights).astype(np.float32)
     flat_surface_stack = surface_stack.reshape(surface_stack.shape[0], -1)
-    current_surface = np.asarray(current_surface, dtype=np.float32)
-    target_surface = np.asarray(target_surface, dtype=np.float32)
     blended_surface = _apply_residual_blend(
         weighted_mean_surface,
         current_surface,
@@ -371,64 +524,85 @@ def summarize_surface_scenarios(
         ).tolist()
         for quantile in quantiles
     }
-    current_metrics = _surface_metrics(current_surface, target_surface)
-    metrics = _surface_metrics(blended_surface, target_surface)
-    generated_current_metrics = _surface_metrics(blended_surface, current_surface)
+    current_metrics = _surface_metrics(current_surface, target_surface, resolved_support)
+    metrics = _surface_metrics(blended_surface, target_surface, resolved_support)
+    generated_current_metrics = _surface_metrics(
+        blended_surface,
+        current_surface,
+        resolved_support,
+    )
     comparison_metrics = {
         "mae_gap_vs_current": metrics["mae"] - current_metrics["mae"],
         "rmse_gap_vs_current": metrics["rmse"] - current_metrics["rmse"],
         "max_abs_gap_vs_current": metrics["max_abs"] - current_metrics["max_abs"],
-        "win_flag_vs_current": 1.0 if metrics["mae"] < current_metrics["mae"] else 0.0,
+        "win_flag_vs_current": (
+            1.0
+            if np.isfinite(metrics["mae"])
+            and np.isfinite(current_metrics["mae"])
+            and metrics["mae"] < current_metrics["mae"]
+            else 0.0
+        ),
     }
-    strike_tensor = torch.tensor(np.asarray(strike_grid, dtype=np.float32), dtype=torch.float32)
-    maturity_tensor = torch.tensor(np.asarray(maturity_days_grid, dtype=np.float32), dtype=torch.float32)
-    scenario_tensor = torch.tensor(blended_surface_stack, dtype=torch.float32)
-    aggregate_tensor = torch.tensor(blended_surface[None, ...], dtype=torch.float32)
-    scenario_calendar_rates = (
-        calendar_arbitrage_violation_rate(
-            scenario_tensor,
-            strike_tensor,
-            maturity_tensor,
-            tolerance=float(arbitrage_violation_tolerance),
-        )
-        .detach()
-        .cpu()
-        .numpy()
-        .astype(np.float64)
-    )
-    scenario_butterfly_rates = (
-        butterfly_arbitrage_violation_rate(
-            scenario_tensor,
-            strike_tensor,
-            maturity_tensor,
-            tolerance=float(arbitrage_violation_tolerance),
-        )
-        .detach()
-        .cpu()
-        .numpy()
-        .astype(np.float64)
-    )
-    arbitrage_metrics = {
-        "calendar_violation_rate": float(
+    if full_rectangular_support:
+        strike_tensor = torch.tensor(np.asarray(strike_grid, dtype=np.float32), dtype=torch.float32)
+        maturity_tensor = torch.tensor(np.asarray(maturity_days_grid, dtype=np.float32), dtype=torch.float32)
+        scenario_tensor = torch.tensor(blended_surface_stack, dtype=torch.float32)
+        aggregate_tensor = torch.tensor(blended_surface[None, ...], dtype=torch.float32)
+        scenario_calendar_rates = (
             calendar_arbitrage_violation_rate(
-                aggregate_tensor,
+                scenario_tensor,
                 strike_tensor,
                 maturity_tensor,
                 tolerance=float(arbitrage_violation_tolerance),
-            )[0]
-        ),
-        "butterfly_violation_rate": float(
+            )
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.float64)
+        )
+        scenario_butterfly_rates = (
             butterfly_arbitrage_violation_rate(
-                aggregate_tensor,
+                scenario_tensor,
                 strike_tensor,
                 maturity_tensor,
                 tolerance=float(arbitrage_violation_tolerance),
-            )[0]
-        ),
-        "scenario_calendar_violation_rate": float(weights @ scenario_calendar_rates),
-        "scenario_butterfly_violation_rate": float(weights @ scenario_butterfly_rates),
-        "violation_tolerance": float(arbitrage_violation_tolerance),
-    }
+            )
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.float64)
+        )
+        arbitrage_metrics = {
+            "calendar_violation_rate": float(
+                calendar_arbitrage_violation_rate(
+                    aggregate_tensor,
+                    strike_tensor,
+                    maturity_tensor,
+                    tolerance=float(arbitrage_violation_tolerance),
+                )[0]
+            ),
+            "butterfly_violation_rate": float(
+                butterfly_arbitrage_violation_rate(
+                    aggregate_tensor,
+                    strike_tensor,
+                    maturity_tensor,
+                    tolerance=float(arbitrage_violation_tolerance),
+                )[0]
+            ),
+            "scenario_calendar_violation_rate": float(weights @ scenario_calendar_rates),
+            "scenario_butterfly_violation_rate": float(weights @ scenario_butterfly_rates),
+            "violation_tolerance": float(arbitrage_violation_tolerance),
+            "status": "computed_full_rectangular_support",
+        }
+    else:
+        arbitrage_metrics = {
+            "calendar_violation_rate": float("nan"),
+            "butterfly_violation_rate": float("nan"),
+            "scenario_calendar_violation_rate": float("nan"),
+            "scenario_butterfly_violation_rate": float("nan"),
+            "violation_tolerance": float(arbitrage_violation_tolerance),
+            "status": "not_computed_irregular_raw_support",
+        }
     return {
         "generated_surface": blended_surface.astype(float).tolist(),
         "quantile_surfaces": quantile_surfaces,
@@ -447,6 +621,7 @@ def summarize_surface_scenarios(
             target_surface=target_surface,
             weights=weights,
             calibration_levels=calibration_levels,
+            support_mask=resolved_support,
         ),
         "arbitrage_metrics": arbitrage_metrics,
         "short_atm_metrics": _short_atm_metrics(
@@ -455,7 +630,13 @@ def summarize_surface_scenarios(
             target_surface=target_surface,
             recon_weights_surface=recon_weights_surface,
             atm_short_mask_surface=atm_short_mask_surface,
+            support_mask=resolved_support,
         ),
+        "support_metrics": {
+            "supported_cell_count": int(resolved_support.sum()),
+            "supported_cell_fraction": float(resolved_support.mean()),
+            "full_rectangular_support": full_rectangular_support,
+        },
     }
 
 
@@ -511,6 +692,7 @@ def build_sample_payload(
         recon_weights_surface=recon_weights_surface,
         atm_short_mask_surface=atm_short_mask_surface,
         residual_blend_alpha=float(residual_blend_alpha),
+        support_mask=sample.evaluation_support_mask,
     )
     return {
         "sample_id": sample.sample_id,
@@ -540,8 +722,27 @@ def build_sample_payload(
         "probabilistic_metrics": summary["probabilistic_metrics"],
         "arbitrage_metrics": summary["arbitrage_metrics"],
         "short_atm_metrics": summary["short_atm_metrics"],
+        "support_metrics": summary["support_metrics"],
+        "current_support_mask": (
+            np.asarray(sample.current_support_mask, dtype=bool).tolist()
+            if sample.current_support_mask is not None
+            else None
+        ),
+        "target_support_mask": (
+            np.asarray(sample.target_support_mask, dtype=bool).tolist()
+            if sample.target_support_mask is not None
+            else None
+        ),
+        "evaluation_support_mask": sample.evaluation_support_mask.tolist(),
         "metadata": {
             "pair_quality_label": sample.metadata.get("pair_quality_label", ""),
+            "publication_timestamp_utc": sample.metadata.get(
+                "publication_timestamp_utc",
+                "",
+            ),
+            "publication_availability_lag_minutes": int(
+                sample.metadata.get("publication_availability_lag_minutes", 0)
+            ),
             "checkpoint_path": str(checkpoint_path),
             "mc_samples": int(mc_samples),
             "split": str(split),
@@ -557,6 +758,8 @@ def build_sample_payload(
             "unique_embedding_count": int(sample.metadata.get("unique_embedding_count", 1)),
             "pooling_mode": sample.metadata.get("pooling_mode", ""),
             "has_text": float(sample.metadata.get("has_text", 1.0)),
+            "surface_support_mode": sample.metadata.get("surface_support_mode", "full_grid"),
+            "report_atm7_metric": bool(sample.metadata.get("report_atm7_metric", True)),
         },
     }
 
@@ -585,6 +788,7 @@ def _build_atm_vol_row(
     payload: Mapping[str, Any],
     checkpoint_path: str | Path,
 ) -> dict[str, Any]:
+    report_atm7 = bool(sample.metadata.get("report_atm7_metric", True))
     current_atm = extract_atm_short_value(
         sample.current_surface,
         strike_grid=sample.strike_grid,
@@ -600,6 +804,41 @@ def _build_atm_vol_row(
         strike_grid=sample.strike_grid,
         maturity_days_grid=sample.maturity_days_grid,
     )
+    support_mask = sample.evaluation_support_mask
+    supported_locations = np.argwhere(support_mask)
+    supported_payload = {
+        "supported_atm_strike": float("nan"),
+        "supported_short_maturity_days": float("nan"),
+        "supported_current_atm_vol": float("nan"),
+        "supported_generated_atm_vol": float("nan"),
+        "supported_target_atm_vol": float("nan"),
+        "supported_generated_target_abs_error": float("nan"),
+        "supported_current_target_abs_error": float("nan"),
+    }
+    if supported_locations.size:
+        minimum_maturity_index = int(np.min(supported_locations[:, 0]))
+        strike_candidates = np.flatnonzero(support_mask[minimum_maturity_index])
+        strike_index = int(
+            strike_candidates[
+                np.argmin(np.abs(sample.strike_grid[strike_candidates] - 1.0))
+            ]
+        )
+        current_value = float(sample.current_surface[minimum_maturity_index, strike_index])
+        generated_value = float(
+            np.asarray(payload["generated_surface"])[minimum_maturity_index, strike_index]
+        )
+        target_value = float(sample.target_surface[minimum_maturity_index, strike_index])
+        supported_payload = {
+            "supported_atm_strike": float(sample.strike_grid[strike_index]),
+            "supported_short_maturity_days": float(
+                sample.maturity_days_grid[minimum_maturity_index]
+            ),
+            "supported_current_atm_vol": current_value,
+            "supported_generated_atm_vol": generated_value,
+            "supported_target_atm_vol": target_value,
+            "supported_generated_target_abs_error": abs(generated_value - target_value),
+            "supported_current_target_abs_error": abs(current_value - target_value),
+        }
     return {
         "sample_id": sample.sample_id,
         "global_index": int(sample.global_index),
@@ -612,8 +851,22 @@ def _build_atm_vol_row(
         "current_atm_vol": float(current_atm["value"]),
         "generated_atm_vol": float(generated_atm["value"]),
         "target_atm_vol": float(target_atm["value"]),
-        "generated_target_abs_error": float(abs(float(generated_atm["value"]) - float(target_atm["value"]))),
-        "current_target_abs_error": float(abs(float(current_atm["value"]) - float(target_atm["value"]))),
+        "generated_target_abs_error": (
+            float(abs(float(generated_atm["value"]) - float(target_atm["value"])))
+            if report_atm7
+            else float("nan")
+        ),
+        "current_target_abs_error": (
+            float(abs(float(current_atm["value"]) - float(target_atm["value"])))
+            if report_atm7
+            else float("nan")
+        ),
+        "atm7_metric_status": (
+            "reported_legacy_grid"
+            if report_atm7
+            else "not_reported_raw_maturity_extrapolation"
+        ),
+        **supported_payload,
         "checkpoint_path": str(checkpoint_path),
     }
 
@@ -650,6 +903,7 @@ class FilmWGANSampler:
             conditioning_mode=conditioning_mode,
             text_dropout=float(train_config.text_dropout),
             text_gate_initial_value=float(train_config.text_gate_initial_value),
+            current_surface_channels=int(checkpoint.get("current_surface_channels", 1)),
         ).to(self.device)
         generator.load_state_dict(checkpoint["generator_state_dict"])
         generator.eval()
@@ -748,6 +1002,13 @@ class FilmWGANSampler:
                     "news_timestamp_utc": sample.timestamp,
                     "current_snapshot_time_utc": sample.current_snapshot_time_utc,
                     "target_snapshot_time_utc": sample.target_snapshot_time_utc,
+                    "publication_timestamp_utc": sample.metadata.get(
+                        "publication_timestamp_utc",
+                        "",
+                    ),
+                    "publication_availability_lag_minutes": int(
+                        sample.metadata.get("publication_availability_lag_minutes", 0)
+                    ),
                     "event_group": sample.metadata.get("event_group", ""),
                     "has_news": sample.metadata.get("has_news", ""),
                     "news_cluster_id": sample.metadata.get("news_cluster_id", ""),
@@ -801,8 +1062,24 @@ class FilmWGANSampler:
                     "generated_current_mae": float(payload["generated_current_metrics"]["mae"]),
                     "atm7_abs_err": float(atm_row["generated_target_abs_error"]),
                     "current_atm7_abs_err": float(atm_row["current_target_abs_error"]),
+                    "atm7_metric_status": atm_row["atm7_metric_status"],
+                    "supported_shortest_atm_abs_err": float(
+                        atm_row["supported_generated_target_abs_error"]
+                    ),
+                    "current_supported_shortest_atm_abs_err": float(
+                        atm_row["supported_current_target_abs_error"]
+                    ),
+                    "supported_shortest_maturity_days": float(
+                        atm_row["supported_short_maturity_days"]
+                    ),
                     "energy_score": float(payload["probabilistic_metrics"]["energy_score"]),
+                    "variogram_score": float(
+                        payload["probabilistic_metrics"]["variogram_score"]
+                    ),
                     "scenario_spread": float(payload["probabilistic_metrics"]["scenario_spread"]),
+                    "mc_surface_mae_se": float(
+                        payload["probabilistic_metrics"]["mc_surface_mae_se"]
+                    ),
                     "effective_scenario_count": float(
                         payload["probabilistic_metrics"]["effective_scenario_count"]
                     ),
@@ -826,6 +1103,13 @@ class FilmWGANSampler:
                     ),
                     "scenario_butterfly_violation_rate": float(
                         payload["arbitrage_metrics"]["scenario_butterfly_violation_rate"]
+                    ),
+                    "arbitrage_metric_status": payload["arbitrage_metrics"]["status"],
+                    "supported_cell_count": int(
+                        payload["support_metrics"]["supported_cell_count"]
+                    ),
+                    "supported_cell_fraction": float(
+                        payload["support_metrics"]["supported_cell_fraction"]
                     ),
                     "text_alignment_mode": payload["metadata"]["text_alignment_mode"],
                     "text_source_sample_id": payload["metadata"]["text_source_sample_id"],

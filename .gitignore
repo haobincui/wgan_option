@@ -9,6 +9,7 @@ __pycache__/
 !/data/reference/
 /data/reference/*
 !/data/reference/*.csv
+!/data/reference/rq123_market_reference_manifest.json
 /outputs/
 /logs/
 /training_result_images/

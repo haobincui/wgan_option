@@ -80,6 +80,7 @@ class FilmWGANGenerator(nn.Module):
         conditioning_mode: str = "film",
         text_dropout: float = 0.0,
         text_gate_initial_value: float = 0.0,
+        current_surface_channels: int = 1,
     ):
         super().__init__()
         self.surface_height = int(surface_height)
@@ -89,6 +90,9 @@ class FilmWGANGenerator(nn.Module):
         self.noise_dim = int(noise_dim)
         self.num_res_blocks = max(0, int(res_blocks))
         self.conditioning_mode = str(conditioning_mode).strip().lower()
+        self.current_surface_channels = int(current_surface_channels)
+        if self.current_surface_channels < 1:
+            raise ValueError("current_surface_channels must be positive.")
         if self.conditioning_mode not in {"film", "concat", "residual_film"}:
             raise ValueError("conditioning_mode must be one of ['film', 'concat', 'residual_film'].")
 
@@ -110,7 +114,13 @@ class FilmWGANGenerator(nn.Module):
         self.text_encoder = nn.Sequential(*text_layers)
 
         c = base_channels
-        self.conv1 = nn.Conv2d(1, c, kernel_size=3, stride=1, padding=1)
+        self.conv1 = nn.Conv2d(
+            self.current_surface_channels,
+            c,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        )
         self.film1 = FiLMLayer(text_out_dim, c)
         self.conv2 = nn.Conv2d(c, c * 2, kernel_size=3, stride=2, padding=1)
         self.film2 = FiLMLayer(text_out_dim, c * 2)
@@ -270,6 +280,7 @@ class FilmWGANCritic(nn.Module):
         conditioning_mode: str = "film",
         critic_conditioning_mode: str = "inherit",
         text_dropout: float = 0.0,
+        current_surface_channels: int = 1,
     ):
         super().__init__()
         self.num_res_blocks = max(0, int(res_blocks))
@@ -280,6 +291,9 @@ class FilmWGANCritic(nn.Module):
                 "projection" if generator_conditioning == "residual_film" else generator_conditioning
             )
         self.conditioning_mode = requested_critic_conditioning
+        self.current_surface_channels = int(current_surface_channels)
+        if self.current_surface_channels < 1:
+            raise ValueError("current_surface_channels must be positive.")
         if self.conditioning_mode not in {"film", "concat", "projection"}:
             raise ValueError("critic conditioning must be one of ['film', 'concat', 'projection'].")
 
@@ -300,7 +314,13 @@ class FilmWGANCritic(nn.Module):
         self.text_encoder = nn.Sequential(*text_layers)
 
         c = base_channels
-        self.conv1 = nn.Conv2d(2, c, kernel_size=3, stride=2, padding=1)
+        self.conv1 = nn.Conv2d(
+            self.current_surface_channels + 1,
+            c,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+        )
         self.film1 = FiLMLayer(text_out_dim, c)
         self.conv2 = nn.Conv2d(c, c * 2, kernel_size=3, stride=2, padding=1)
         self.film2 = FiLMLayer(text_out_dim, c * 2)
