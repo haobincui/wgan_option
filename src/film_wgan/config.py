@@ -33,10 +33,12 @@ class FilmWGANTrainConfig:
     sample_unit: str = "article_row"
     news_workbook_path: str = "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx"
     text_pooling_mode: str = "mean_l2"
+    pair_text_feature_path: str = ""
     text_preprocessing_mode: str = "coordinate_zscore"
     text_transform_path: str = ""
     text_pca_components: int = 128
     text_pca_whiten: bool = False
+    text_output_dim: int = 128
     min_samples_for_training: int = 2
 
     normalize_current_surface: bool = True
@@ -113,6 +115,7 @@ class FilmWGANTrainConfig:
     checkpoints_path: str = ""
     metrics_path: str = ""
     initial_generator_checkpoint_path: str = ""
+    parent_text_transform_policy: str = "exact"
     freeze_backbone_epochs: int = 0
     save_every: int = 10
 
@@ -134,10 +137,12 @@ class FilmWGANSampleConfig:
     sample_unit: str = "article_row"
     news_workbook_path: str = "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx"
     text_pooling_mode: str = "mean_l2"
+    pair_text_feature_path: str = ""
     text_preprocessing_mode: str = "coordinate_zscore"
     text_transform_path: str = ""
     text_pca_components: int = 128
     text_pca_whiten: bool = False
+    text_output_dim: int = 128
 
     checkpoint_path: str = ""
     seed: int = 42
@@ -179,10 +184,12 @@ _SHARED_GENERATE_FIELDS = {
     "sample_unit",
     "news_workbook_path",
     "text_pooling_mode",
+    "pair_text_feature_path",
     "text_preprocessing_mode",
     "text_transform_path",
     "text_pca_components",
     "text_pca_whiten",
+    "text_output_dim",
     "seed",
     "cuda",
 }
@@ -215,19 +222,34 @@ def _validate_common_fields(config: FilmWGANTrainConfig | FilmWGANSampleConfig) 
     if sample_unit not in {"article_row", "surface_pair"}:
         raise ValueError("sample_unit must be one of ['article_row', 'surface_pair'].")
     pooling_mode = str(config.text_pooling_mode).strip().lower()
-    if pooling_mode != "mean_l2":
-        raise ValueError("text_pooling_mode currently supports only 'mean_l2'.")
-    preprocessing_mode = str(config.text_preprocessing_mode).strip().lower()
-    if preprocessing_mode not in {"raw_l2", "pca", "coordinate_zscore"}:
+    allowed_pooling_modes = {"mean_l2", "bow_log_count_l2", "mean_scores"}
+    if pooling_mode not in allowed_pooling_modes:
         raise ValueError(
-            "text_preprocessing_mode must be one of ['raw_l2', 'pca', 'coordinate_zscore']."
+            f"text_pooling_mode must be one of {sorted(allowed_pooling_modes)}."
+        )
+    preprocessing_mode = str(config.text_preprocessing_mode).strip().lower()
+    if preprocessing_mode not in {"raw_l2", "pca", "coordinate_zscore", "zscore_pad"}:
+        raise ValueError(
+            "text_preprocessing_mode must be one of "
+            "['raw_l2', 'pca', 'coordinate_zscore', 'zscore_pad']."
         )
     if int(config.text_pca_components) <= 0:
         raise ValueError("text_pca_components must be positive.")
-    if preprocessing_mode == "pca" and bool(getattr(config, "normalize_text_embedding", False)):
+    if int(config.text_output_dim) <= 0:
+        raise ValueError("text_output_dim must be positive.")
+    if preprocessing_mode in {"pca", "zscore_pad"} and bool(
+        getattr(config, "normalize_text_embedding", False)
+    ):
         raise ValueError(
-            "text_preprocessing_mode=pca requires normalize_text_embedding=false; "
-            "PCA coordinates must not be z-scored again."
+            f"text_preprocessing_mode={preprocessing_mode} requires "
+            "normalize_text_embedding=false."
+        )
+    pair_feature_path = str(config.pair_text_feature_path).strip()
+    if pair_feature_path and sample_unit != "surface_pair":
+        raise ValueError("pair_text_feature_path requires sample_unit=surface_pair.")
+    if pair_feature_path and pooling_mode == "mean_l2":
+        raise ValueError(
+            "External pair_text_feature_path requires an explicit RQ2 pooling mode."
         )
     if str(config.text_embedding_mode).strip().lower().replace("-", "_") == "zero_lp" and bool(
         getattr(config, "normalize_text_embedding", False)
@@ -252,6 +274,11 @@ def _validate_train_fields(config: FilmWGANTrainConfig) -> None:
         raise ValueError("conditioning_mode=residual_film requires critic_conditioning_mode=projection.")
     if str(config.initial_generator_checkpoint_path).strip() and conditioning_mode != "residual_film":
         raise ValueError("initial_generator_checkpoint_path is supported only for residual_film.")
+    parent_transform_policy = str(config.parent_text_transform_policy).strip().lower()
+    if parent_transform_policy not in {"exact", "dimension_only"}:
+        raise ValueError(
+            "parent_text_transform_policy must be one of ['exact', 'dimension_only']."
+        )
     if not 0.0 <= float(config.text_dropout) < 1.0:
         raise ValueError("text_dropout must be in [0, 1).")
     if float(config.lambda_film) < 0.0 or float(config.lambda_mismatch) < 0.0:

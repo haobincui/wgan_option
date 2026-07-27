@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import random
 from dataclasses import replace
 from pathlib import Path
@@ -55,6 +56,21 @@ def _load_generate_result_section(config_path: str | None) -> dict[str, object]:
     return dict(section)
 
 
+def module_state_sha256(module: torch.nn.Module | None) -> str:
+    """Hash a module state without relying on torch serialization details."""
+
+    if module is None:
+        return ""
+    digest = hashlib.sha256()
+    for name, tensor in sorted(module.state_dict().items()):
+        value = tensor.detach().cpu().contiguous()
+        digest.update(name.encode("utf-8"))
+        digest.update(str(value.dtype).encode("ascii"))
+        digest.update(str(tuple(value.shape)).encode("ascii"))
+        digest.update(value.numpy().tobytes(order="C"))
+    return digest.hexdigest()
+
+
 class FilmWGANTrainer(BaseTrainer):
     """Train the standalone FiLM WGAN model on `merged_vol.xlsx` rows."""
 
@@ -88,6 +104,8 @@ class FilmWGANTrainer(BaseTrainer):
         self._lr_min_ratio: float = 0.1
         self._parent_checkpoint_path: str = ""
         self._parent_checkpoint_sha256: str = ""
+        self._initial_generator_state_sha256: str = ""
+        self._initial_critic_state_sha256: str = ""
         self._backbone_frozen: bool = False
 
     def _set_seed(self) -> None:
@@ -153,13 +171,23 @@ class FilmWGANTrainer(BaseTrainer):
                 f"found conditioning_mode={parent_mode!r}."
             )
         parent_transform_sha = str(checkpoint.get("text_transform_sha256", ""))
+        transform_policy = str(self.config.parent_text_transform_policy).strip().lower()
         if (
-            parent_transform_sha
+            transform_policy == "exact"
+            and parent_transform_sha
             and self.bundle.text_transform_sha256
             and parent_transform_sha != self.bundle.text_transform_sha256
         ):
             raise ValueError(
                 "Parent generator text-transform SHA256 does not match the current fold artifact."
+            )
+        if (
+            transform_policy == "dimension_only"
+            and parent_transform_sha != self.bundle.text_transform_sha256
+        ):
+            self.logger.info(
+                "Parent text-transform SHA differs under dimension_only policy; "
+                "embedding dimensions remain strictly matched."
             )
         try:
             self.generator.load_state_dict(checkpoint["generator_state_dict"], strict=True)
@@ -284,6 +312,24 @@ class FilmWGANTrainer(BaseTrainer):
                 critic_conditioning_mode=self.config.critic_conditioning_mode,
                 text_dropout=float(self.config.text_dropout),
             ).to(self.device)
+        self._initial_generator_state_sha256 = module_state_sha256(self.generator)
+        self._initial_critic_state_sha256 = module_state_sha256(self.critic)
+        write_json(
+            self.metrics_dir / "initialization_audit.json",
+            {
+                "seed": int(self.config.seed),
+                "embedding_dim": int(self.bundle.embedding_dim),
+                "parent_checkpoint_path": self._parent_checkpoint_path,
+                "parent_checkpoint_sha256": self._parent_checkpoint_sha256,
+                "parent_text_transform_policy": str(
+                    self.config.parent_text_transform_policy
+                ),
+                "text_transform_path": self.bundle.text_transform_path,
+                "text_transform_sha256": self.bundle.text_transform_sha256,
+                "initial_generator_state_sha256": self._initial_generator_state_sha256,
+                "initial_critic_state_sha256": self._initial_critic_state_sha256,
+            },
+        )
         self.generator_optimizer = self._build_generator_optimizer()
         if self.critic is not None:
             self.critic_optimizer = Adam(
@@ -700,6 +746,9 @@ class FilmWGANTrainer(BaseTrainer):
             "critic_parameter_count": parameter_count(self.critic.parameters()) if self.critic is not None else 0,
             "parent_generator_checkpoint_path": self._parent_checkpoint_path,
             "parent_generator_checkpoint_sha256": self._parent_checkpoint_sha256,
+            "parent_text_transform_policy": str(self.config.parent_text_transform_policy),
+            "initial_generator_state_sha256": self._initial_generator_state_sha256,
+            "initial_critic_state_sha256": self._initial_critic_state_sha256,
             "text_transform_path": self.bundle.text_transform_path,
             "text_transform_sha256": self.bundle.text_transform_sha256,
             "backbone_frozen": bool(self._backbone_frozen),

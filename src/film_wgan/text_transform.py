@@ -41,6 +41,7 @@ class FilmWGANTextTransform:
     input_dim: int
     output_dim: int
     mean: np.ndarray
+    scale: np.ndarray
     components: np.ndarray
     explained_variance: np.ndarray
     whiten: bool
@@ -64,6 +65,14 @@ class FilmWGANTextTransform:
                 transformed = transformed / np.sqrt(
                     np.clip(self.explained_variance.reshape(1, -1), 1e-12, None)
                 )
+        elif normalized_mode == "zscore_pad":
+            normalized = (array - self.mean.reshape(1, -1)) / np.clip(
+                self.scale.reshape(1, -1),
+                1e-12,
+                None,
+            )
+            transformed = np.zeros((array.shape[0], int(self.output_dim)), dtype=np.float32)
+            transformed[:, : int(self.input_dim)] = normalized
         else:
             raise ValueError(f"Unsupported text transform mode: {self.mode}")
         transformed = np.asarray(transformed, dtype=np.float32)
@@ -78,6 +87,7 @@ class FilmWGANTextTransform:
             input_dim=np.asarray(self.input_dim, dtype=np.int64),
             output_dim=np.asarray(self.output_dim, dtype=np.int64),
             mean=np.asarray(self.mean, dtype=np.float32),
+            scale=np.asarray(self.scale, dtype=np.float32),
             components=np.asarray(self.components, dtype=np.float32),
             explained_variance=np.asarray(self.explained_variance, dtype=np.float32),
             whiten=np.asarray(int(self.whiten), dtype=np.int8),
@@ -107,11 +117,17 @@ class FilmWGANTextTransform:
             raise FileNotFoundError(f"text_transform_path does not exist: {artifact_path}")
         with np.load(artifact_path, allow_pickle=False) as payload:
             mode = str(payload["mode"].item())
+            input_dim = int(payload["input_dim"].item())
             transform = cls(
                 mode=mode,
-                input_dim=int(payload["input_dim"].item()),
+                input_dim=input_dim,
                 output_dim=int(payload["output_dim"].item()),
                 mean=np.asarray(payload["mean"], dtype=np.float32),
+                scale=(
+                    np.asarray(payload["scale"], dtype=np.float32)
+                    if "scale" in payload.files
+                    else np.ones(input_dim, dtype=np.float32)
+                ),
                 components=np.asarray(payload["components"], dtype=np.float32),
                 explained_variance=np.asarray(payload["explained_variance"], dtype=np.float32),
                 whiten=bool(int(payload["whiten"].item())),
@@ -133,6 +149,7 @@ class FilmWGANTextTransform:
             input_dim=transform.input_dim,
             output_dim=transform.output_dim,
             mean=transform.mean,
+            scale=transform.scale,
             components=transform.components,
             explained_variance=transform.explained_variance,
             whiten=transform.whiten,
@@ -148,6 +165,8 @@ def fit_text_transform(
     whiten: bool,
     train_pair_ids: Sequence[str],
     input_workbook_path: str | Path,
+    output_dim: int | None = None,
+    input_feature_path: str | Path | None = None,
 ) -> FilmWGANTextTransform:
     """Fit a deterministic transform using training-pair text only."""
 
@@ -163,6 +182,14 @@ def fit_text_transform(
         "input_workbook_sha256": sha256_file(input_workbook_path),
         "fit_sample_count": int(array.shape[0]),
     }
+    if input_feature_path:
+        feature_path = Path(input_feature_path)
+        metadata.update(
+            {
+                "input_feature_path": str(feature_path),
+                "input_feature_sha256": sha256_file(feature_path),
+            }
+        )
     if normalized_mode == "pca":
         requested = int(components)
         maximum = min(int(array.shape[0]), input_dim)
@@ -181,6 +208,7 @@ def fit_text_transform(
             input_dim=input_dim,
             output_dim=requested,
             mean=np.asarray(estimator.mean_, dtype=np.float32),
+            scale=np.ones(input_dim, dtype=np.float32),
             components=np.asarray(estimator.components_, dtype=np.float32),
             explained_variance=np.asarray(estimator.explained_variance_, dtype=np.float32),
             whiten=bool(whiten),
@@ -192,6 +220,32 @@ def fit_text_transform(
                 ),
             },
         )
+    if normalized_mode == "zscore_pad":
+        resolved_output_dim = int(output_dim if output_dim is not None else input_dim)
+        if resolved_output_dim < input_dim:
+            raise ValueError(
+                f"zscore_pad output_dim={resolved_output_dim} is smaller than input_dim={input_dim}."
+            )
+        mean = np.mean(array, axis=0).astype(np.float32)
+        scale = np.std(array, axis=0).astype(np.float32)
+        scale = np.where(scale < 1e-8, 1.0, scale).astype(np.float32)
+        components_matrix = np.zeros((resolved_output_dim, input_dim), dtype=np.float32)
+        components_matrix[:input_dim, :] = np.eye(input_dim, dtype=np.float32)
+        return FilmWGANTextTransform(
+            mode=normalized_mode,
+            input_dim=input_dim,
+            output_dim=resolved_output_dim,
+            mean=mean,
+            scale=scale,
+            components=components_matrix,
+            explained_variance=np.var(array, axis=0).astype(np.float32),
+            whiten=False,
+            metadata={
+                **metadata,
+                "active_output_dimensions": input_dim,
+                "padding_dimensions": resolved_output_dim - input_dim,
+            },
+        )
     if normalized_mode not in {"raw_l2", "coordinate_zscore"}:
         raise ValueError(f"Unsupported text preprocessing mode: {mode}")
     return FilmWGANTextTransform(
@@ -199,6 +253,7 @@ def fit_text_transform(
         input_dim=input_dim,
         output_dim=input_dim,
         mean=np.zeros(input_dim, dtype=np.float32),
+        scale=np.ones(input_dim, dtype=np.float32),
         components=np.eye(input_dim, dtype=np.float32),
         explained_variance=np.ones(input_dim, dtype=np.float32),
         whiten=False,

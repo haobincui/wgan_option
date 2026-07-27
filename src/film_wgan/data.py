@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -368,6 +369,68 @@ def load_film_wgan_samples(config: FilmWGANTrainConfig | FilmWGANSampleConfig) -
 _NEWS_SAMPLE_ID_PATTERN = re.compile(r"^news_(\d+)$")
 
 
+def _resolved_config_path(value: str) -> Path:
+    path = Path(str(value)).expanduser()
+    return path if path.is_absolute() else Path.cwd() / path
+
+
+def _parse_json_string_list(value: Any, *, field: str) -> list[str]:
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    try:
+        parsed = json.loads(str(value))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Pair feature field {field!r} is not valid JSON.") from exc
+    if not isinstance(parsed, list):
+        raise ValueError(f"Pair feature field {field!r} must contain a JSON list.")
+    return [str(item) for item in parsed]
+
+
+@lru_cache(maxsize=16)
+def _load_pair_text_features(path_value: str) -> dict[str, dict[str, Any]]:
+    path = _resolved_config_path(path_value)
+    if not path.is_file():
+        raise FileNotFoundError(f"pair_text_feature_path does not exist: {path}")
+    if path.suffix.lower() != ".csv":
+        raise ValueError("pair_text_feature_path currently supports CSV artifacts only.")
+    frame = pd.read_csv(path)
+    required = {
+        "surface_pair_id",
+        "text_embedding",
+        "representation",
+        "pooling_mode",
+        "source_sample_ids",
+        "article_ids",
+    }
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError(f"Pair text feature artifact {path} is missing columns: {missing}")
+    if frame["surface_pair_id"].astype(str).duplicated().any():
+        raise ValueError(f"Pair text feature artifact has duplicate surface_pair_id values: {path}")
+    return {
+        str(row.surface_pair_id): {
+            "text_embedding": np.asarray(
+                _parse_serialized_list(row.text_embedding),
+                dtype=np.float32,
+            ),
+            "representation": str(row.representation),
+            "pooling_mode": str(row.pooling_mode),
+            "source_sample_ids": _parse_json_string_list(
+                row.source_sample_ids,
+                field="source_sample_ids",
+            ),
+            "article_ids": _parse_json_string_list(row.article_ids, field="article_ids"),
+            "source_files": (
+                _parse_json_string_list(row.source_files, field="source_files")
+                if hasattr(row, "source_files") and not pd.isna(row.source_files)
+                else []
+            ),
+            "feature_sha256": str(getattr(row, "feature_sha256", "")),
+        }
+        for row in frame.itertuples(index=False)
+    }
+
+
 def _assert_pair_member_consistency(reference: FilmWGANSample, candidate: FilmWGANSample) -> None:
     fields = (
         ("current_surface", reference.current_surface, candidate.current_surface),
@@ -489,22 +552,31 @@ def aggregate_surface_pair_samples(
     if not samples:
         return []
     mode = str(config.text_embedding_mode).strip().lower().replace("-", "_")
-    if mode not in {"lp", "zero_lp"}:
+    pair_feature_path = str(config.pair_text_feature_path).strip()
+    external_features = (
+        _load_pair_text_features(str(_resolved_config_path(pair_feature_path)))
+        if pair_feature_path
+        else None
+    )
+    if external_features is None and mode not in {"lp", "zero_lp"}:
         raise ValueError(
-            "sample_unit=surface_pair currently supports LP text and its zero_lp comparator only; "
+            "sample_unit=surface_pair requires pair_text_feature_path for non-LP representations; "
             f"got text_embedding_mode={config.text_embedding_mode!r}."
         )
-    if news_workbook is None:
+    if external_features is None and news_workbook is None:
         news_path = Path(config.news_workbook_path)
         if not news_path.is_file():
             raise FileNotFoundError(f"news_workbook_path does not exist: {news_path}")
         news_workbook = pd.read_excel(news_path)
-    required_columns = {"ArticleID", "SourceFile", "LP_embedding"}
-    missing_columns = sorted(required_columns - set(news_workbook.columns))
-    if missing_columns:
-        raise ValueError(
-            f"News workbook {config.news_workbook_path} is missing pair-lineage columns: {missing_columns}."
-        )
+    if external_features is None:
+        assert news_workbook is not None
+        required_columns = {"ArticleID", "SourceFile", "LP_embedding"}
+        missing_columns = sorted(required_columns - set(news_workbook.columns))
+        if missing_columns:
+            raise ValueError(
+                f"News workbook {config.news_workbook_path} is missing pair-lineage columns: "
+                f"{missing_columns}."
+            )
 
     grouped: dict[str, list[FilmWGANSample]] = {}
     for sample in samples:
@@ -522,17 +594,65 @@ def aggregate_surface_pair_samples(
         reference = members[0]
         for candidate in members[1:]:
             _assert_pair_member_consistency(reference, candidate)
-        lineage_rows = _news_lineage_rows(members, news_workbook=news_workbook)
-        pooled_text, unique_rows = _pool_pair_text(lineage_rows)
+        if external_features is None:
+            assert news_workbook is not None
+            lineage_rows = _news_lineage_rows(members, news_workbook=news_workbook)
+            pooled_text, unique_rows = _pool_pair_text(lineage_rows)
+            source_sample_ids = [sample.sample_id for sample in members]
+            article_ids = [str(row["article_id"]) for row in unique_rows]
+            source_files = [str(row["source_file"]) for row in unique_rows]
+            pooling_mode = "mean_l2"
+            feature_sha256 = hashlib.sha256(
+                pooled_text.tobytes(order="C")
+            ).hexdigest()
+        else:
+            if pair_id not in external_features:
+                raise ValueError(
+                    f"Pair feature artifact {pair_feature_path} has no row for {pair_id}."
+                )
+            feature = external_features[pair_id]
+            configured_pooling = str(config.text_pooling_mode).strip().lower()
+            if str(feature["pooling_mode"]).strip().lower() != configured_pooling:
+                raise ValueError(
+                    f"Pair {pair_id} pooling mode mismatch: artifact={feature['pooling_mode']!r}, "
+                    f"config={configured_pooling!r}."
+                )
+            artifact_representation = (
+                str(feature["representation"]).strip().lower().replace("-", "_")
+            )
+            if artifact_representation != mode:
+                raise ValueError(
+                    f"Pair {pair_id} representation mismatch: "
+                    f"artifact={feature['representation']!r}, "
+                    f"config={config.text_embedding_mode!r}."
+                )
+            expected_samples = sorted(sample.sample_id for sample in members)
+            artifact_samples = sorted(str(item) for item in feature["source_sample_ids"])
+            if expected_samples != artifact_samples:
+                raise ValueError(
+                    f"Pair {pair_id} source_sample_ids do not match the split workbook rows."
+                )
+            pooled_text = np.asarray(feature["text_embedding"], dtype=np.float32)
+            if pooled_text.size <= 0 or not np.all(np.isfinite(pooled_text)):
+                raise ValueError(f"Pair {pair_id} has an invalid external text vector.")
+            source_sample_ids = list(feature["source_sample_ids"])
+            article_ids = list(feature["article_ids"])
+            source_files = list(feature["source_files"])
+            pooling_mode = configured_pooling
+            feature_sha256 = str(feature["feature_sha256"]) or hashlib.sha256(
+                pooled_text.tobytes(order="C")
+            ).hexdigest()
         metadata = dict(reference.metadata)
         metadata.update(
             {
-                "source_sample_ids": [sample.sample_id for sample in members],
-                "article_ids": [str(row["article_id"]) for row in unique_rows],
-                "source_files": [str(row["source_file"]) for row in unique_rows],
+                "source_sample_ids": source_sample_ids,
+                "article_ids": article_ids,
+                "source_files": source_files,
                 "news_count": int(len(members)),
-                "unique_embedding_count": int(len(unique_rows)),
-                "pooling_mode": "mean_l2",
+                "unique_embedding_count": int(len(article_ids)),
+                "pooling_mode": pooling_mode,
+                "pair_text_feature_path": pair_feature_path,
+                "pair_text_feature_sha256": feature_sha256,
                 "has_text": has_text,
             }
         )
@@ -563,8 +683,8 @@ def _fit_or_load_transform(
     if mode == "coordinate_zscore":
         return None
     transform_path_value = str(config.text_transform_path).strip()
-    if mode == "pca" and not transform_path_value:
-        raise ValueError("text_preprocessing_mode=pca requires text_transform_path.")
+    if mode in {"pca", "zscore_pad"} and not transform_path_value:
+        raise ValueError(f"text_preprocessing_mode={mode} requires text_transform_path.")
 
     source_vectors = [
         sample.raw_text_embedding if sample.raw_text_embedding is not None else sample.text_embedding
@@ -586,14 +706,34 @@ def _fit_or_load_transform(
             raise ValueError(
                 f"Text transform workbook SHA mismatch for {transform_path_value}."
             )
-        if transform.mode != mode or int(transform.input_dim) != int(matrix.shape[1]):
+        pair_feature_path = str(config.pair_text_feature_path).strip()
+        if pair_feature_path:
+            expected_feature_hash = sha256_file(_resolved_config_path(pair_feature_path))
+            if str(metadata.get("input_feature_sha256", "")) != expected_feature_hash:
+                raise ValueError(
+                    f"Text transform pair-feature SHA mismatch for {transform_path_value}."
+                )
+        expected_output_dim = (
+            int(config.text_pca_components)
+            if mode == "pca"
+            else int(config.text_output_dim)
+            if mode == "zscore_pad"
+            else int(matrix.shape[1])
+        )
+        if (
+            transform.mode != mode
+            or int(transform.input_dim) != int(matrix.shape[1])
+            or int(transform.output_dim) != expected_output_dim
+        ):
             raise ValueError(
-                f"Text transform schema mismatch: expected mode={mode}, input_dim={matrix.shape[1]}; "
-                f"found mode={transform.mode}, input_dim={transform.input_dim}."
+                "Text transform schema mismatch: "
+                f"expected mode={mode}, input_dim={matrix.shape[1]}, "
+                f"output_dim={expected_output_dim}; found mode={transform.mode}, "
+                f"input_dim={transform.input_dim}, output_dim={transform.output_dim}."
             )
         return transform
 
-    if isinstance(config, FilmWGANSampleConfig) and mode == "pca":
+    if isinstance(config, FilmWGANSampleConfig) and mode in {"pca", "zscore_pad"}:
         raise FileNotFoundError(
             f"Generate-result cannot fit a missing text transform: {transform_path_value!r}."
         )
@@ -604,6 +744,12 @@ def _fit_or_load_transform(
         whiten=bool(config.text_pca_whiten),
         train_pair_ids=pair_ids,
         input_workbook_path=config.data_path,
+        output_dim=int(config.text_output_dim),
+        input_feature_path=(
+            _resolved_config_path(str(config.pair_text_feature_path))
+            if str(config.pair_text_feature_path).strip()
+            else None
+        ),
     )
     if transform_path_value:
         transform.save(transform_path_value)
@@ -621,7 +767,7 @@ def _apply_text_transform(
     for sample in samples:
         source = (
             sample.raw_text_embedding
-            if mode in {"pca", "raw_l2"} and sample.raw_text_embedding is not None
+            if mode in {"pca", "raw_l2", "zscore_pad"} and sample.raw_text_embedding is not None
             else sample.text_embedding
         )
         features = (
@@ -793,10 +939,12 @@ def _prepare_partitioned_samples(
 ) -> tuple[dict[str, list[FilmWGANSample]], pd.DataFrame, FilmWGANTextTransform | None]:
     partitions, manifest = _partition_samples(config, samples)
     if str(config.sample_unit).strip().lower() == "surface_pair":
-        news_path = Path(config.news_workbook_path)
-        if not news_path.is_file():
-            raise FileNotFoundError(f"news_workbook_path does not exist: {news_path}")
-        news_workbook = pd.read_excel(news_path)
+        news_workbook = None
+        if not str(config.pair_text_feature_path).strip():
+            news_path = Path(config.news_workbook_path)
+            if not news_path.is_file():
+                raise FileNotFoundError(f"news_workbook_path does not exist: {news_path}")
+            news_workbook = pd.read_excel(news_path)
         partitions = {
             split: aggregate_surface_pair_samples(
                 config,
