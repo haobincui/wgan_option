@@ -169,6 +169,9 @@ if ! is_done corrected_dataset; then
   if [[ ! -f "${DATASET_DIR}/merged_vol_rq2_text.xlsx" ]]; then
     ENV_NAME="${ENV_NAME}" \
     FEATURE_DIR="${FEATURE_ROOT}" \
+    SOURCE_TIMEZONE="${SOURCE_TIMEZONE}" \
+    WINDOW_MINUTES="${WINDOW_MINUTES}" \
+    MIN_STRIKES_PER_EXPIRY="${MIN_STRIKES_PER_EXPIRY}" \
     PUBLICATION_AVAILABILITY_LAG_MINUTES="${PUBLICATION_AVAILABILITY_LAG_MINUTES}" \
       bash scripts/raw_vol/enrich_raw_vol_rq2_text.sh "${DATASET_DIR}"
   fi
