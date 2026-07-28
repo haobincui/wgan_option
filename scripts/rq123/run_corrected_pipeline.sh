@@ -133,6 +133,21 @@ RAW_CONFIG="${PIPELINE_ROOT}/inputs/source_snapshot/configs/$(basename "${SOURCE
 RATE_CURVE_PATH="${PIPELINE_ROOT}/inputs/source_snapshot/market_references/$(basename "${SOURCE_RATE_CURVE}")"
 EVENT_CALENDAR_PATH="${PIPELINE_ROOT}/inputs/source_snapshot/event_calendar/$(basename "${SOURCE_EVENT_CALENDAR}")"
 
+for feature_name in \
+  bow_features.xlsx \
+  bow_manifest.json \
+  bow_vocabulary.json \
+  llm_sentiment_features.xlsx \
+  llm_sentiment_manifest.json \
+  openai_sentiment_cache.jsonl
+do
+  if [[ ! -f "${FEATURE_ROOT}/${feature_name}" ]]; then
+    write_status failed input_preflight \
+      "Missing frozen text feature artifact: ${FEATURE_ROOT}/${feature_name}"
+    exit 1
+  fi
+done
+
 if ! is_done corrected_dataset; then
   write_status running corrected_dataset "Build and audit corrected raw-vol labels"
   if [[ "${BUILD_DATASET}" == "1" && ! -f "${DATASET_DIR}/merged_vol.xlsx" ]]; then
