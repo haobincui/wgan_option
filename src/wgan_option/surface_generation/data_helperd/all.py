@@ -789,6 +789,7 @@ def _build_resolved_config_payload(args: argparse.Namespace) -> Dict[str, Any]:
         "date_column",
         "time_column",
         "source_timezone",
+        "publication_availability_lag_minutes",
         "max_target_datetimes",
     )
     for key in optional_keys:

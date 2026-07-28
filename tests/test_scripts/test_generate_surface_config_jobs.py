@@ -15,6 +15,7 @@ if str(SRC_DIR) not in sys.path:
 import scripts.generate_surface.main as surface_main  # noqa: E402
 from wgan_option.surface_generation.common.config_utils import load_yaml_mapping  # noqa: E402
 from wgan_option.surface_generation.data_helperd.all import (  # noqa: E402
+    _build_resolved_config_payload,
     _load_generate_surface_config,
     _parse_args as parse_generate_surface_args,
 )
@@ -367,6 +368,13 @@ class TestGenerateSurfaceConfigParsing(unittest.TestCase):
             self.assertEqual(args.max_target_datetimes, 12)
             self.assertEqual(args.window_minutes, 9)
             self.assertEqual(args.calibration_workers, 6)
+            resolved = _build_resolved_config_payload(args)
+            self.assertEqual(
+                resolved["surface_builder"]["generate_surface"][
+                    "publication_availability_lag_minutes"
+                ],
+                2,
+            )
 
 
 if __name__ == "__main__":
