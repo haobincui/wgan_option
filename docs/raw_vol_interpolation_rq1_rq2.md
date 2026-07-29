@@ -99,10 +99,25 @@ Single dataset build:
 ```bash
 ENV_NAME=py312 \
 RUN_TS=raw_vol_rq_YYYYMMDD_HHMMSS \
-WINDOW_MINUTES=3 \
-MIN_STRIKES_PER_EXPIRY=3 \
+WINDOW_MINUTES=5 \
+MIN_STRIKES_PER_EXPIRY=2 \
 bash scripts/raw_vol/prepare_raw_vol_dataset.sh
 ```
+
+The paper-facing raw-vol dataset uses a bounded fallback policy:
+
+```text
+option_filter_mode = otm_preferred_itm_fallback
+max_itm_moneyness_distance = 0.05
+```
+
+For each maturity/strike, valid OTM observations take precedence. An ITM
+observation is eligible only when `abs(strike / futures - 1) <= 0.05` and no
+valid OTM observation exists at that strike. Every maturity containing ITM
+fallback points must retain at least one OTM strike, and the number of ITM
+fallback strikes cannot exceed the number of OTM strikes. Black-76 price
+bounds, the 60-second last-prior futures constraint, positive-volume
+weighting, and the pre-calibration IV cap remain unchanged.
 
 Coverage scan:
 
@@ -305,3 +320,78 @@ data/processed/raw-excel/<raw_run>/raw_vol_dataset_validation.json
 ```
 
 and keep it separate from the SVI-vol sample count.
+
+## Relaxed News-to-Market Alignment
+
+The strict dataset uses the Factiva availability minute as the exact forecast
+origin. The relaxed dataset preserves the same five-minute forecasting
+semantics while allowing a news item to wait for the next complete market
+surface pair:
+
+```text
+current surface window = [origin - 5min, origin)
+target surface window  = [origin, origin + 5min)
+
+origin = earliest valid pair origin satisfying:
+news_available_time <= origin <= news_available_time + 72h
+```
+
+Classification:
+
+```text
+shift = 0 minutes       -> exact
+shift = 1..15 minutes   -> intraday_shift
+shift = 16..4320 minutes -> session_shift
+```
+
+An origin before news availability is invalid. A market origin is valid only
+when raw-vol surfaces exist at both `origin` and `origin + 5min`. Multiple
+articles can map to one pair; downstream `surface_pair` sampling deduplicates
+articles by `ArticleID` and applies the existing equal-weight mean-L2 text
+pooling. One article is never assigned to multiple pairs.
+
+Candidate anchors are constructed only from raw option observations with
+positive price and volume. Futures-only minutes and invalid option rows cannot
+create calibration jobs, although futures trades within an option-triggered
+five-minute window remain available for the Black-76 underlying match.
+
+The reusable index is stored under:
+
+```text
+data/processed/raw-market-index/<index_id>/
+  market_surface_index.sqlite
+  market_surface_audit.csv
+  precalibration_audit.csv
+  valid_5m_pair_index.csv
+  source_manifest.csv
+```
+
+The aligned dataset is stored separately from strict outputs:
+
+```text
+data/processed/raw-excel-relaxed/<run_ts>/
+  news_market_alignment.csv
+  unmatched_news.csv
+  alignment_coverage_summary.csv
+  surface-raw-excel.json
+  surface-raw-excel-precalib-points.csv
+  merged_vol.xlsx
+  merged_vol_rq2_text.xlsx
+  validation_summary.json
+```
+
+Training is blocked unless the relaxed `gan_input_ready` sheet increases both
+article-row coverage and unique surface-pair coverage relative to the strict
+baseline. Main tables must report `exact`, `intraday_shift`, and
+`session_shift` strata because cross-session news age is a different economic
+regime even though all rows use the same fixed five-minute target horizon.
+
+Background run:
+
+```bash
+GPU_IDS="0 1" RUNS_PER_GPU=2 \
+bash scripts/rq123/start_relaxed_time_pipeline_background.sh
+```
+
+Set `RUN_DOWNSTREAM=0` to build and validate only the index/workbook before
+starting RQ1-RQ3 training.

@@ -487,6 +487,83 @@ class TestMergeVol(unittest.TestCase):
             self.assertEqual(gan_ready.loc[0, "target_snapshot_time_utc"], "2022-12-30T13:33:00Z")
             self.assertEqual(int(gan_ready.loc[0, "training_candidate_flag"]), 1)
 
+    def test_alignment_csv_replaces_exact_news_snapshot_keys_and_is_audited(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            interpolated_atm_iv = math.sqrt((0.24 ** 2 + 0.26 ** 2) / 2.0)
+            xlsx_path, result_dir = self._write_model_payload_fixture_files(
+                tmpdir,
+                surface_model="raw",
+                surface_params={
+                    "business_days": [30],
+                    "percent_strikes": [[0.9, 1.1]],
+                    "implied_vols": [[0.24, 0.26]],
+                },
+                implied_vol=interpolated_atm_iv,
+            )
+            json_path = result_dir / "surface-raw-all.json"
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+            sides = next(iter(payload.values()))
+            sides["backward"]["snapshot_time_utc"] = "2022-12-30T13:40:00Z"
+            sides["forward"]["snapshot_time_utc"] = "2022-12-30T13:45:00Z"
+            json_path.write_text(
+                json.dumps({"2022-12-30T13:40:00Z": sides}),
+                encoding="utf-8",
+            )
+            csv_path = result_dir / "surface-raw-all-precalib-points.csv"
+            points = pd.read_csv(csv_path)
+            points.loc[0, "calibration_datetime_utc"] = "2022-12-30T13:40:00Z"
+            points.loc[1, "calibration_datetime_utc"] = "2022-12-30T13:45:00Z"
+            points.to_csv(csv_path, index=False)
+
+            alignment_path = Path(tmpdir) / "alignment.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "news_row_id": 1,
+                        "has_match": 1,
+                        "news_available_time_utc": "2022-12-30T13:28:00Z",
+                        "effective_origin_utc": "2022-12-30T13:40:00Z",
+                        "target_anchor_utc": "2022-12-30T13:45:00Z",
+                        "origin_shift_minutes": 12,
+                        "alignment_type": "intraday_shift",
+                        "matching_rank": 1,
+                        "collision_count": 1,
+                        "news_cluster_id": "surface_pair_20221230T1340Z",
+                        "current_window_start_utc": "2022-12-30T13:35:00Z",
+                        "current_window_end_utc": "2022-12-30T13:40:00Z",
+                        "target_window_start_utc": "2022-12-30T13:40:00Z",
+                        "target_window_end_utc": "2022-12-30T13:45:00Z",
+                        "original_news_quarter": "2022Q4",
+                        "effective_origin_quarter": "2022Q4",
+                    }
+                ]
+            ).to_csv(alignment_path, index=False)
+
+            workbook = merge_vol.build_workbook_frames(
+                result_dir,
+                news_xlsx_path=xlsx_path,
+                source_timezone="America/New_York",
+                offset_minutes=5,
+                alignment_csv_path=alignment_path,
+            )
+            audit = workbook["news_surface_pair_audit"].iloc[0]
+            gan = workbook["gan_input_ready"].iloc[0]
+            self.assertEqual(
+                audit["current_snapshot_time_utc"],
+                "2022-12-30T13:40:00Z",
+            )
+            self.assertEqual(
+                audit["target_snapshot_time_utc"],
+                "2022-12-30T13:45:00Z",
+            )
+            self.assertEqual(audit["alignment_type"], "intraday_shift")
+            self.assertEqual(int(audit["origin_shift_minutes"]), 12)
+            self.assertEqual(gan["news_alignment_mode"], "forward_valid_pair")
+            self.assertEqual(
+                gan["effective_origin_utc"],
+                "2022-12-30T13:40:00Z",
+            )
+
     def test_build_workbook_frames_supports_model_aware_sabr_payload(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             xlsx_path, result_dir = self._write_model_payload_fixture_files(

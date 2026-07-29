@@ -56,6 +56,23 @@ PAIR_AUDIT_SHEET = "news_surface_pair_audit"
 SIDE_DETAIL_SHEET = "surface_side_detail"
 GAN_SHEET = "gan_input_ready"
 
+ALIGNMENT_AUDIT_HEADERS = [
+    "news_alignment_mode",
+    "news_available_time_utc",
+    "effective_origin_utc",
+    "origin_shift_minutes",
+    "alignment_type",
+    "matching_rank",
+    "collision_count",
+    "news_cluster_id",
+    "current_window_start_utc",
+    "current_window_end_utc",
+    "target_window_start_utc",
+    "target_window_end_utc",
+    "original_news_quarter",
+    "effective_origin_quarter",
+]
+
 PAIR_AUDIT_HEADERS = [
     "sample_id",
     "news_row_id",
@@ -68,6 +85,7 @@ PAIR_AUDIT_HEADERS = [
     "publication_timestamp_utc",
     "publication_availability_lag_minutes",
     "news_timestamp_utc",
+    *ALIGNMENT_AUDIT_HEADERS,
     "current_snapshot_time_utc",
     "target_snapshot_time_utc",
     "current_json_target_timestamp_utc",
@@ -164,6 +182,7 @@ GAN_HEADERS = [
     "publication_timestamp_utc",
     "publication_availability_lag_minutes",
     "news_timestamp_utc",
+    *ALIGNMENT_AUDIT_HEADERS,
     "current_snapshot_time_utc",
     "target_snapshot_time_utc",
     "surface_model",
@@ -299,7 +318,12 @@ def _pair_quality_label(current_metrics: Mapping[str, Any], target_metrics: Mapp
     return "usable", ""
 
 
-def _base_pair_fields(news_row: pd.Series) -> Dict[str, Any]:
+def _base_pair_fields(
+    news_row: pd.Series,
+    alignment_row: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    alignment = alignment_row or {}
+    has_alignment = bool(alignment)
     return {
         "sample_id": f"news_{int(news_row['news_row_id'])}",
         "news_row_id": int(news_row["news_row_id"]),
@@ -322,6 +346,51 @@ def _base_pair_fields(news_row: pd.Series) -> Dict[str, Any]:
             news_row.get("publication_availability_lag_minutes", 0)
         ),
         "news_timestamp_utc": normalize_optional_text(news_row.get("timestamp_utc", "")),
+        "news_alignment_mode": (
+            "forward_valid_pair" if has_alignment else "exact"
+        ),
+        "news_available_time_utc": normalize_optional_text(
+            alignment.get(
+                "news_available_time_utc",
+                news_row.get("timestamp_utc", ""),
+            )
+        ),
+        "effective_origin_utc": normalize_optional_text(
+            alignment.get("effective_origin_utc", "")
+        ),
+        "origin_shift_minutes": coerce_optional_numeric(
+            safe_float(alignment.get("origin_shift_minutes"))
+        ),
+        "alignment_type": normalize_optional_text(
+            alignment.get("alignment_type", "exact")
+        ),
+        "matching_rank": coerce_optional_numeric(
+            safe_float(alignment.get("matching_rank"))
+        ),
+        "collision_count": coerce_optional_numeric(
+            safe_float(alignment.get("collision_count"))
+        ),
+        "news_cluster_id": normalize_optional_text(
+            alignment.get("news_cluster_id", "")
+        ),
+        "current_window_start_utc": normalize_optional_text(
+            alignment.get("current_window_start_utc", "")
+        ),
+        "current_window_end_utc": normalize_optional_text(
+            alignment.get("current_window_end_utc", "")
+        ),
+        "target_window_start_utc": normalize_optional_text(
+            alignment.get("target_window_start_utc", "")
+        ),
+        "target_window_end_utc": normalize_optional_text(
+            alignment.get("target_window_end_utc", "")
+        ),
+        "original_news_quarter": normalize_optional_text(
+            alignment.get("original_news_quarter", "")
+        ),
+        "effective_origin_quarter": normalize_optional_text(
+            alignment.get("effective_origin_quarter", "")
+        ),
         "hd_text": normalize_optional_text(news_row.get("HD", "")),
         "lp_text": normalize_optional_text(news_row.get("LP", "")),
         "hd_embedding": normalize_optional_text(news_row.get("HD_embedding", "")),
@@ -524,6 +593,7 @@ def build_vol_workbook_frames(
     moneyness_max: float = DEFAULT_MONEYNESS_MAX,
     maturity_min_days: int = DEFAULT_MATURITY_MIN_DAYS,
     maturity_max_days: int = DEFAULT_MATURITY_MAX_DAYS,
+    alignment_csv_path: Optional[Path] = None,
 ) -> Dict[str, pd.DataFrame]:
     """Build the three-sheet paired vol-surface workbook from raw surface results."""
 
@@ -548,6 +618,54 @@ def build_vol_workbook_frames(
     )
     csv_df = load_precalib_csv(csv_path)
     json_direction_map = load_json_direction_map(json_path)
+    alignment_by_news_row_id: Dict[int, Dict[str, Any]] = {}
+    if alignment_csv_path is not None:
+        alignment_path = resolve_existing_path(
+            Path(alignment_csv_path),
+            "News-market alignment CSV",
+        )
+        alignment_df = pd.read_csv(
+            alignment_path,
+            dtype={
+                "news_available_time_utc": "object",
+                "effective_origin_utc": "object",
+                "target_anchor_utc": "object",
+            },
+            low_memory=False,
+        )
+        required_alignment_columns = {
+            "news_row_id",
+            "has_match",
+            "effective_origin_utc",
+            "target_anchor_utc",
+            "origin_shift_minutes",
+            "alignment_type",
+        }
+        missing_alignment_columns = sorted(
+            required_alignment_columns - set(alignment_df.columns)
+        )
+        if missing_alignment_columns:
+            raise ValueError(
+                "Alignment CSV is missing required columns "
+                f"{missing_alignment_columns}: {alignment_path}"
+            )
+        if alignment_df["news_row_id"].duplicated().any():
+            raise ValueError(
+                f"Alignment CSV contains duplicate news_row_id values: {alignment_path}"
+            )
+        alignment_by_news_row_id = {
+            int(row["news_row_id"]): dict(row)
+            for row in alignment_df.to_dict(orient="records")
+        }
+        missing_news_ids = sorted(
+            set(int(value) for value in news_df["news_row_id"])
+            - set(alignment_by_news_row_id)
+        )
+        if missing_news_ids:
+            raise ValueError(
+                "Alignment CSV does not cover every news row; missing "
+                f"{missing_news_ids[:10]}"
+            )
     csv_groups = {
         str(timestamp): group.to_dict(orient="records")
         for timestamp, group in csv_df.groupby("calibration_datetime_utc", dropna=False)
@@ -570,9 +688,32 @@ def build_vol_workbook_frames(
     side_rows: List[Dict[str, Any]] = []
 
     for _, news_row in news_df.iterrows():
-        base = _base_pair_fields(news_row)
-        current_snapshot = normalize_optional_text(news_row.get("timestamp_utc", "")).strip()
-        target_snapshot = normalize_optional_text(news_row.get(offset_column, "")).strip()
+        news_row_id = int(news_row["news_row_id"])
+        alignment_row = alignment_by_news_row_id.get(news_row_id)
+        base = _base_pair_fields(news_row, alignment_row)
+        if alignment_row is not None:
+            is_matched = normalize_bool(alignment_row.get("has_match"))
+            current_snapshot = (
+                normalize_optional_text(
+                    alignment_row.get("effective_origin_utc", "")
+                ).strip()
+                if is_matched
+                else ""
+            )
+            target_snapshot = (
+                normalize_optional_text(
+                    alignment_row.get("target_anchor_utc", "")
+                ).strip()
+                if is_matched
+                else ""
+            )
+        else:
+            current_snapshot = normalize_optional_text(
+                news_row.get("timestamp_utc", "")
+            ).strip()
+            target_snapshot = normalize_optional_text(
+                news_row.get(offset_column, "")
+            ).strip()
 
         current_side_row, current_metrics = _evaluate_side(
             sample_id=base["sample_id"],

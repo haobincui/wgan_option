@@ -27,7 +27,9 @@ SOURCE_EVENT_CALENDAR="${EVENT_CALENDAR_PATH:-data/reference/rq3_scheduled_macro
 SOURCE_TIMEZONE="${SOURCE_TIMEZONE:-Europe/London}"
 PUBLICATION_AVAILABILITY_LAG_MINUTES="${PUBLICATION_AVAILABILITY_LAG_MINUTES:-0}"
 WINDOW_MINUTES="${WINDOW_MINUTES:-5}"
-MIN_STRIKES_PER_EXPIRY="${MIN_STRIKES_PER_EXPIRY:-3}"
+MIN_STRIKES_PER_EXPIRY="${MIN_STRIKES_PER_EXPIRY:-2}"
+OPTION_FILTER_MODE="${OPTION_FILTER_MODE:-otm_preferred_itm_fallback}"
+MAX_ITM_MONEYNESS_DISTANCE="${MAX_ITM_MONEYNESS_DISTANCE:-0.05}"
 MIN_USABLE_PAIRS="${MIN_USABLE_PAIRS:-100}"
 WARN_USABLE_PAIRS="${WARN_USABLE_PAIRS:-1000}"
 GPU_IDS="${GPU_IDS:-0 1}"
@@ -83,6 +85,9 @@ write_status running initialize "Corrected raw-vol RQ1-RQ3 pipeline"
   printf 'source_timezone=%s\n' "${SOURCE_TIMEZONE}"
   printf 'publication_availability_lag_minutes=%s\n' \
     "${PUBLICATION_AVAILABILITY_LAG_MINUTES}"
+  printf 'option_filter_mode=%s\n' "${OPTION_FILTER_MODE}"
+  printf 'max_itm_moneyness_distance=%s\n' \
+    "${MAX_ITM_MONEYNESS_DISTANCE}"
   printf 'gpu_ids=%s\n' "${GPU_IDS}"
   printf 'runs_per_gpu=%s\n' "${RUNS_PER_GPU}"
 } >"${PIPELINE_ROOT}/inputs/run_parameters.env"
@@ -161,6 +166,8 @@ if ! is_done corrected_dataset; then
     RUN_TS="${DATASET_RUN_TS}" \
     WINDOW_MINUTES="${WINDOW_MINUTES}" \
     MIN_STRIKES_PER_EXPIRY="${MIN_STRIKES_PER_EXPIRY}" \
+    OPTION_FILTER_MODE="${OPTION_FILTER_MODE}" \
+    MAX_ITM_MONEYNESS_DISTANCE="${MAX_ITM_MONEYNESS_DISTANCE}" \
     MIN_USABLE_PAIRS="${MIN_USABLE_PAIRS}" \
     WARN_USABLE_PAIRS="${WARN_USABLE_PAIRS}" \
       bash scripts/raw_vol/prepare_raw_vol_dataset.sh

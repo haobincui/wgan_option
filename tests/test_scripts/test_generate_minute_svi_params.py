@@ -26,6 +26,7 @@ from wgan_option.surface_generation.data_helperd.all import (  # noqa: E402
     DEFAULT_EXPIRATION_TIME_UTC,
     DEFAULT_MAX_PRECALIB_IV,
     _get_ty_option_underlying_future_month_code,
+    _is_within_itm_fallback_range,
     _prepare_option_candidates,
 )
 from wgan_option.surface_generation.backend.surface_cpu.all import (  # noqa: E402
@@ -59,6 +60,7 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         spot: float = 112.5934,
         trade_ts: str = "2025-11-14T18:03:00Z",
         business_days: int = 94,
+        is_otm: bool = True,
     ) -> MinuteOptionCandidate:
         expiry_date = date(2026, 3, 31)
         return MinuteOptionCandidate(
@@ -77,6 +79,7 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
             tau=0.376,
             business_days=business_days,
             trade_ts=pd.Timestamp(trade_ts),
+            is_otm=is_otm,
         )
 
     def test_infer_file_date_range_and_target_month(self):
@@ -588,6 +591,151 @@ class TestGenerateMinuteSviParams(unittest.TestCase):
         self.assertEqual(rows_by_strike[110.0]["filter_reason"], "")
         self.assertEqual(rows_by_strike[115.0]["passes_precalib_filter"], "false")
         self.assertEqual(rows_by_strike[115.0]["filter_reason"], "implied_vol_above_cap")
+
+    def test_itm_fallback_range_includes_five_percent_boundary(self):
+        self.assertTrue(
+            _is_within_itm_fallback_range(95.0, 100.0, 0.05)
+        )
+        self.assertTrue(
+            _is_within_itm_fallback_range(105.0, 100.0, 0.05)
+        )
+        self.assertFalse(
+            _is_within_itm_fallback_range(94.99, 100.0, 0.05)
+        )
+        self.assertFalse(
+            _is_within_itm_fallback_range(105.01, 100.0, 0.05)
+        )
+
+    def test_finalize_raw_surface_uses_bounded_otm_preferred_itm_fallback(self):
+        minute_ts = pd.Timestamp("2025-11-14T18:03:00Z")
+        candidates = [
+            self._make_candidate(
+                contract_id="OTM30",
+                strike=95.0,
+                option_type=OptionType.PUT,
+                price=0.25,
+                weight=1.0,
+                spot=100.0,
+                business_days=30,
+                is_otm=True,
+            ),
+            self._make_candidate(
+                contract_id="SHADOWED30",
+                strike=95.0,
+                option_type=OptionType.CALL,
+                price=5.25,
+                weight=1.0,
+                spot=100.0,
+                business_days=30,
+                is_otm=False,
+            ),
+            self._make_candidate(
+                contract_id="FALLBACK30",
+                strike=98.0,
+                option_type=OptionType.CALL,
+                price=2.25,
+                weight=1.0,
+                spot=100.0,
+                business_days=30,
+                is_otm=False,
+            ),
+            self._make_candidate(
+                contract_id="CAPPED30",
+                strike=97.0,
+                option_type=OptionType.CALL,
+                price=3.25,
+                weight=1.0,
+                spot=100.0,
+                business_days=30,
+                is_otm=False,
+            ),
+            self._make_candidate(
+                contract_id="NOANCHOR60A",
+                strike=98.0,
+                option_type=OptionType.CALL,
+                price=2.25,
+                weight=1.0,
+                spot=100.0,
+                business_days=60,
+                is_otm=False,
+            ),
+            self._make_candidate(
+                contract_id="NOANCHOR60B",
+                strike=99.0,
+                option_type=OptionType.CALL,
+                price=1.25,
+                weight=1.0,
+                spot=100.0,
+                business_days=60,
+                is_otm=False,
+            ),
+        ]
+        precalib_buffer = io.StringIO()
+        precalib_writer = csv.DictWriter(
+            precalib_buffer,
+            fieldnames=PRECALIB_CSV_HEADERS,
+        )
+        precalib_writer.writeheader()
+        stats = defaultdict(int)
+        results = {}
+
+        _finalize_minute_surface(
+            minute_ts=minute_ts,
+            valuation_date=minute_ts.date(),
+            candidates=candidates,
+            implied_vols=[0.20, 0.21, 0.22, 0.23, 0.24, 0.25],
+            min_strikes_per_expiry=2,
+            min_expiries_per_minute=1,
+            max_precalib_iv=DEFAULT_MAX_PRECALIB_IV,
+            vol_daycount=self._vol_daycount(),
+            results=results,
+            stats=stats,
+            precalib_writer=precalib_writer,
+            surface_model="raw",
+            option_filter_mode="otm_preferred_itm_fallback",
+            max_itm_moneyness_distance=0.05,
+        )
+
+        rows = {
+            row["contract_id"]: row
+            for row in csv.DictReader(
+                io.StringIO(precalib_buffer.getvalue())
+            )
+        }
+        self.assertEqual(rows["OTM30"]["surface_input_role"], "otm")
+        self.assertEqual(
+            rows["FALLBACK30"]["surface_input_role"],
+            "itm_fallback",
+        )
+        self.assertEqual(
+            rows["SHADOWED30"]["filter_reason"],
+            "itm_shadowed_by_otm",
+        )
+        self.assertEqual(
+            rows["CAPPED30"]["filter_reason"],
+            "itm_fallback_cap",
+        )
+        self.assertEqual(
+            rows["NOANCHOR60A"]["filter_reason"],
+            "itm_no_otm_anchor",
+        )
+        self.assertEqual(
+            rows["NOANCHOR60B"]["filter_reason"],
+            "itm_no_otm_anchor",
+        )
+        params = results[
+            "2025-11-14T18:03:00Z"
+        ]["surface_params"]
+        self.assertEqual(params["business_days"], [30])
+        self.assertEqual(params["percent_strikes"], [[0.95, 0.98]])
+        audit = results[
+            "2025-11-14T18:03:00Z"
+        ]["surface_audit"]
+        self.assertEqual(audit["selected_otm_observations"], 1)
+        self.assertEqual(
+            audit["selected_itm_fallback_observations"],
+            1,
+        )
 
     def test_finalize_minute_surface_disables_iv_cap_when_threshold_is_nonpositive(self):
         minute_ts = pd.Timestamp("2025-11-14T18:03:00Z")

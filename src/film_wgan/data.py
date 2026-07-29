@@ -34,6 +34,9 @@ from .text_transform import (
 )
 
 _VOL_FLOOR = 1e-4
+_FORECAST_HORIZON_MINUTES = 5
+_INTRADAY_ALIGNMENT_MAX_MINUTES = 15
+_FORWARD_ALIGNMENT_MAX_MINUTES = 72 * 60
 
 
 def _parse_serialized_list(value: Any) -> list[float]:
@@ -181,6 +184,108 @@ def _canonical_timestamp(value: Any) -> str:
     else:
         timestamp = timestamp.tz_convert("UTC")
     return timestamp.isoformat().replace("+00:00", "Z")
+
+
+def _validate_sample_timing(sample: FilmWGANSample) -> None:
+    """Validate strict or explicitly forward-aligned news/surface timing."""
+
+    news_timestamp = pd.Timestamp(_canonical_timestamp(sample.timestamp))
+    current_timestamp = pd.Timestamp(
+        _canonical_timestamp(sample.current_snapshot_time_utc)
+    )
+    target_timestamp = pd.Timestamp(
+        _canonical_timestamp(sample.target_snapshot_time_utc)
+    )
+    expected_horizon = pd.Timedelta(minutes=_FORECAST_HORIZON_MINUTES)
+    if target_timestamp - current_timestamp != expected_horizon:
+        raise ValueError(
+            f"Sample {sample.sample_id} must forecast exactly "
+            f"{_FORECAST_HORIZON_MINUTES} minutes: "
+            f"{_canonical_timestamp(sample.current_snapshot_time_utc)} -> "
+            f"{_canonical_timestamp(sample.target_snapshot_time_utc)}."
+        )
+
+    alignment_mode = str(
+        sample.metadata.get("news_alignment_mode", "exact")
+    ).strip().lower()
+    if alignment_mode in {"", "nan", "none"}:
+        alignment_mode = "exact"
+    if alignment_mode != "forward_valid_pair":
+        if news_timestamp != current_timestamp:
+            raise ValueError(
+                f"Sample {sample.sample_id} violates news=current timestamp: "
+                f"{_canonical_timestamp(sample.timestamp)} != "
+                f"{_canonical_timestamp(sample.current_snapshot_time_utc)}."
+            )
+        return
+
+    available_timestamp = pd.Timestamp(
+        _canonical_timestamp(
+            sample.metadata.get("news_available_time_utc", sample.timestamp)
+        )
+    )
+    effective_origin = pd.Timestamp(
+        _canonical_timestamp(
+            sample.metadata.get(
+                "effective_origin_utc",
+                sample.current_snapshot_time_utc,
+            )
+        )
+    )
+    if news_timestamp != available_timestamp:
+        raise ValueError(
+            f"Sample {sample.sample_id} news timestamp does not match "
+            "news_available_time_utc."
+        )
+    if effective_origin != current_timestamp:
+        raise ValueError(
+            f"Sample {sample.sample_id} effective origin does not match "
+            "current_snapshot_time_utc."
+        )
+
+    shift_minutes = (
+        current_timestamp - available_timestamp
+    ).total_seconds() / 60.0
+    if shift_minutes < 0:
+        raise ValueError(
+            f"Sample {sample.sample_id} has an origin before news availability."
+        )
+    if shift_minutes > _FORWARD_ALIGNMENT_MAX_MINUTES:
+        raise ValueError(
+            f"Sample {sample.sample_id} exceeds the "
+            f"{_FORWARD_ALIGNMENT_MAX_MINUTES}-minute forward alignment limit."
+        )
+
+    recorded_shift = pd.to_numeric(
+        pd.Series([sample.metadata.get("origin_shift_minutes")]),
+        errors="coerce",
+    ).iloc[0]
+    if pd.isna(recorded_shift) or not np.isclose(
+        float(recorded_shift),
+        shift_minutes,
+        atol=1e-6,
+        rtol=0.0,
+    ):
+        raise ValueError(
+            f"Sample {sample.sample_id} origin_shift_minutes does not match "
+            "the timestamp-derived shift."
+        )
+
+    if shift_minutes == 0:
+        expected_alignment_type = "exact"
+    elif shift_minutes <= _INTRADAY_ALIGNMENT_MAX_MINUTES:
+        expected_alignment_type = "intraday_shift"
+    else:
+        expected_alignment_type = "session_shift"
+    recorded_alignment_type = str(
+        sample.metadata.get("alignment_type", "")
+    ).strip().lower()
+    if recorded_alignment_type != expected_alignment_type:
+        raise ValueError(
+            f"Sample {sample.sample_id} alignment_type="
+            f"{recorded_alignment_type!r} does not match "
+            f"{expected_alignment_type!r}."
+        )
 
 
 def workbook_sha256(path: str | Path) -> str:
@@ -419,7 +524,64 @@ def load_film_wgan_samples(config: FilmWGANTrainConfig | FilmWGANSampleConfig) -
                     "target_weighted_iv_rmse": getattr(row, "target_weighted_iv_rmse", None),
                     "event_group": getattr(row, "event_group", ""),
                     "has_news": getattr(row, "has_news", ""),
+                    "news_alignment_mode": getattr(
+                        row,
+                        "news_alignment_mode",
+                        "exact",
+                    ),
+                    "news_available_time_utc": getattr(
+                        row,
+                        "news_available_time_utc",
+                        getattr(row, "news_timestamp_utc", ""),
+                    ),
+                    "effective_origin_utc": getattr(
+                        row,
+                        "effective_origin_utc",
+                        getattr(row, "current_snapshot_time_utc", ""),
+                    ),
+                    "origin_shift_minutes": getattr(
+                        row,
+                        "origin_shift_minutes",
+                        0,
+                    ),
+                    "alignment_type": getattr(
+                        row,
+                        "alignment_type",
+                        "exact",
+                    ),
+                    "matching_rank": getattr(row, "matching_rank", ""),
+                    "collision_count": getattr(row, "collision_count", 1),
                     "news_cluster_id": getattr(row, "news_cluster_id", ""),
+                    "current_window_start_utc": getattr(
+                        row,
+                        "current_window_start_utc",
+                        "",
+                    ),
+                    "current_window_end_utc": getattr(
+                        row,
+                        "current_window_end_utc",
+                        "",
+                    ),
+                    "target_window_start_utc": getattr(
+                        row,
+                        "target_window_start_utc",
+                        "",
+                    ),
+                    "target_window_end_utc": getattr(
+                        row,
+                        "target_window_end_utc",
+                        "",
+                    ),
+                    "original_news_quarter": getattr(
+                        row,
+                        "original_news_quarter",
+                        "",
+                    ),
+                    "effective_origin_quarter": getattr(
+                        row,
+                        "effective_origin_quarter",
+                        "",
+                    ),
                     "quiet_buffer_minutes": getattr(row, "quiet_buffer_minutes", ""),
                     "quiet_grid_minutes": getattr(row, "quiet_grid_minutes", ""),
                     "has_text": has_text,
@@ -613,20 +775,7 @@ def _news_lineage_rows(
             raise ValueError(
                 f"LP embedding lineage mismatch for {sample.sample_id} against 1-based news row {news_row_id}."
             )
-        current_timestamp = _canonical_timestamp(sample.current_snapshot_time_utc)
-        news_timestamp = _canonical_timestamp(sample.timestamp)
-        target_timestamp = pd.Timestamp(_canonical_timestamp(sample.target_snapshot_time_utc))
-        current_value = pd.Timestamp(current_timestamp)
-        if news_timestamp != current_timestamp:
-            raise ValueError(
-                f"Sample {sample.sample_id} violates news=current timestamp: "
-                f"{news_timestamp} != {current_timestamp}."
-            )
-        if target_timestamp - current_value != pd.Timedelta(minutes=5):
-            raise ValueError(
-                f"Sample {sample.sample_id} must forecast exactly five minutes: "
-                f"{current_timestamp} -> {_canonical_timestamp(sample.target_snapshot_time_utc)}."
-            )
+        _validate_sample_timing(sample)
         rows.append(
             {
                 "sample": sample,
@@ -809,6 +958,37 @@ def aggregate_surface_pair_samples(
                 pooled_text.tobytes(order="C")
             ).hexdigest()
         metadata = dict(reference.metadata)
+        source_alignment_types = [
+            str(sample.metadata.get("alignment_type", "exact") or "exact")
+            for sample in members
+        ]
+        source_shift_minutes = [
+            float(value)
+            for value in (
+                pd.to_numeric(
+                    pd.Series(
+                        [
+                            sample.metadata.get("origin_shift_minutes", 0)
+                            for sample in members
+                        ]
+                    ),
+                    errors="coerce",
+                )
+                .dropna()
+                .tolist()
+            )
+        ]
+        minimum_shift = min(source_shift_minutes) if source_shift_minutes else 0.0
+        if minimum_shift <= 0.0:
+            pair_alignment_type = "exact"
+        elif minimum_shift <= 15.0:
+            pair_alignment_type = "intraday_shift"
+        else:
+            pair_alignment_type = "session_shift"
+        alignment_type_counts = {
+            alignment_type: source_alignment_types.count(alignment_type)
+            for alignment_type in sorted(set(source_alignment_types))
+        }
         metadata.update(
             {
                 "source_sample_ids": source_sample_ids,
@@ -820,6 +1000,21 @@ def aggregate_surface_pair_samples(
                 "pair_text_feature_path": pair_feature_path,
                 "pair_text_feature_sha256": feature_sha256,
                 "has_text": has_text,
+                "alignment_type": pair_alignment_type,
+                "source_alignment_types": source_alignment_types,
+                "alignment_type_counts": alignment_type_counts,
+                "origin_shift_minutes": minimum_shift,
+                "origin_shift_minutes_min": minimum_shift,
+                "origin_shift_minutes_max": (
+                    max(source_shift_minutes)
+                    if source_shift_minutes
+                    else 0.0
+                ),
+                "origin_shift_minutes_mean": (
+                    float(np.mean(source_shift_minutes))
+                    if source_shift_minutes
+                    else 0.0
+                ),
                 "text_lineage_mode": str(config.text_lineage_mode).strip().lower(),
                 "excluded_source_sample_ids": (
                     [str(row["sample"].sample_id) for row in excluded_rows]

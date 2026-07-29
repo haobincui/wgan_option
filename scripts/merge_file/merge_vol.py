@@ -44,6 +44,15 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--news-xlsx", default=str(DEFAULT_NEWS_XLSX_PATH), help="Path to the news embedding workbook.")
     parser.add_argument(
+        "--alignment-csv",
+        default="",
+        help=(
+            "Optional news-to-market alignment CSV. When provided, current "
+            "and target snapshots come from effective_origin_utc and "
+            "target_anchor_utc instead of exact publication-time keys."
+        ),
+    )
+    parser.add_argument(
         "--source-timezone",
         default=None,
         help=(
@@ -85,6 +94,11 @@ def main(argv: Optional[Iterable[str]] = None) -> Path:
         moneyness_max=float(args.moneyness_max),
         maturity_min_days=int(args.maturity_min_days),
         maturity_max_days=int(args.maturity_max_days),
+        alignment_csv_path=(
+            Path(args.alignment_csv).expanduser()
+            if str(args.alignment_csv).strip()
+            else None
+        ),
     )
     output_path = input_dir / DEFAULT_OUTPUT_NAME
     write_workbook(output_path, workbook_frames)

@@ -1420,12 +1420,15 @@ def _dm_hac_daily(
 
 
 def _validate_model_matching(samples: pd.DataFrame) -> None:
+    if "alignment_type" not in samples.columns:
+        samples["alignment_type"] = "exact"
     key_columns = ["fold", "seed", "surface_pair_id"]
     expected_keys: pd.DataFrame | None = None
     reference: pd.DataFrame | None = None
     audit_columns = [
         "current_snapshot_time_utc",
         "target_snapshot_time_utc",
+        "alignment_type",
         "current_mae",
         "current_atm_short_pure_mae",
         "current_supported_shortest_atm_abs_err",
@@ -1448,7 +1451,7 @@ def _validate_model_matching(samples: pd.DataFrame) -> None:
         for column in audit_columns:
             if column not in reference or column not in candidate:
                 raise ValueError(f"Missing matching audit column: {column}")
-            if column.endswith("_utc"):
+            if column.endswith("_utc") or column == "alignment_type":
                 if not (
                     reference[column].astype(str).to_numpy()
                     == candidate[column].astype(str).to_numpy()
@@ -1473,6 +1476,9 @@ def _validate_model_matching(samples: pd.DataFrame) -> None:
 
 
 def _build_pairwise_differences(samples: pd.DataFrame) -> pd.DataFrame:
+    if "alignment_type" not in samples.columns:
+        samples = samples.copy()
+        samples["alignment_type"] = "exact"
     rows: list[pd.DataFrame] = []
     for focal, baseline, contrast in (
         *PRIMARY_CONTRASTS,
@@ -1491,11 +1497,18 @@ def _build_pairwise_differences(samples: pd.DataFrame) -> pd.DataFrame:
             baseline_frame
         ):
             raise ValueError(f"Incomplete pair matching for {contrast}.")
+        if not merged["alignment_type_focal"].equals(
+            merged["alignment_type_baseline"]
+        ):
+            raise ValueError(
+                f"Alignment-stratum matching failed for {contrast}."
+            )
         for metric in POINT_METRICS:
             frame = merged[
                 [
                     *keys,
                     "current_snapshot_time_utc_focal",
+                    "alignment_type_focal",
                     f"{metric}_focal",
                     f"{metric}_baseline",
                 ]
@@ -1503,6 +1516,7 @@ def _build_pairwise_differences(samples: pd.DataFrame) -> pd.DataFrame:
             frame.columns = [
                 *keys,
                 "current_snapshot_time_utc",
+                "alignment_type",
                 "focal_error",
                 "baseline_error",
             ]
@@ -1805,6 +1819,11 @@ def build_comparison(args: argparse.Namespace) -> Path:
         frame["variant"] = str(record.variant)
         rows.append(frame)
     samples = pd.concat(rows, ignore_index=True)
+    if "alignment_type" not in samples.columns:
+        samples["alignment_type"] = "exact"
+    samples["alignment_type"] = (
+        samples["alignment_type"].fillna("exact").astype(str)
+    )
     expected = (
         len(MODEL_VARIANTS)
         * len(SEEDS)
@@ -1842,6 +1861,25 @@ def build_comparison(args: argparse.Namespace) -> Path:
         root / "final_tables/development_rq2_model_overall_metrics.csv",
         index=False,
     )
+    alignment_model_overall = (
+        samples.groupby(
+            ["model", "variant", "fold", "seed", "alignment_type"],
+            as_index=False,
+        )
+        .agg(
+            n_pairs=("surface_pair_id", "size"),
+            surface_mae=("surface_mae", "mean"),
+            short_atm_mae=("short_atm_mae", "mean"),
+            supported_shortest_atm_abs_err=(
+                "supported_shortest_atm_abs_err",
+                "mean",
+            ),
+        )
+    )
+    alignment_model_overall.to_csv(
+        root / "comparisons/development_rq2_alignment_stratum_metrics.csv",
+        index=False,
+    )
 
     differences = _build_pairwise_differences(samples)
     differences.to_csv(
@@ -1860,6 +1898,67 @@ def build_comparison(args: argparse.Namespace) -> Path:
     )
     bootstrap.to_csv(
         root / "comparisons/development_rq2_cluster_bootstrap_ci.csv",
+        index=False,
+    )
+    alignment_rows: list[dict[str, Any]] = []
+    for keys, group in differences.groupby(
+        [
+            "contrast",
+            "focal_model",
+            "baseline_model",
+            "metric",
+            "alignment_type",
+        ],
+        sort=True,
+    ):
+        contrast, focal, baseline, metric, alignment_type = keys
+        seed_average = (
+            group.groupby(
+                [
+                    "fold",
+                    "surface_pair_id",
+                    "current_snapshot_time_utc",
+                    "trading_day",
+                ],
+                as_index=False,
+            )["difference"]
+            .mean()
+        )
+        stable_offset = int(
+            hashlib.sha256(
+                f"{contrast}|{metric}|{alignment_type}".encode()
+            ).hexdigest()[:8],
+            16,
+        )
+        inference = _cluster_bootstrap(
+            seed_average,
+            iterations=int(args.bootstrap_iterations),
+            seed=int(args.bootstrap_seed) + stable_offset,
+        )
+        alignment_rows.append(
+            {
+                "contrast": contrast,
+                "focal_model": focal,
+                "baseline_model": baseline,
+                "metric": metric,
+                "alignment_type": alignment_type,
+                "difference_direction": "baseline_minus_focal",
+                "positive_means_focal_better": True,
+                "pair_count": int(len(seed_average)),
+                "trading_day_clusters": int(
+                    seed_average["trading_day"].nunique()
+                ),
+                **inference,
+            }
+        )
+    alignment_inference = pd.DataFrame(alignment_rows)
+    alignment_inference.to_csv(
+        root
+        / "comparisons/development_rq2_alignment_stratum_contrasts.csv",
+        index=False,
+    )
+    alignment_inference.to_csv(
+        root / "final_tables/development_rq2_alignment_strata.csv",
         index=False,
     )
     dm_tests.to_csv(

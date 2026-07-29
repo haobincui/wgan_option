@@ -1396,6 +1396,11 @@ def build_comparison(args: argparse.Namespace) -> Path:
         summary["variant"] = str(record.variant)
         rows.append(summary)
     samples = pd.concat(rows, ignore_index=True)
+    if "alignment_type" not in samples.columns:
+        samples["alignment_type"] = "exact"
+    samples["alignment_type"] = (
+        samples["alignment_type"].fillna("exact").astype(str)
+    )
     duplicate_audits = []
     duplicate_columns = [
         "fold",
@@ -1434,6 +1439,23 @@ def build_comparison(args: argparse.Namespace) -> Path:
         "not_reported_for_irregular_raw_support"
     )
     model_summary.to_csv(root / "comparisons/development_model_metrics_by_fold_seed.csv", index=False)
+    alignment_model_summary = (
+        samples.groupby(
+            ["variant", "fold", "seed", "alignment_type"],
+            as_index=False,
+        )
+        .agg(
+            n_pairs=("surface_pair_id", "size"),
+            **{
+                metric: (metric, "mean")
+                for metric in metric_columns
+            },
+        )
+    )
+    alignment_model_summary.to_csv(
+        root / "comparisons/development_alignment_stratum_metrics.csv",
+        index=False,
+    )
 
     difference_rows = []
     for focal, baseline, contrast in CONTRASTS:
@@ -1443,6 +1465,12 @@ def build_comparison(args: argparse.Namespace) -> Path:
         merged = left.merge(right, on=keys, suffixes=("_focal", "_baseline"), validate="one_to_one")
         if len(merged) != len(left) or len(merged) != len(right):
             raise ValueError(f"Pair matching failed for {contrast}.")
+        if not merged["alignment_type_focal"].equals(
+            merged["alignment_type_baseline"]
+        ):
+            raise ValueError(
+                f"Alignment-stratum matching failed for {contrast}."
+            )
         for metric in POINT_METRICS:
             for row in merged.itertuples(index=False):
                 difference_rows.append(
@@ -1454,6 +1482,10 @@ def build_comparison(args: argparse.Namespace) -> Path:
                         "seed": int(getattr(row, "seed")),
                         "surface_pair_id": getattr(row, "surface_pair_id"),
                         "current_snapshot_time_utc": getattr(row, "current_snapshot_time_utc_focal"),
+                        "alignment_type": getattr(
+                            row,
+                            "alignment_type_focal",
+                        ),
                         "metric": metric,
                         "focal_error": float(getattr(row, f"{metric}_focal")),
                         "baseline_error": float(getattr(row, f"{metric}_baseline")),
@@ -1608,6 +1640,79 @@ def build_comparison(args: argparse.Namespace) -> Path:
             bootstrap.loc[index_list, "p_two_sided"].tolist()
         )
     bootstrap.to_csv(root / "comparisons/development_cluster_bootstrap_ci.csv", index=False)
+    alignment_bootstrap_rows = []
+    for (
+        contrast,
+        focal,
+        baseline,
+        metric,
+        alignment_type,
+    ), group in differences.groupby(
+        [
+            "contrast",
+            "focal_variant",
+            "baseline_variant",
+            "metric",
+            "alignment_type",
+        ],
+        sort=True,
+    ):
+        seed_average = (
+            group.groupby(
+                [
+                    "fold",
+                    "surface_pair_id",
+                    "current_snapshot_time_utc",
+                    "trading_day",
+                ],
+                as_index=False,
+            )["difference"]
+            .mean()
+        )
+        stable_offset = int(
+            hashlib.sha256(
+                f"{contrast}|{metric}|{alignment_type}".encode()
+            ).hexdigest()[:8],
+            16,
+        )
+        mean_diff, ci_low, ci_high, p_two = _cluster_bootstrap(
+            seed_average,
+            iterations=int(args.bootstrap_iterations),
+            seed=int(args.bootstrap_seed) + stable_offset,
+        )
+        alignment_bootstrap_rows.append(
+            {
+                "contrast": contrast,
+                "focal_variant": focal,
+                "baseline_variant": baseline,
+                "metric": metric,
+                "alignment_type": alignment_type,
+                "difference_direction": "baseline_minus_focal",
+                "positive_means_focal_better": True,
+                "pair_count": int(len(seed_average)),
+                "trading_day_clusters": int(
+                    seed_average["trading_day"].nunique()
+                ),
+                "mean_difference": mean_diff,
+                "ci_95_lower": ci_low,
+                "ci_95_upper": ci_high,
+                "p_two_sided": p_two,
+                "p_one_sided_focal_better": (
+                    p_two / 2.0
+                    if mean_diff > 0.0
+                    else 1.0 - p_two / 2.0
+                ),
+            }
+        )
+    alignment_bootstrap = pd.DataFrame(alignment_bootstrap_rows)
+    alignment_bootstrap.to_csv(
+        root / "comparisons/development_alignment_stratum_contrasts.csv",
+        index=False,
+    )
+    alignment_bootstrap.to_csv(
+        root / "final_tables/development_rq1_alignment_strata.csv",
+        index=False,
+    )
     pd.DataFrame(dm_rows).to_csv(
         root / "comparisons/development_dm_hac_tests.csv",
         index=False,

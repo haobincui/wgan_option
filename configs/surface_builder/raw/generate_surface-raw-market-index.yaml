@@ -5,13 +5,13 @@ surface_builder:
 
   generate_surface:
     model: raw
-    data_range: excel
+    data_range: window
     run_ts: ""
-    output_dir: data/processed/${model}-${data_range}/${run_ts}
+    output_dir: data/processed/raw-market-index-batches/${run_ts}
     input_glob: ${option_data_glob}
     expiration_time_utc: "20:00:00"
-    output_json: ${output_dir}/surface-${model}-${data_range}.json
-    log_file: ${output_dir}/surface-${model}-${data_range}.log
+    output_json: ${output_dir}/surface-raw-window.json
+    log_file: ${output_dir}/surface-raw-window.log
     resolved_config_path: ${output_dir}/surface-resolved_config.yaml
     data_date: "2026-03-09"
     days_in_year: 250
@@ -22,14 +22,9 @@ surface_builder:
     max_minutes: 0
     chunk_size: 100000
     save_precalib_csv: true
-    precalib_csv: ${output_dir}/surface-${model}-${data_range}-precalib-points.csv
-    target_xlsx: data/raw/text_embedding/news_with_openai_embeddings_large.xlsx
-    sheet_name: Sheet1
-    date_column: PD
-    time_column: ET
-    source_timezone: Europe/London
-    publication_availability_lag_minutes: 0
-    max_target_datetimes: 0
+    precalib_csv: ${output_dir}/surface-raw-window-precalib-points.csv
+    target_datetimes: []
+    target_datetimes_file: ""
     window_minutes: 5
     calibration_workers: 32
     pricing_model: black76
@@ -41,3 +36,11 @@ surface_builder:
     max_itm_moneyness_distance: 0.05
     iv_aggregation_mode: volume_weighted_median
     window_audit_json: ${output_dir}/window_temporal_audit.json
+
+    news_alignment_mode: forward_valid_pair
+    intraday_tolerance_minutes: 15
+    max_session_shift_minutes: 4320
+    require_complete_pair: true
+    require_origin_not_before_news: true
+    include_session_shifted: true
+    collision_policy: pool_at_nearest_pair

@@ -183,6 +183,63 @@ class Rq123AuditTests(unittest.TestCase):
                 mismatched["precalibration_corrected_inputs_ok"]
             )
 
+    def test_precalibration_audit_accepts_bounded_anchored_itm_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            curve_sha = "a" * 64
+            frame = pd.DataFrame(
+                {
+                    "pricing_model": ["black76"] * 4,
+                    "underlying_match_mode": ["last_prior_trade"] * 4,
+                    "underlying_staleness_seconds": [12.0] * 4,
+                    "is_otm": [True, False, True, False],
+                    "surface_input_role": [
+                        "otm",
+                        "itm_fallback",
+                        "otm",
+                        "itm_fallback",
+                    ],
+                    "passes_precalib_filter": [True] * 4,
+                    "weight": [3.0] * 4,
+                    "rate_curve_sha256": [curve_sha] * 4,
+                    "calibration_datetime_utc": [
+                        "2023-01-01T12:00:00Z"
+                    ]
+                    * 4,
+                    "business_days": [30, 30, 60, 60],
+                    "strike": [95.0, 98.0, 105.0, 102.0],
+                    "percent_strike": [0.95, 0.98, 1.05, 1.02],
+                }
+            )
+            csv_path = (
+                root / "surface-raw-excel-precalib-points.csv"
+            )
+            frame.to_csv(csv_path, index=False)
+
+            valid = _precalibration_audit_summary(
+                root,
+                expected_rate_curve_sha256=curve_sha,
+                option_filter_mode="otm_preferred_itm_fallback",
+                max_itm_moneyness_distance=0.05,
+            )
+            self.assertTrue(valid["precalibration_corrected_inputs_ok"])
+            self.assertEqual(
+                valid["precalibration_selected_itm_fallback_rows"],
+                2,
+            )
+
+            frame.loc[1, "percent_strike"] = 0.94
+            frame.to_csv(csv_path, index=False)
+            invalid = _precalibration_audit_summary(
+                root,
+                expected_rate_curve_sha256=curve_sha,
+                option_filter_mode="otm_preferred_itm_fallback",
+                max_itm_moneyness_distance=0.05,
+            )
+            self.assertFalse(
+                invalid["precalibration_corrected_inputs_ok"]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

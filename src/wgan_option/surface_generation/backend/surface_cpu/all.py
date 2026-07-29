@@ -148,6 +148,16 @@ def _process_minute(
             else "volume_weighted_mean"
         ),
         rejected_audit_rows=rejected_audit_rows,
+        option_filter_mode=(
+            pricing_context.option_filter_mode
+            if pricing_context is not None
+            else "none"
+        ),
+        max_itm_moneyness_distance=(
+            pricing_context.max_itm_moneyness_distance
+            if pricing_context is not None
+            else 0.05
+        ),
     )
 
 

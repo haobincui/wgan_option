@@ -369,16 +369,19 @@ def _extract_target_surfaces(
                 normalized_payload = {
                     "surface_model": default_surface_model,
                     "surface_params": None,
+                    "surface_audit": {},
                 }
             elif "surface_model" in raw_payload and "surface_params" in raw_payload:
                 normalized_payload = {
                     "surface_model": raw_payload.get("surface_model", default_surface_model),
                     "surface_params": raw_payload.get("surface_params"),
+                    "surface_audit": raw_payload.get("surface_audit", {}),
                 }
             else:
                 normalized_payload = {
                     "surface_model": default_surface_model,
                     "surface_params": raw_payload,
+                    "surface_audit": {},
                 }
             target_results[direction] = {
                 "snapshot_time_utc": _to_utc_minute_string(anchor_ts),
@@ -934,7 +937,17 @@ def run_window_job(
             "Please provide target datetimes via --target-datetime and/or --target-datetimes-file."
         )
 
-    logger.info("Target datetime tokens=%s", " ".join(shlex.quote(x) for x in target_tokens))
+    logger.info("Target datetime token count=%d", len(target_tokens))
+    logger.info(
+        "Target datetime token sample=%s",
+        " ".join(
+            shlex.quote(value)
+            for value in (
+                target_tokens[:3]
+                + (target_tokens[-3:] if len(target_tokens) > 3 else [])
+            )
+        ),
+    )
     return generate_surfaces_for_datetime_windows(
         args=args,
         target_datetimes=target_tokens,

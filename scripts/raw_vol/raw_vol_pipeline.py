@@ -7,6 +7,9 @@ import argparse
 import csv
 import hashlib
 import json
+import math
+import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -39,6 +42,43 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _link_or_copy(source: Path, target: Path) -> str:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(source, target)
+        return "hardlink"
+    except OSError:
+        shutil.copy2(source, target)
+        return "copy"
+
+
+def _weighted_median(values: list[float], weights: list[float]) -> float:
+    pairs = sorted(
+        (
+            (float(value), max(float(weight), 0.0))
+            for value, weight in zip(values, weights)
+            if math.isfinite(float(value)) and math.isfinite(float(weight))
+        ),
+        key=lambda item: item[0],
+    )
+    if not pairs:
+        return math.nan
+    total_weight = sum(weight for _, weight in pairs)
+    if total_weight <= 0:
+        ordered = sorted(value for value, _ in pairs)
+        middle = len(ordered) // 2
+        if len(ordered) % 2:
+            return float(ordered[middle])
+        return float((ordered[middle - 1] + ordered[middle]) / 2.0)
+    threshold = total_weight / 2.0
+    cumulative = 0.0
+    for value, weight in pairs:
+        cumulative += weight
+        if cumulative >= threshold:
+            return value
+    return pairs[-1][0]
+
+
 def _discover(path: Path, pattern: str) -> Path | None:
     matches = sorted(path.glob(pattern))
     if not matches:
@@ -58,31 +98,43 @@ def _surface_json_summary(path: Path | None) -> dict[str, Any]:
             "json_target_count": 0,
             "json_direction_count": 0,
             "json_directions_with_surface_params": 0,
+            "json_targets_with_both_surfaces": 0,
         }
     payload = _read_json(path)
     target_count = len(payload) if isinstance(payload, dict) else 0
     direction_count = 0
     with_surface = 0
+    targets_with_both_surfaces = 0
     model_counts: dict[str, int] = {}
     if isinstance(payload, dict):
         for target_payload in payload.values():
             if not isinstance(target_payload, dict):
                 continue
+            side_successes: list[bool] = []
             for direction in ("backward", "forward"):
                 side = target_payload.get(direction)
                 if not isinstance(side, dict):
+                    side_successes.append(False)
                     continue
                 direction_count += 1
                 model = str(side.get("surface_model", "svi"))
                 model_counts[model] = model_counts.get(model, 0) + 1
-                if side.get("surface_params") is not None or side.get("svi_params") is not None:
+                has_surface = (
+                    side.get("surface_params") is not None
+                    or side.get("svi_params") is not None
+                )
+                side_successes.append(has_surface)
+                if has_surface:
                     with_surface += 1
+            if len(side_successes) == 2 and all(side_successes):
+                targets_with_both_surfaces += 1
     return {
         "surface_json_path": str(path),
         "surface_json_exists": True,
         "json_target_count": target_count,
         "json_direction_count": direction_count,
         "json_directions_with_surface_params": with_surface,
+        "json_targets_with_both_surfaces": targets_with_both_surfaces,
         "json_surface_model_counts": model_counts,
     }
 
@@ -96,6 +148,8 @@ def _workbook_summary(path: Path) -> dict[str, Any]:
             "side_rows": 0,
             "gan_input_rows": 0,
             "usable_pairs": 0,
+            "unique_surface_pairs": 0,
+            "pair_level_training_samples": 0,
         }
     sheets = pd.ExcelFile(path, engine="openpyxl").sheet_names
     summary: dict[str, Any] = {
@@ -151,6 +205,65 @@ def _workbook_summary(path: Path) -> dict[str, Any]:
     if "gan_input_ready" in sheets:
         gan = pd.read_excel(path, sheet_name="gan_input_ready", engine="openpyxl")
         summary["gan_input_rows"] = int(len(gan))
+        required_pair_columns = {
+            "current_snapshot_time_utc",
+            "target_snapshot_time_utc",
+        }
+        if required_pair_columns.issubset(gan.columns):
+            pair_frame = gan[
+                ["current_snapshot_time_utc", "target_snapshot_time_utc"]
+            ].copy()
+            pair_frame["current_snapshot_time_utc"] = pd.to_datetime(
+                pair_frame["current_snapshot_time_utc"],
+                errors="coerce",
+                utc=True,
+            )
+            pair_frame["target_snapshot_time_utc"] = pd.to_datetime(
+                pair_frame["target_snapshot_time_utc"],
+                errors="coerce",
+                utc=True,
+            )
+            pair_frame = pair_frame.dropna(
+                subset=["current_snapshot_time_utc", "target_snapshot_time_utc"]
+            )
+            pair_frame["current_quarter"] = (
+                pair_frame["current_snapshot_time_utc"]
+                .dt.tz_localize(None)
+                .dt.to_period("Q")
+                .astype(str)
+            )
+            unique_pairs = pair_frame.drop_duplicates(
+                subset=[
+                    "current_snapshot_time_utc",
+                    "target_snapshot_time_utc",
+                ]
+            )
+            unique_surface_pairs = int(len(unique_pairs))
+            summary["unique_surface_pairs"] = unique_surface_pairs
+            summary["pair_level_training_samples"] = unique_surface_pairs
+            summary["duplicate_article_rows"] = int(
+                len(pair_frame) - unique_surface_pairs
+            )
+            summary["article_rows_by_current_quarter"] = {
+                str(key): int(value)
+                for key, value in pair_frame["current_quarter"]
+                .value_counts()
+                .sort_index()
+                .items()
+            }
+            summary["surface_pairs_by_current_quarter"] = {
+                str(key): int(value)
+                for key, value in unique_pairs["current_quarter"]
+                .value_counts()
+                .sort_index()
+                .items()
+            }
+        else:
+            summary["unique_surface_pairs"] = 0
+            summary["pair_level_training_samples"] = 0
+            summary["duplicate_article_rows"] = 0
+            summary["article_rows_by_current_quarter"] = {}
+            summary["surface_pairs_by_current_quarter"] = {}
         if "surface_model" in gan:
             summary["gan_surface_model_counts"] = {
                 str(key): int(value)
@@ -158,6 +271,11 @@ def _workbook_summary(path: Path) -> dict[str, Any]:
             }
     else:
         summary["gan_input_rows"] = 0
+        summary["unique_surface_pairs"] = 0
+        summary["pair_level_training_samples"] = 0
+        summary["duplicate_article_rows"] = 0
+        summary["article_rows_by_current_quarter"] = {}
+        summary["surface_pairs_by_current_quarter"] = {}
     return summary
 
 
@@ -239,6 +357,8 @@ def _precalibration_audit_summary(
     dataset_dir: Path,
     *,
     expected_rate_curve_sha256: str,
+    option_filter_mode: str = "otm_only",
+    max_itm_moneyness_distance: float = 0.05,
 ) -> dict[str, Any]:
     path = _discover(dataset_dir, "surface-raw-excel-precalib-points.csv")
     if path is None or not path.is_file():
@@ -257,6 +377,20 @@ def _precalibration_audit_summary(
         "weight",
         "rate_curve_sha256",
     ]
+    fallback_mode = (
+        str(option_filter_mode).strip().lower()
+        == "otm_preferred_itm_fallback"
+    )
+    if fallback_mode:
+        columns.extend(
+            [
+                "calibration_datetime_utc",
+                "business_days",
+                "strike",
+                "percent_strike",
+                "surface_input_role",
+            ]
+        )
     frame = pd.read_csv(path, usecols=columns, low_memory=False)
     accepted_flag = frame["passes_precalib_filter"].astype(str).str.lower().isin(
         {"true", "1", "1.0"}
@@ -269,6 +403,122 @@ def _precalibration_audit_summary(
     weights = pd.to_numeric(accepted["weight"], errors="coerce")
     is_otm = accepted["is_otm"].astype(str).str.lower().isin(
         {"true", "1", "1.0"}
+    )
+    accepted_itm_count = int((~is_otm).sum())
+    selected_itm_within_range = True
+    otm_preferred_per_strike = True
+    itm_fallback_has_otm_anchor = True
+    itm_fallback_strike_cap_ok = True
+    surface_input_roles_valid = True
+    if fallback_mode:
+        percent_strike = pd.to_numeric(
+            accepted["percent_strike"],
+            errors="coerce",
+        )
+        selected_itm_within_range = bool(
+            not accepted_itm_count
+            or (
+                percent_strike[~is_otm].notna().all()
+                and percent_strike[~is_otm]
+                .sub(1.0)
+                .abs()
+                .le(float(max_itm_moneyness_distance) + 1.0e-12)
+                .all()
+            )
+        )
+        roles = accepted["surface_input_role"].astype(str)
+        surface_input_roles_valid = bool(
+            roles[is_otm].eq("otm").all()
+            and roles[~is_otm].eq("itm_fallback").all()
+        )
+        grouping = accepted[
+            [
+                "calibration_datetime_utc",
+                "business_days",
+                "strike",
+            ]
+        ].copy()
+        grouping["business_days"] = pd.to_numeric(
+            grouping["business_days"],
+            errors="coerce",
+        )
+        grouping["strike"] = pd.to_numeric(
+            grouping["strike"],
+            errors="coerce",
+        )
+        grouping["is_otm"] = is_otm.to_numpy()
+        grouping_ok = bool(
+            grouping[
+                [
+                    "calibration_datetime_utc",
+                    "business_days",
+                    "strike",
+                ]
+            ]
+            .notna()
+            .all()
+            .all()
+        )
+        if grouping_ok:
+            maturity_keys = [
+                "calibration_datetime_utc",
+                "business_days",
+            ]
+            strike_keys = [*maturity_keys, "strike"]
+            strike_flags = grouping.drop_duplicates(
+                [*strike_keys, "is_otm"]
+            )
+            otm_preferred_per_strike = bool(
+                strike_flags.groupby(strike_keys)["is_otm"]
+                .nunique()
+                .le(1)
+                .all()
+            )
+            strike_counts = (
+                strike_flags.groupby([*maturity_keys, "is_otm"])["strike"]
+                .nunique()
+                .unstack(fill_value=0)
+            )
+            otm_counts = strike_counts.get(
+                True,
+                pd.Series(0, index=strike_counts.index),
+            )
+            itm_counts = strike_counts.get(
+                False,
+                pd.Series(0, index=strike_counts.index),
+            )
+            itm_maturities = itm_counts.gt(0)
+            itm_fallback_has_otm_anchor = bool(
+                otm_counts[itm_maturities].ge(1).all()
+            )
+            itm_fallback_strike_cap_ok = bool(
+                itm_counts[itm_maturities]
+                .le(otm_counts[itm_maturities])
+                .all()
+            )
+        else:
+            otm_preferred_per_strike = False
+            itm_fallback_has_otm_anchor = False
+            itm_fallback_strike_cap_ok = False
+    elif str(option_filter_mode).strip().lower() == "otm_only":
+        selected_itm_within_range = bool(len(accepted) and is_otm.all())
+
+    option_filter_policy_valid = bool(
+        len(accepted)
+        and (
+            (
+                str(option_filter_mode).strip().lower() == "otm_only"
+                and is_otm.all()
+            )
+            or (
+                fallback_mode
+                and selected_itm_within_range
+                and otm_preferred_per_strike
+                and itm_fallback_has_otm_anchor
+                and itm_fallback_strike_cap_ok
+                and surface_input_roles_valid
+            )
+        )
     )
     checks = {
         "pricing_model_black76": bool(
@@ -289,7 +539,7 @@ def _precalibration_audit_summary(
             and staleness.ge(0.0).all()
             and staleness.le(60.0).all()
         ),
-        "otm_only": bool(len(accepted) and is_otm.all()),
+        "option_filter_policy_valid": option_filter_policy_valid,
         "positive_volume_weights": bool(
             len(accepted) and weights.notna().all() and weights.gt(0.0).all()
         ),
@@ -311,6 +561,14 @@ def _precalibration_audit_summary(
         "precalibration_audit_exists": True,
         "precalibration_total_rows": int(len(frame)),
         "precalibration_accepted_rows": int(len(accepted)),
+        "precalibration_selected_otm_rows": int(is_otm.sum()),
+        "precalibration_selected_itm_fallback_rows": accepted_itm_count,
+        "otm_only": bool(len(accepted) and is_otm.all()),
+        "selected_itm_within_range": selected_itm_within_range,
+        "otm_preferred_per_strike": otm_preferred_per_strike,
+        "itm_fallback_has_otm_anchor": itm_fallback_has_otm_anchor,
+        "itm_fallback_strike_cap_ok": itm_fallback_strike_cap_ok,
+        "surface_input_roles_valid": surface_input_roles_valid,
         **checks,
         "precalibration_corrected_inputs_ok": all(checks.values()),
     }
@@ -341,6 +599,12 @@ def validate_dataset(args: argparse.Namespace) -> int:
         if rate_curve_value and rate_curve_path.is_file()
         else ""
     )
+    option_filter_mode = str(
+        generate_settings.get("option_filter_mode", "")
+    ).strip().lower()
+    max_itm_moneyness_distance = float(
+        generate_settings.get("max_itm_moneyness_distance", 0.05)
+    )
     workbook_timezones = list(workbook.get("news_source_timezones") or [])
     timezone_ok = (
         resolved_timezone == expected_timezone
@@ -350,7 +614,12 @@ def validate_dataset(args: argparse.Namespace) -> int:
         str(generate_settings.get("pricing_model", "")).lower() == "black76"
         and str(generate_settings.get("underlying_match_mode", ""))
         == "last_prior_trade"
-        and str(generate_settings.get("option_filter_mode", "")) == "otm_only"
+        and option_filter_mode
+        in {"otm_only", "otm_preferred_itm_fallback"}
+        and (
+            option_filter_mode != "otm_preferred_itm_fallback"
+            or abs(max_itm_moneyness_distance - 0.05) <= 1.0e-12
+        )
         and str(generate_settings.get("iv_aggregation_mode", ""))
         == "volume_weighted_median"
         and int(generate_settings.get("window_minutes", -1))
@@ -372,6 +641,8 @@ def validate_dataset(args: argparse.Namespace) -> int:
     precalibration = _precalibration_audit_summary(
         dataset_dir,
         expected_rate_curve_sha256=rate_curve_sha256,
+        option_filter_mode=option_filter_mode,
+        max_itm_moneyness_distance=max_itm_moneyness_distance,
     )
     usable_ok = usable_pairs >= int(args.min_usable_pairs)
     corrected_inputs_ok = bool(
@@ -387,6 +658,8 @@ def validate_dataset(args: argparse.Namespace) -> int:
         "interpolation_policy": "linear_percent_strike_and_linear_total_variance_by_maturity",
         "window_minutes": args.window_minutes,
         "min_strikes_per_expiry": args.min_strikes_per_expiry,
+        "option_filter_mode": option_filter_mode,
+        "max_itm_moneyness_distance": max_itm_moneyness_distance,
         "expected_news_source_timezone": expected_timezone,
         "surface_news_source_timezone": resolved_timezone,
         "expected_publication_availability_lag_minutes": expected_lag,
@@ -460,8 +733,282 @@ def validate_dataset(args: argparse.Namespace) -> int:
                 }
             )
     print(f"Validation written to {output_json}")
-    print(f"usable_pairs={usable_pairs}")
+    print(f"usable_article_rows={usable_pairs}")
+    print(
+        "pair_level_training_samples="
+        f"{int(validation.get('pair_level_training_samples', 0))}"
+    )
     return 0 if validation["status"] == "ok" or args.no_fail else 2
+
+
+def rebuild_from_precalib(args: argparse.Namespace) -> int:
+    """Reapply surface eligibility without repeating trade parsing or IV inversion."""
+
+    source_dir = Path(args.source_dataset_dir).expanduser().resolve()
+    output_dir = Path(args.output_dir).expanduser().resolve()
+    if source_dir == output_dir:
+        raise ValueError("source_dataset_dir and output_dir must be different.")
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(f"Output directory is not empty: {output_dir}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    source_surface = source_dir / "surface-raw-excel.json"
+    source_precalib = source_dir / "surface-raw-excel-precalib-points.csv"
+    source_config = source_dir / "surface-resolved_config.yaml"
+    source_temporal = source_dir / "window_temporal_audit.json"
+    for required in (
+        source_surface,
+        source_precalib,
+        source_config,
+        source_temporal,
+    ):
+        if not required.is_file():
+            raise FileNotFoundError(f"Required source artifact does not exist: {required}")
+
+    config_payload = yaml.safe_load(source_config.read_text(encoding="utf-8")) or {}
+    generate = (
+        config_payload.get("surface_builder", {}).get("generate_surface", {})
+        if isinstance(config_payload, dict)
+        else {}
+    )
+    if str(generate.get("model", "")).strip().lower() != "raw":
+        raise ValueError("rebuild-from-precalib only supports raw surface datasets.")
+    if (
+        str(generate.get("iv_aggregation_mode", "")).strip().lower()
+        != "volume_weighted_median"
+    ):
+        raise ValueError(
+            "Source dataset must use iv_aggregation_mode=volume_weighted_median."
+        )
+
+    columns = [
+        "target_datetime_utc",
+        "window_side",
+        "business_days",
+        "strike",
+        "percent_strike",
+        "implied_vol",
+        "passes_precalib_filter",
+        "weight",
+    ]
+    frame = pd.read_csv(
+        source_precalib,
+        usecols=columns,
+        low_memory=False,
+        float_precision="round_trip",
+    )
+    accepted = frame[
+        frame["passes_precalib_filter"]
+        .astype(str)
+        .str.lower()
+        .isin({"true", "1", "1.0"})
+    ].copy()
+    numeric_columns = [
+        "business_days",
+        "strike",
+        "percent_strike",
+        "implied_vol",
+        "weight",
+    ]
+    for column in numeric_columns:
+        accepted[column] = pd.to_numeric(accepted[column], errors="coerce")
+    accepted = accepted.dropna(
+        subset=["target_datetime_utc", "window_side", *numeric_columns]
+    )
+    accepted = accepted[
+        accepted["business_days"].gt(0)
+        & accepted["strike"].gt(0)
+        & accepted["percent_strike"].gt(0)
+        & accepted["implied_vol"].gt(0)
+        & accepted["weight"].gt(0)
+    ]
+
+    buckets: dict[tuple[str, str, int, float], dict[str, Any]] = {}
+    for observation in accepted.itertuples(index=False):
+        bucket_key = (
+            str(observation.target_datetime_utc),
+            str(observation.window_side),
+            int(observation.business_days),
+            float(observation.strike),
+        )
+        bucket = buckets.setdefault(
+            bucket_key,
+            {
+                "weight_sum": 0.0,
+                "percent_strike_weighted_sum": 0.0,
+                "iv_observations": [],
+            },
+        )
+        weight = float(observation.weight)
+        bucket["weight_sum"] += weight
+        bucket["percent_strike_weighted_sum"] += (
+            float(observation.percent_strike) * weight
+        )
+        bucket["iv_observations"].append(
+            (float(observation.implied_vol), weight)
+        )
+
+    slices_by_side: dict[
+        tuple[str, str],
+        dict[int, list[tuple[float, float]]],
+    ] = {}
+    for bucket_key, bucket in buckets.items():
+        target_datetime, window_side, business_days, _strike = bucket_key
+        weight_sum = float(bucket["weight_sum"])
+        if weight_sum <= 0:
+            continue
+        percent_strike = (
+            float(bucket["percent_strike_weighted_sum"]) / weight_sum
+        )
+        implied_vol = _weighted_median(
+            [value for value, _ in bucket["iv_observations"]],
+            [weight for _, weight in bucket["iv_observations"]],
+        )
+        if (
+            not math.isfinite(percent_strike)
+            or percent_strike <= 0
+            or not math.isfinite(implied_vol)
+            or implied_vol <= 0
+        ):
+            continue
+        side_key = (str(target_datetime), str(window_side))
+        slices_by_side.setdefault(side_key, {}).setdefault(
+            int(business_days),
+            [],
+        ).append((percent_strike, implied_vol))
+
+    min_strikes = int(args.min_strikes_per_expiry)
+    min_expiries = int(args.min_expiries_per_side)
+    params_by_side: dict[tuple[str, str], dict[str, Any]] = {}
+    for side_key, maturity_slices in slices_by_side.items():
+        business_days: list[int] = []
+        percent_strikes: list[list[float]] = []
+        implied_vols: list[list[float]] = []
+        for maturity_day in sorted(maturity_slices):
+            points = sorted(maturity_slices[maturity_day], key=lambda item: item[0])
+            if len(points) < min_strikes:
+                continue
+            business_days.append(int(maturity_day))
+            percent_strikes.append([float(point[0]) for point in points])
+            implied_vols.append([float(point[1]) for point in points])
+        if len(business_days) < min_expiries:
+            continue
+        params_by_side[side_key] = {
+            "business_days": business_days,
+            "percent_strikes": percent_strikes,
+            "implied_vols": implied_vols,
+        }
+
+    surface_payload = _read_json(source_surface)
+    if not isinstance(surface_payload, dict):
+        raise ValueError(f"Expected a target-keyed surface JSON: {source_surface}")
+    for target_datetime, target_payload in surface_payload.items():
+        if not isinstance(target_payload, dict):
+            continue
+        for window_side in ("backward", "forward"):
+            side_payload = target_payload.get(window_side)
+            if not isinstance(side_payload, dict):
+                continue
+            side_payload["surface_model"] = "raw"
+            side_payload.pop("svi_params", None)
+            side_payload["surface_params"] = params_by_side.get(
+                (str(target_datetime), window_side)
+            )
+
+    output_surface = output_dir / "surface-raw-excel.json"
+    _write_json(surface_payload, output_surface)
+    precalib_method = _link_or_copy(
+        source_precalib,
+        output_dir / source_precalib.name,
+    )
+    temporal_method = _link_or_copy(
+        source_temporal,
+        output_dir / source_temporal.name,
+    )
+
+    output_generate = config_payload["surface_builder"]["generate_surface"]
+    run_ts = str(args.run_ts).strip() or output_dir.name
+    output_generate.update(
+        {
+            "run_ts": run_ts,
+            "output_dir": str(output_dir),
+            "output_json": str(output_surface),
+            "log_file": str(output_dir / "surface-raw-excel.log"),
+            "resolved_config_path": str(output_dir / "surface-resolved_config.yaml"),
+            "precalib_csv": str(output_dir / source_precalib.name),
+            "window_audit_json": str(output_dir / source_temporal.name),
+            "min_strikes_per_expiry": min_strikes,
+            "min_expiries_per_minute": min_expiries,
+        }
+    )
+    config_payload["runtime"] = {
+        "mode": "rebuild_from_precalib",
+        "created_at_utc": _now_utc(),
+        "source_dataset_dir": str(source_dir),
+        "source_surface_sha256": _sha256(source_surface),
+        "source_precalib_sha256": _sha256(source_precalib),
+    }
+    output_config = output_dir / "surface-resolved_config.yaml"
+    output_config.write_text(
+        yaml.safe_dump(config_payload, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    successful_sides = sum(
+        1
+        for target_payload in surface_payload.values()
+        if isinstance(target_payload, dict)
+        for window_side in ("backward", "forward")
+        if isinstance(target_payload.get(window_side), dict)
+        and target_payload[window_side].get("surface_params") is not None
+    )
+    both_sides = sum(
+        1
+        for target_payload in surface_payload.values()
+        if isinstance(target_payload, dict)
+        and all(
+            isinstance(target_payload.get(window_side), dict)
+            and target_payload[window_side].get("surface_params") is not None
+            for window_side in ("backward", "forward")
+        )
+    )
+    manifest = {
+        "created_at_utc": _now_utc(),
+        "method": "rebuild_surface_eligibility_from_frozen_precalibration_rows",
+        "source_dataset_dir": str(source_dir),
+        "output_dataset_dir": str(output_dir),
+        "min_strikes_per_expiry": min_strikes,
+        "min_expiries_per_side": min_expiries,
+        "precalibration_total_rows": int(len(frame)),
+        "precalibration_accepted_rows": int(len(accepted)),
+        "target_count": int(len(surface_payload)),
+        "successful_surface_sides": int(successful_sides),
+        "targets_with_both_sides": int(both_sides),
+        "artifact_methods": {
+            source_precalib.name: precalib_method,
+            source_temporal.name: temporal_method,
+        },
+        "source_artifacts": {
+            str(source_surface): _sha256(source_surface),
+            str(source_precalib): _sha256(source_precalib),
+            str(source_config): _sha256(source_config),
+            str(source_temporal): _sha256(source_temporal),
+        },
+    }
+    _write_json(manifest, output_dir / "precalib_rebuild_manifest.json")
+    (output_dir / "surface-raw-excel.log").write_text(
+        "Derived raw surface JSON from frozen pre-calibration audit rows.\n"
+        f"source_dataset_dir={source_dir}\n"
+        f"min_strikes_per_expiry={min_strikes}\n"
+        f"min_expiries_per_side={min_expiries}\n"
+        f"successful_surface_sides={successful_sides}\n"
+        f"targets_with_both_sides={both_sides}\n",
+        encoding="utf-8",
+    )
+    print(f"Rebuilt surface dataset: {output_dir}")
+    print(f"successful_surface_sides={successful_sides}")
+    print(f"targets_with_both_sides={both_sides}")
+    return 0
 
 
 def select_best(args: argparse.Namespace) -> int:
@@ -514,6 +1061,17 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--warn-usable-pairs", type=int, default=1000)
     validate.add_argument("--no-fail", action="store_true")
     validate.set_defaults(func=validate_dataset)
+
+    rebuild = subparsers.add_parser(
+        "rebuild-from-precalib",
+        help="Reapply raw-surface strike/expiry eligibility to frozen IV audit rows.",
+    )
+    rebuild.add_argument("--source-dataset-dir", required=True)
+    rebuild.add_argument("--output-dir", required=True)
+    rebuild.add_argument("--run-ts", default="")
+    rebuild.add_argument("--min-strikes-per-expiry", type=int, required=True)
+    rebuild.add_argument("--min-expiries-per-side", type=int, default=2)
+    rebuild.set_defaults(func=rebuild_from_precalib)
 
     select = subparsers.add_parser("select-best", help="Select the best dataset from a coverage CSV.")
     select.add_argument("--coverage-csv", required=True)

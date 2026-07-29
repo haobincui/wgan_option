@@ -52,6 +52,14 @@ class TensorNormalizationStats:
     text_std: torch.Tensor
 
 
+def _metadata_float(value: Any, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return parsed if np.isfinite(parsed) else float(default)
+
+
 def _to_device_row(values: Any, device: torch.device) -> torch.Tensor:
     array = np.asarray(values, dtype=np.float32).reshape(1, -1)
     return torch.tensor(array, dtype=torch.float32, device=device)
@@ -376,9 +384,30 @@ def _short_atm_metrics(
     atm_short_mask_surface: torch.Tensor | None,
     support_mask: np.ndarray | None = None,
 ) -> dict[str, float]:
-    generated_tensor = torch.tensor(np.asarray(generated_surface, dtype=np.float32), dtype=torch.float32)
-    current_tensor = torch.tensor(np.asarray(current_surface, dtype=np.float32), dtype=torch.float32)
-    target_tensor = torch.tensor(np.asarray(target_surface, dtype=np.float32), dtype=torch.float32)
+    metric_device = (
+        recon_weights_surface.device
+        if recon_weights_surface is not None
+        else (
+            atm_short_mask_surface.device
+            if atm_short_mask_surface is not None
+            else torch.device("cpu")
+        )
+    )
+    generated_tensor = torch.tensor(
+        np.asarray(generated_surface, dtype=np.float32),
+        dtype=torch.float32,
+        device=metric_device,
+    )
+    current_tensor = torch.tensor(
+        np.asarray(current_surface, dtype=np.float32),
+        dtype=torch.float32,
+        device=metric_device,
+    )
+    target_tensor = torch.tensor(
+        np.asarray(target_surface, dtype=np.float32),
+        dtype=torch.float32,
+        device=metric_device,
+    )
     support_tensor = torch.tensor(
         (
             np.asarray(support_mask, dtype=np.float32)
@@ -386,6 +415,7 @@ def _short_atm_metrics(
             else np.ones_like(target_surface, dtype=np.float32)
         ),
         dtype=torch.float32,
+        device=metric_device,
     )
 
     metrics = {
@@ -743,6 +773,38 @@ def build_sample_payload(
             "publication_availability_lag_minutes": int(
                 sample.metadata.get("publication_availability_lag_minutes", 0)
             ),
+            "news_alignment_mode": sample.metadata.get(
+                "news_alignment_mode",
+                "exact",
+            ),
+            "alignment_type": sample.metadata.get(
+                "alignment_type",
+                "exact",
+            ),
+            "origin_shift_minutes": _metadata_float(
+                sample.metadata.get("origin_shift_minutes", 0.0)
+            ),
+            "origin_shift_minutes_min": _metadata_float(
+                sample.metadata.get("origin_shift_minutes_min", 0.0)
+            ),
+            "origin_shift_minutes_max": _metadata_float(
+                sample.metadata.get("origin_shift_minutes_max", 0.0)
+            ),
+            "origin_shift_minutes_mean": _metadata_float(
+                sample.metadata.get("origin_shift_minutes_mean", 0.0)
+            ),
+            "source_alignment_types": sample.metadata.get(
+                "source_alignment_types",
+                [sample.metadata.get("alignment_type", "exact")],
+            ),
+            "alignment_type_counts": sample.metadata.get(
+                "alignment_type_counts",
+                {
+                    sample.metadata.get("alignment_type", "exact"): int(
+                        sample.metadata.get("news_count", 1)
+                    )
+                },
+            ),
             "checkpoint_path": str(checkpoint_path),
             "mc_samples": int(mc_samples),
             "split": str(split),
@@ -1008,6 +1070,46 @@ class FilmWGANSampler:
                     ),
                     "publication_availability_lag_minutes": int(
                         sample.metadata.get("publication_availability_lag_minutes", 0)
+                    ),
+                    "news_alignment_mode": sample.metadata.get(
+                        "news_alignment_mode",
+                        "exact",
+                    ),
+                    "alignment_type": sample.metadata.get(
+                        "alignment_type",
+                        "exact",
+                    ),
+                    "origin_shift_minutes": _metadata_float(
+                        sample.metadata.get("origin_shift_minutes", 0.0)
+                    ),
+                    "origin_shift_minutes_min": _metadata_float(
+                        sample.metadata.get("origin_shift_minutes_min", 0.0)
+                    ),
+                    "origin_shift_minutes_max": _metadata_float(
+                        sample.metadata.get("origin_shift_minutes_max", 0.0)
+                    ),
+                    "origin_shift_minutes_mean": _metadata_float(
+                        sample.metadata.get("origin_shift_minutes_mean", 0.0)
+                    ),
+                    "source_alignment_types": json.dumps(
+                        sample.metadata.get(
+                            "source_alignment_types",
+                            [sample.metadata.get("alignment_type", "exact")],
+                        ),
+                        ensure_ascii=True,
+                    ),
+                    "alignment_type_counts": json.dumps(
+                        sample.metadata.get(
+                            "alignment_type_counts",
+                            {
+                                sample.metadata.get(
+                                    "alignment_type",
+                                    "exact",
+                                ): int(sample.metadata.get("news_count", 1))
+                            },
+                        ),
+                        ensure_ascii=True,
+                        sort_keys=True,
                     ),
                     "event_group": sample.metadata.get("event_group", ""),
                     "has_news": sample.metadata.get("has_news", ""),

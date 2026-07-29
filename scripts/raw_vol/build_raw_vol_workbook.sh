@@ -10,6 +10,8 @@ cd "${REPO_ROOT}"
 ENV_NAME="${ENV_NAME:-py312}"
 SOURCE_TIMEZONE="${SOURCE_TIMEZONE:-Europe/London}"
 PUBLICATION_AVAILABILITY_LAG_MINUTES="${PUBLICATION_AVAILABILITY_LAG_MINUTES:-0}"
+WINDOW_MINUTES="${WINDOW_MINUTES:-5}"
+MIN_STRIKES_PER_EXPIRY="${MIN_STRIKES_PER_EXPIRY:-2}"
 DATASET_DIR="${1:-${DATASET_DIR:-}}"
 MIN_USABLE_PAIRS="${MIN_USABLE_PAIRS:-100}"
 WARN_USABLE_PAIRS="${WARN_USABLE_PAIRS:-1000}"
@@ -39,6 +41,8 @@ python scripts/merge_file/merge_vol.py \
   --publication-availability-lag-minutes "${PUBLICATION_AVAILABILITY_LAG_MINUTES}"
 python scripts/raw_vol/raw_vol_pipeline.py validate \
   --dataset-dir "${DATASET_DIR}" \
+  --window-minutes "${WINDOW_MINUTES}" \
+  --min-strikes-per-expiry "${MIN_STRIKES_PER_EXPIRY}" \
   --source-timezone "${SOURCE_TIMEZONE}" \
   --publication-availability-lag-minutes "${PUBLICATION_AVAILABILITY_LAG_MINUTES}" \
   --min-usable-pairs "${MIN_USABLE_PAIRS}" \

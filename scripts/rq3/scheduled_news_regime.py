@@ -272,6 +272,8 @@ def load_event_calendar(path: str | Path) -> pd.DataFrame:
 
 
 def _validate_model_matching(samples: pd.DataFrame) -> None:
+    if "alignment_type" not in samples.columns:
+        samples["alignment_type"] = "exact"
     required = {
         "fold",
         "seed",
@@ -304,6 +306,7 @@ def _validate_model_matching(samples: pd.DataFrame) -> None:
         for column in (
             "current_snapshot_time_utc",
             "target_snapshot_time_utc",
+            "alignment_type",
         ):
             if not np.array_equal(
                 candidate[column].astype(str).to_numpy(),
@@ -519,6 +522,8 @@ def build_forecast_origin_covariates(
         "current_weighted_iv_rmse",
         "current_surface_slice_count",
         "pair_quality_label",
+        "alignment_type",
+        "origin_shift_minutes",
     ]
     if support_artifact_paths:
         required_columns.append("current_surface_param_json")
@@ -532,8 +537,19 @@ def build_forecast_origin_covariates(
         usecols=lambda column: column in required_columns,
     )
     missing = sorted(set(required_columns) - set(source.columns))
-    if missing:
-        raise ValueError(f"Raw-vol workbook is missing columns: {missing}")
+    optional_alignment_columns = {
+        "alignment_type",
+        "origin_shift_minutes",
+    }
+    hard_missing = sorted(set(missing) - optional_alignment_columns)
+    if hard_missing:
+        raise ValueError(
+            f"Raw-vol workbook is missing columns: {hard_missing}"
+        )
+    if "alignment_type" not in source.columns:
+        source["alignment_type"] = "exact"
+    if "origin_shift_minutes" not in source.columns:
+        source["origin_shift_minutes"] = 0.0
     source = source.copy()
     source["surface_pair_id"] = [
         _surface_pair_id(current, target)
@@ -593,6 +609,17 @@ def build_forecast_origin_covariates(
             stamp = stamp.tz_convert("UTC")
         minute = stamp.hour * 60 + stamp.minute + stamp.second / 60.0
         weekday = stamp.weekday()
+        shifts = pd.to_numeric(
+            group["origin_shift_minutes"],
+            errors="coerce",
+        ).dropna()
+        minimum_shift = float(shifts.min()) if not shifts.empty else 0.0
+        if minimum_shift <= 0.0:
+            pair_alignment_type = "exact"
+        elif minimum_shift <= 15.0:
+            pair_alignment_type = "intraday_shift"
+        else:
+            pair_alignment_type = "session_shift"
         row = {
             "fold": fold,
             "surface_pair_id": str(pair_id),
@@ -615,6 +642,14 @@ def build_forecast_origin_covariates(
                 errors="coerce",
             ).iloc[0],
             "pair_quality_label": str(first["pair_quality_label"]),
+            "alignment_type": pair_alignment_type,
+            "origin_shift_minutes_min": minimum_shift,
+            "origin_shift_minutes_max": (
+                float(shifts.max()) if not shifts.empty else 0.0
+            ),
+            "origin_shift_minutes_mean": (
+                float(shifts.mean()) if not shifts.empty else 0.0
+            ),
             "source_row_count": int(len(group)),
             "raw_support_artifact_sha256": (
                 _sha256_file(support_artifact_paths[fold])
@@ -1025,6 +1060,9 @@ def match_scheduled_to_ordinary(
 def build_loss_differentials(samples: pd.DataFrame) -> pd.DataFrame:
     """Create paired baseline-minus-LP loss differentials."""
 
+    if "alignment_type" not in samples.columns:
+        samples = samples.copy()
+        samples["alignment_type"] = "exact"
     rows: list[pd.DataFrame] = []
     comparisons = [
         *CONTRASTS,
@@ -1042,11 +1080,18 @@ def build_loss_differentials(samples: pd.DataFrame) -> pd.DataFrame:
         )
         if len(merged) != len(left) or len(merged) != len(right):
             raise ValueError(f"Incomplete frozen matching for {contrast}.")
+        if not merged["alignment_type_focal"].equals(
+            merged["alignment_type_baseline"]
+        ):
+            raise ValueError(
+                f"Alignment-stratum matching failed for {contrast}."
+            )
         for metric in POINT_METRICS:
             frame = merged[
                 [
                     *keys,
                     "current_snapshot_time_utc_focal",
+                    "alignment_type_focal",
                     f"{metric}_focal",
                     f"{metric}_baseline",
                 ]
@@ -1054,6 +1099,7 @@ def build_loss_differentials(samples: pd.DataFrame) -> pd.DataFrame:
             frame.columns = [
                 *keys,
                 "current_snapshot_time_utc",
+                "alignment_type",
                 "focal_error",
                 "baseline_error",
             ]

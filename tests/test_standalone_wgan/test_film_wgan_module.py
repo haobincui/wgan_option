@@ -600,6 +600,33 @@ class TestFilmWGANRQ1ModelModes(unittest.TestCase):
         self.assertEqual(metrics["interval_width_90"], 0.0)
         self.assertIn("calendar_violation_rate", summary["arbitrage_metrics"])
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for the device regression.")
+    def test_short_atm_metrics_accept_gpu_masks_with_raw_support(self):
+        surface = np.full((2, 3), 0.2, dtype=np.float32)
+        summary = summarize_surface_scenarios(
+            surface_stack=surface[None, ...],
+            current_surface=surface,
+            target_surface=surface + 0.01,
+            strike_grid=[0.8, 1.0, 1.2],
+            maturity_days_grid=[7.0, 30.0],
+            reweight_beta_mode="fixed",
+            reweight_beta=0.0,
+            aggregation_mode="weighted_mean",
+            calibration_levels=[0.5, 0.8, 0.9],
+            recon_weights_surface=torch.ones((2, 3), device="cuda"),
+            atm_short_mask_surface=torch.ones((2, 3), device="cuda"),
+            support_mask=np.asarray(
+                [[True, True, False], [True, False, False]],
+                dtype=bool,
+            ),
+        )
+
+        self.assertAlmostEqual(
+            summary["short_atm_metrics"]["short_atm_weighted_mae"],
+            0.01,
+            places=6,
+        )
+
 
 class TestFilmWGANGenerateResultATMOutputs(unittest.TestCase):
     def test_extract_atm_short_value_uses_nearest_atm_and_shortest_maturity(self):

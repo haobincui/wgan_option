@@ -175,6 +175,84 @@ class TestPairTextData(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "inconsistent current_surface"):
                 create_train_val_bundle(config)
 
+    def test_strict_timing_still_rejects_news_surface_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook, news_workbook = _write_pair_fixture(tmpdir)
+            frame = pd.read_excel(workbook, sheet_name="gan_input_ready")
+            news_time = pd.Timestamp(frame.loc[0, "news_timestamp_utc"])
+            frame.loc[0, "current_snapshot_time_utc"] = (
+                news_time + pd.Timedelta(minutes=1)
+            ).isoformat()
+            frame.loc[0, "target_snapshot_time_utc"] = (
+                news_time + pd.Timedelta(minutes=6)
+            ).isoformat()
+            with pd.ExcelWriter(workbook, engine="openpyxl") as writer:
+                frame.to_excel(writer, sheet_name="gan_input_ready", index=False)
+
+            config = _pair_config(
+                workbook,
+                news_workbook,
+                Path(tmpdir) / "transform.npz",
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "violates news=current timestamp",
+            ):
+                create_train_val_bundle(config)
+
+    def test_forward_aligned_timing_accepts_valid_shift_and_rejects_leakage(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook, news_workbook = _write_pair_fixture(tmpdir)
+            frame = pd.read_excel(workbook, sheet_name="gan_input_ready")
+            news_time = pd.Timestamp(frame.loc[0, "news_timestamp_utc"])
+            origin = news_time + pd.Timedelta(minutes=20)
+            frame.loc[0, "news_alignment_mode"] = "forward_valid_pair"
+            frame.loc[0, "news_available_time_utc"] = news_time.isoformat()
+            frame.loc[0, "effective_origin_utc"] = origin.isoformat()
+            frame.loc[0, "origin_shift_minutes"] = 20
+            frame.loc[0, "alignment_type"] = "session_shift"
+            frame.loc[0, "current_snapshot_time_utc"] = origin.isoformat()
+            frame.loc[0, "target_snapshot_time_utc"] = (
+                origin + pd.Timedelta(minutes=5)
+            ).isoformat()
+            with pd.ExcelWriter(workbook, engine="openpyxl") as writer:
+                frame.to_excel(writer, sheet_name="gan_input_ready", index=False)
+
+            config = _pair_config(
+                workbook,
+                news_workbook,
+                Path(tmpdir) / "transform.npz",
+            )
+            bundle = create_train_val_bundle(config)
+            self.assertEqual(len(bundle.all_items), 8)
+
+            frame.loc[0, "effective_origin_utc"] = (
+                news_time - pd.Timedelta(minutes=1)
+            ).isoformat()
+            frame.loc[0, "origin_shift_minutes"] = -1
+            frame.loc[0, "alignment_type"] = "intraday_shift"
+            frame.loc[0, "current_snapshot_time_utc"] = frame.loc[
+                0,
+                "effective_origin_utc",
+            ]
+            frame.loc[0, "target_snapshot_time_utc"] = (
+                news_time + pd.Timedelta(minutes=4)
+            ).isoformat()
+            with pd.ExcelWriter(workbook, engine="openpyxl") as writer:
+                frame.to_excel(writer, sheet_name="gan_input_ready", index=False)
+            with self.assertRaisesRegex(
+                ValueError,
+                "origin before news availability",
+            ):
+                create_train_val_bundle(
+                    replace(
+                        config,
+                        text_transform_path=str(
+                            Path(tmpdir) / "invalid_transform.npz"
+                        ),
+                    )
+                )
+
     def test_transform_round_trip_uses_only_supplied_train_pairs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             values = np.asarray(

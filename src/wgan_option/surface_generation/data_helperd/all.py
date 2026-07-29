@@ -84,6 +84,7 @@ PRECALIB_CSV_HEADERS = [
     "rate_curve_sha256",
     "implied_vol",
     "is_otm",
+    "surface_input_role",
     "passes_precalib_filter",
     "filter_reason",
     "weight",
@@ -99,12 +100,17 @@ DEFAULT_PRICING_MODEL = "legacy_black_scholes"
 DEFAULT_RATE_CURVE_PATH = "data/reference/us_treasury_par_yield_curve_2022_2023.csv"
 DEFAULT_MAX_RATE_STALENESS_DAYS = 7
 DEFAULT_MAX_UNDERLYING_STALENESS_SECONDS = 60
+DEFAULT_MAX_ITM_MONEYNESS_DISTANCE = 0.05
 DEFAULT_OPTION_FILTER_MODE = "none"
 DEFAULT_IV_AGGREGATION_MODE = "volume_weighted_mean"
 SUPPORTED_SURFACE_MODELS = {"svi", "sabr", "cubic", "raw"}
 SUPPORTED_DATA_RANGES = {"all", "window", "excel"}
 SUPPORTED_PRICING_MODELS = {"legacy_black_scholes", "black76"}
-SUPPORTED_OPTION_FILTER_MODES = {"none", "otm_only"}
+SUPPORTED_OPTION_FILTER_MODES = {
+    "none",
+    "otm_only",
+    "otm_preferred_itm_fallback",
+}
 SUPPORTED_IV_AGGREGATION_MODES = {"volume_weighted_mean", "volume_weighted_median"}
 RESOLVED_CONFIG_FILENAME = "surface-resolved_config.yaml"
 SUPPORTED_GENERATE_SURFACE_CONFIG_KEYS = {
@@ -144,8 +150,16 @@ SUPPORTED_GENERATE_SURFACE_CONFIG_KEYS = {
     "max_underlying_staleness_seconds",
     "underlying_match_mode",
     "option_filter_mode",
+    "max_itm_moneyness_distance",
     "iv_aggregation_mode",
     "window_audit_json",
+    "news_alignment_mode",
+    "intraday_tolerance_minutes",
+    "max_session_shift_minutes",
+    "require_complete_pair",
+    "require_origin_not_before_news",
+    "include_session_shifted",
+    "collision_policy",
 }
 
 FILE_DATE_RANGE_RE = re.compile(r"_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})\.csv(?:\.gz)?$")
@@ -193,6 +207,7 @@ class SurfacePricingContext:
     max_underlying_staleness_seconds: int = DEFAULT_MAX_UNDERLYING_STALENESS_SECONDS
     underlying_match_mode: str = "last_prior_trade"
     option_filter_mode: str = DEFAULT_OPTION_FILTER_MODE
+    max_itm_moneyness_distance: float = DEFAULT_MAX_ITM_MONEYNESS_DISTANCE
     iv_aggregation_mode: str = DEFAULT_IV_AGGREGATION_MODE
     target_datetime_utc: str = ""
     window_side: str = ""
@@ -343,6 +358,12 @@ def _load_generate_surface_config(
         defaults.get(
             "option_filter_mode",
             "otm_only" if defaults["model"] == "raw" else DEFAULT_OPTION_FILTER_MODE,
+        )
+    )
+    defaults["max_itm_moneyness_distance"] = float(
+        defaults.get(
+            "max_itm_moneyness_distance",
+            DEFAULT_MAX_ITM_MONEYNESS_DISTANCE,
         )
     )
     defaults["iv_aggregation_mode"] = _normalize_iv_aggregation_mode(
@@ -579,6 +600,20 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--max-itm-moneyness-distance",
+        type=float,
+        default=float(
+            config_defaults.get(
+                "max_itm_moneyness_distance",
+                DEFAULT_MAX_ITM_MONEYNESS_DISTANCE,
+            )
+        ),
+        help=(
+            "Maximum abs(strike / futures - 1) for ITM fallback observations. "
+            "Used only by otm_preferred_itm_fallback."
+        ),
+    )
+    parser.add_argument(
         "--iv-aggregation-mode",
         choices=sorted(SUPPORTED_IV_AGGREGATION_MODES),
         default=str(
@@ -610,6 +645,10 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         raise ValueError("--max-underlying-staleness-seconds must be >= 0")
     if args.max_rate_staleness_days < 0:
         raise ValueError("--max-rate-staleness-days must be >= 0")
+    if not 0.0 < args.max_itm_moneyness_distance < 1.0:
+        raise ValueError(
+            "--max-itm-moneyness-distance must be strictly between 0 and 1"
+        )
     if args.model == "raw" and args.min_expiries_per_minute < 2:
         raise ValueError(
             "Corrected raw-vol surfaces require --min-expiries-per-minute >= 2"
@@ -771,6 +810,13 @@ def _build_resolved_config_payload(args: argparse.Namespace) -> Dict[str, Any]:
         "option_filter_mode": str(
             getattr(args, "option_filter_mode", DEFAULT_OPTION_FILTER_MODE)
         ),
+        "max_itm_moneyness_distance": float(
+            getattr(
+                args,
+                "max_itm_moneyness_distance",
+                DEFAULT_MAX_ITM_MONEYNESS_DISTANCE,
+            )
+        ),
         "iv_aggregation_mode": str(
             getattr(
                 args,
@@ -791,6 +837,13 @@ def _build_resolved_config_payload(args: argparse.Namespace) -> Dict[str, Any]:
         "source_timezone",
         "publication_availability_lag_minutes",
         "max_target_datetimes",
+        "news_alignment_mode",
+        "intraday_tolerance_minutes",
+        "max_session_shift_minutes",
+        "require_complete_pair",
+        "require_origin_not_before_news",
+        "include_session_shifted",
+        "collision_policy",
     )
     for key in optional_keys:
         if hasattr(args, key):
@@ -917,6 +970,13 @@ def _pricing_context_from_args(
         ),
         option_filter_mode=_normalize_option_filter_mode(
             getattr(args, "option_filter_mode", DEFAULT_OPTION_FILTER_MODE)
+        ),
+        max_itm_moneyness_distance=float(
+            getattr(
+                args,
+                "max_itm_moneyness_distance",
+                DEFAULT_MAX_ITM_MONEYNESS_DISTANCE,
+            )
         ),
         iv_aggregation_mode=_normalize_iv_aggregation_mode(
             getattr(args, "iv_aggregation_mode", DEFAULT_IV_AGGREGATION_MODE)
@@ -1224,6 +1284,19 @@ def _is_otm_option(option_type: Any, strike: float, futures_price: float) -> boo
     raise ValueError(f"Unsupported option type: {option_type!r}")
 
 
+def _is_within_itm_fallback_range(
+    strike: float,
+    futures_price: float,
+    max_distance: float,
+) -> bool:
+    if futures_price <= 0:
+        return False
+    return bool(
+        abs((float(strike) / float(futures_price)) - 1.0)
+        <= float(max_distance) + 1.0e-12
+    )
+
+
 def _pricing_tau_act365(
     trade_ts: pd.Timestamp,
     expiry_dt_utc: datetime,
@@ -1361,6 +1434,7 @@ def _prepare_option_candidates(
                     if is_otm is not None
                     else ""
                 ),
+                "surface_input_role": "",
                 "passes_precalib_filter": "false",
                 "filter_reason": reason,
                 "weight": float(row.volume),
@@ -1495,6 +1569,24 @@ def _prepare_option_candidates(
                 is_otm=False,
             )
             continue
+        if (
+            pricing_context.option_filter_mode
+            == "otm_preferred_itm_fallback"
+            and not is_otm
+            and not _is_within_itm_fallback_range(
+                strike,
+                spot,
+                pricing_context.max_itm_moneyness_distance,
+            )
+        ):
+            reject(
+                row,
+                "itm_outside_moneyness_range",
+                underlying=underlying_trade,
+                staleness_seconds=underlying_staleness_seconds,
+                is_otm=False,
+            )
+            continue
 
         if corrected_black76:
             assert rate_curve is not None
@@ -1585,6 +1677,94 @@ def _prepare_option_candidates(
     return valuation_date, candidates
 
 
+def _apply_otm_preferred_itm_fallback(
+    records: List[Dict[str, Any]],
+    stats: Dict[str, int],
+) -> None:
+    """Select bounded ITM observations only where OTM coverage is missing."""
+
+    def exclude(record: Dict[str, Any], reason: str) -> None:
+        if not record["selected"]:
+            return
+        record["selected"] = False
+        record["audit_row"]["passes_precalib_filter"] = "false"
+        record["audit_row"]["surface_input_role"] = ""
+        record["audit_row"]["filter_reason"] = reason
+        stats[f"skip_{reason}"] += 1
+
+    by_maturity_strike: Dict[
+        Tuple[int, float],
+        List[Dict[str, Any]],
+    ] = defaultdict(list)
+    for record in records:
+        if record["selected"]:
+            candidate = record["candidate"]
+            by_maturity_strike[
+                (int(candidate.business_days), float(candidate.strike))
+            ].append(record)
+
+    # A valid OTM observation owns its strike. ITM is considered only when
+    # that strike has no usable OTM observation.
+    for strike_records in by_maturity_strike.values():
+        if any(
+            record["selected"] and record["candidate"].is_otm
+            for record in strike_records
+        ):
+            for record in strike_records:
+                if record["selected"] and not record["candidate"].is_otm:
+                    exclude(record, "itm_shadowed_by_otm")
+
+    by_maturity: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        if record["selected"]:
+            by_maturity[int(record["candidate"].business_days)].append(record)
+
+    for maturity_records in by_maturity.values():
+        otm_strikes = {
+            float(record["candidate"].strike)
+            for record in maturity_records
+            if record["candidate"].is_otm
+        }
+        itm_by_strike: Dict[float, List[Dict[str, Any]]] = defaultdict(list)
+        for record in maturity_records:
+            if not record["candidate"].is_otm:
+                itm_by_strike[float(record["candidate"].strike)].append(record)
+
+        if not itm_by_strike:
+            continue
+        if not otm_strikes:
+            for strike_records in itm_by_strike.values():
+                for record in strike_records:
+                    exclude(record, "itm_no_otm_anchor")
+            continue
+
+        # Keep the nearest-to-ATM fallback strikes and cap their number at the
+        # number of OTM strikes, so ITM never dominates a maturity slice.
+        ranked_itm_strikes = sorted(
+            itm_by_strike,
+            key=lambda strike: (
+                min(
+                    abs(float(record["percent_strike"]) - 1.0)
+                    for record in itm_by_strike[strike]
+                ),
+                strike,
+            ),
+        )
+        allowed_itm_strikes = set(ranked_itm_strikes[: len(otm_strikes)])
+        for strike, strike_records in itm_by_strike.items():
+            if strike in allowed_itm_strikes:
+                continue
+            for record in strike_records:
+                exclude(record, "itm_fallback_cap")
+
+    for record in records:
+        if not record["selected"]:
+            continue
+        record["audit_row"]["surface_input_role"] = (
+            "otm" if record["candidate"].is_otm else "itm_fallback"
+        )
+
+
 def _finalize_minute_surface(
     minute_ts: pd.Timestamp,
     valuation_date: date,
@@ -1600,8 +1780,11 @@ def _finalize_minute_surface(
     surface_model: str = DEFAULT_SURFACE_MODEL,
     iv_aggregation_mode: str = DEFAULT_IV_AGGREGATION_MODE,
     rejected_audit_rows: Optional[List[Dict[str, Any]]] = None,
+    option_filter_mode: str = DEFAULT_OPTION_FILTER_MODE,
+    max_itm_moneyness_distance: float = DEFAULT_MAX_ITM_MONEYNESS_DISTANCE,
 ) -> None:
     iv_aggregation_mode = _normalize_iv_aggregation_mode(iv_aggregation_mode)
+    option_filter_mode = _normalize_option_filter_mode(option_filter_mode)
     grouped: Dict[int, Dict[float, Dict[str, Any]]] = defaultdict(
         lambda: defaultdict(
             lambda: {
@@ -1616,6 +1799,7 @@ def _finalize_minute_surface(
     )
     minute_key = _to_utc_minute_string(minute_ts)
     precalib_rows: List[Dict[str, Any]] = []
+    records: List[Dict[str, Any]] = []
 
     for candidate, iv in zip(candidates, implied_vols):
         if iv is None or not math.isfinite(iv) or iv <= 0:
@@ -1635,8 +1819,7 @@ def _finalize_minute_surface(
             stats["skip_precalib_iv_above_cap"] += 1
 
         trade_ts = candidate.trade_ts if candidate.trade_ts is not None else minute_ts
-        precalib_rows.append(
-            {
+        audit_row = {
                 "target_datetime_utc": candidate.target_datetime_utc,
                 "window_side": candidate.window_side,
                 "window_start_utc": candidate.window_start_utc,
@@ -1687,23 +1870,44 @@ def _finalize_minute_surface(
                 "rate_curve_sha256": candidate.rate_curve_sha256,
                 "implied_vol": float(iv),
                 "is_otm": "true" if candidate.is_otm else "false",
+                "surface_input_role": (
+                    "otm" if candidate.is_otm else "unfiltered"
+                )
+                if passes_precalib_filter
+                else "",
                 "passes_precalib_filter": "true" if passes_precalib_filter else "false",
                 "filter_reason": filter_reason,
                 "weight": float(candidate.weight),
             }
+        precalib_rows.append(audit_row)
+        records.append(
+            {
+                "candidate": candidate,
+                "implied_vol": float(iv),
+                "percent_strike": float(percent_strike),
+                "selected": bool(passes_precalib_filter),
+                "audit_row": audit_row,
+            }
         )
-        bucket = grouped[candidate.business_days][candidate.strike]
         stats["used_option_rows"] += 1
-        if not passes_precalib_filter:
-            continue
 
-        bucket["iv_weighted_sum"] += float(iv) * candidate.weight
+    if option_filter_mode == "otm_preferred_itm_fallback":
+        _apply_otm_preferred_itm_fallback(records, stats)
+
+    for record in records:
+        if not record["selected"]:
+            continue
+        candidate = record["candidate"]
+        implied_vol = float(record["implied_vol"])
+        percent_strike = float(record["percent_strike"])
+        bucket = grouped[candidate.business_days][candidate.strike]
+        bucket["iv_weighted_sum"] += implied_vol * candidate.weight
         bucket["weight_sum"] += candidate.weight
         bucket["price_weighted_sum"] += candidate.price * candidate.weight
         bucket["spot_weighted_sum"] += candidate.spot * candidate.weight
         bucket["percent_strike_weighted_sum"] += percent_strike * candidate.weight
         bucket["iv_observations"].append(
-            (float(iv), float(candidate.weight))
+            (implied_vol, float(candidate.weight))
         )
 
     business_days_list: List[int] = []
@@ -1792,7 +1996,24 @@ def _finalize_minute_surface(
                 candidates[0].pricing_model if candidates else ""
             ),
             "iv_aggregation_mode": iv_aggregation_mode,
+            "option_filter_mode": option_filter_mode,
+            "max_itm_moneyness_distance": float(
+                max_itm_moneyness_distance
+            ),
             "valid_option_observations": len(precalib_rows),
+            "selected_option_observations": sum(
+                bool(record["selected"]) for record in records
+            ),
+            "selected_otm_observations": sum(
+                bool(record["selected"])
+                and bool(record["candidate"].is_otm)
+                for record in records
+            ),
+            "selected_itm_fallback_observations": sum(
+                bool(record["selected"])
+                and not bool(record["candidate"].is_otm)
+                for record in records
+            ),
             "rejected_option_observations": len(rejected_audit_rows or []),
             "expiry_slice_count": len(business_days_list),
         },

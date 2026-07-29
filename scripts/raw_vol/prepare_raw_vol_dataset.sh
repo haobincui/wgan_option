@@ -16,10 +16,13 @@ RATE_CURVE_PATH="${RATE_CURVE_PATH:-data/reference/us_treasury_par_yield_curve_2
 SOURCE_TIMEZONE="${SOURCE_TIMEZONE:-Europe/London}"
 PUBLICATION_AVAILABILITY_LAG_MINUTES="${PUBLICATION_AVAILABILITY_LAG_MINUTES:-0}"
 RUN_TS="${RUN_TS:-raw_vol_$(date -u +%Y%m%d-%H%M%S)}"
-WINDOW_MINUTES="${WINDOW_MINUTES:-3}"
-MIN_STRIKES_PER_EXPIRY="${MIN_STRIKES_PER_EXPIRY:-3}"
+WINDOW_MINUTES="${WINDOW_MINUTES:-5}"
+MIN_STRIKES_PER_EXPIRY="${MIN_STRIKES_PER_EXPIRY:-2}"
+OPTION_FILTER_MODE="${OPTION_FILTER_MODE:-otm_preferred_itm_fallback}"
+MAX_ITM_MONEYNESS_DISTANCE="${MAX_ITM_MONEYNESS_DISTANCE:-0.05}"
 MIN_USABLE_PAIRS="${MIN_USABLE_PAIRS:-100}"
 WARN_USABLE_PAIRS="${WARN_USABLE_PAIRS:-1000}"
+NUMERICAL_THREADS_PER_WORKER="${NUMERICAL_THREADS_PER_WORKER:-1}"
 DATASET_DIR="data/processed/raw-excel/${RUN_TS}"
 
 activate_env() {
@@ -37,6 +40,13 @@ activate_env() {
 
 activate_env
 
+# ProcessPool workers inherit numerical-library defaults. Cap each worker so
+# calibration_workers does not multiply into thousands of BLAS/OpenMP threads.
+export OMP_NUM_THREADS="${NUMERICAL_THREADS_PER_WORKER}"
+export MKL_NUM_THREADS="${NUMERICAL_THREADS_PER_WORKER}"
+export OPENBLAS_NUM_THREADS="${NUMERICAL_THREADS_PER_WORKER}"
+export NUMEXPR_NUM_THREADS="${NUMERICAL_THREADS_PER_WORKER}"
+
 python scripts/generate_surface/main.py generate_surface \
   --device "${DEVICE}" \
   --config "${CONFIG_PATH}" \
@@ -49,7 +59,9 @@ python scripts/generate_surface/main.py generate_surface \
   --source-timezone "${SOURCE_TIMEZONE}" \
   --publication-availability-lag-minutes "${PUBLICATION_AVAILABILITY_LAG_MINUTES}" \
   --window-minutes "${WINDOW_MINUTES}" \
-  --min-strikes-per-expiry "${MIN_STRIKES_PER_EXPIRY}"
+  --min-strikes-per-expiry "${MIN_STRIKES_PER_EXPIRY}" \
+  --option-filter-mode "${OPTION_FILTER_MODE}" \
+  --max-itm-moneyness-distance "${MAX_ITM_MONEYNESS_DISTANCE}"
 
 python scripts/merge_file/merge_vol.py \
   --input-dir "${DATASET_DIR}" \
