@@ -793,6 +793,36 @@ def build_sample_payload(
             "origin_shift_minutes_mean": _metadata_float(
                 sample.metadata.get("origin_shift_minutes_mean", 0.0)
             ),
+            "publication_market_state": sample.metadata.get(
+                "publication_market_state",
+                "",
+            ),
+            "scheduled_origin_utc": sample.metadata.get(
+                "scheduled_origin_utc",
+                "",
+            ),
+            "origin_tolerance_minutes_used": _metadata_float(
+                sample.metadata.get(
+                    "origin_tolerance_minutes_used",
+                    0.0,
+                )
+            ),
+            "session_shift_minutes": _metadata_float(
+                sample.metadata.get("session_shift_minutes", 0.0)
+            ),
+            "session_shift_reason": sample.metadata.get(
+                "session_shift_reason",
+                "",
+            ),
+            "session_id": sample.metadata.get("session_id", ""),
+            "session_open_utc": sample.metadata.get(
+                "session_open_utc",
+                "",
+            ),
+            "session_close_utc": sample.metadata.get(
+                "session_close_utc",
+                "",
+            ),
             "source_alignment_types": sample.metadata.get(
                 "source_alignment_types",
                 [sample.metadata.get("alignment_type", "exact")],
@@ -1090,6 +1120,42 @@ class FilmWGANSampler:
                     ),
                     "origin_shift_minutes_mean": _metadata_float(
                         sample.metadata.get("origin_shift_minutes_mean", 0.0)
+                    ),
+                    "publication_market_state": sample.metadata.get(
+                        "publication_market_state",
+                        "",
+                    ),
+                    "scheduled_origin_utc": sample.metadata.get(
+                        "scheduled_origin_utc",
+                        "",
+                    ),
+                    "origin_tolerance_minutes_used": _metadata_float(
+                        sample.metadata.get(
+                            "origin_tolerance_minutes_used",
+                            0.0,
+                        )
+                    ),
+                    "session_shift_minutes": _metadata_float(
+                        sample.metadata.get(
+                            "session_shift_minutes",
+                            0.0,
+                        )
+                    ),
+                    "session_shift_reason": sample.metadata.get(
+                        "session_shift_reason",
+                        "",
+                    ),
+                    "session_id": sample.metadata.get(
+                        "session_id",
+                        "",
+                    ),
+                    "session_open_utc": sample.metadata.get(
+                        "session_open_utc",
+                        "",
+                    ),
+                    "session_close_utc": sample.metadata.get(
+                        "session_close_utc",
+                        "",
                     ),
                     "source_alignment_types": json.dumps(
                         sample.metadata.get(

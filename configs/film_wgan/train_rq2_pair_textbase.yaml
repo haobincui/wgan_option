@@ -69,8 +69,9 @@ training:
   lambda_smooth: 0.0
   lambda_recon: 20.0
   recon_weight_mode: short_atm_band
-  recon_atm_range: 0.06
-  recon_atm_short_end_max_days: 90.0
+  # Keep RQ2's local metric identical to the train-only-audited RQ1 definition.
+  recon_atm_range: 0.02
+  recon_atm_short_end_max_days: 21.0
   recon_atm_multiplier: 8.0
   use_calendar_constraint: false
   use_butterfly_constraint: false
@@ -79,8 +80,8 @@ training:
 
   use_atm_short_loss: true
   lambda_atm_short: 30.0
-  atm_short_range: 0.06
-  atm_short_max_days: 90.0
+  atm_short_range: 0.02
+  atm_short_max_days: 21.0
 
   eval_mc_samples: 32
   eval_reweight_beta_mode: fixed

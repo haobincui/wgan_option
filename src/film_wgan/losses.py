@@ -168,7 +168,7 @@ def build_atm_short_mask(
 
 
 def atm_short_pure_mae(predicted: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Unnormalised MAE over the short-maturity × ATM mask (no dilution from non-masked cells)."""
+    """MAE over eligible short-maturity x ATM cells and samples."""
     if predicted.shape != target.shape:
         raise ValueError(f"predicted and target must share the same shape, got {predicted.shape} vs {target.shape}")
     expanded_mask = _expand_weights_to_match(predicted, mask)
@@ -180,11 +180,17 @@ def atm_short_pure_mae(predicted: torch.Tensor, target: torch.Tensor, mask: torc
     masked = abs_error * expanded_mask
     if not has_explicit_batch:
         return masked.sum() / torch.clamp(expanded_mask.sum(), min=1e-12)
+    per_sample_denominator = expanded_mask.reshape(abs_error.shape[0], -1).sum(
+        dim=1
+    )
+    eligible = per_sample_denominator > 0.0
+    if not bool(torch.any(eligible)):
+        return masked.sum() * 0.0
     per_sample = masked.reshape(abs_error.shape[0], -1).sum(dim=1) / torch.clamp(
-        expanded_mask.reshape(abs_error.shape[0], -1).sum(dim=1),
+        per_sample_denominator,
         min=1e-12,
     )
-    return per_sample.mean()
+    return per_sample[eligible].mean()
 
 
 def parameter_count(parameters: Iterable[torch.nn.Parameter]) -> int:

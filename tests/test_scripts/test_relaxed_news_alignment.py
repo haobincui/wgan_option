@@ -15,8 +15,13 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from scripts.raw_vol.relaxed_time_pipeline import _scan_source_files
+from wgan_option.market.treasury_sessions import (  # noqa: E402
+    TreasuryGlobexSessionCalendar,
+)
 from wgan_option.surface_generation.market_index import (
     ForwardAlignmentPolicy,
+    SessionAlignmentPolicy,
+    align_news_to_session_pairs,
     align_news_to_valid_pairs,
     candidate_anchors_from_minutes,
     connect_market_index,
@@ -271,6 +276,105 @@ class ForwardNewsAlignmentTest(unittest.TestCase):
         self.assertEqual(
             aligned.loc[0, "alignment_type"],
             "intraday_shift",
+        )
+
+
+class SessionNewsAlignmentTest(unittest.TestCase):
+    @staticmethod
+    def _news_frame(times):
+        return pd.DataFrame(
+            {
+                "news_row_id": range(1, len(times) + 1),
+                "timestamp_utc": times,
+                "publication_timestamp_utc": times,
+                "timestamp_parse_status": ["ok"] * len(times),
+            }
+        )
+
+    def test_open_news_uses_bounded_tolerance(self):
+        aligned = align_news_to_session_pairs(
+            self._news_frame(
+                [
+                    "2023-03-14T14:00:00Z",
+                    "2023-03-14T15:00:00Z",
+                ]
+            ),
+            [
+                "2023-03-14T14:03:00Z",
+                "2023-03-14T15:06:00Z",
+            ],
+            session_calendar=TreasuryGlobexSessionCalendar(),
+            policy=SessionAlignmentPolicy(origin_tolerance_minutes=5),
+        )
+        self.assertEqual(int(aligned.loc[0, "has_match"]), 1)
+        self.assertEqual(
+            aligned.loc[0, "alignment_type"],
+            "market_open_tolerance_shift",
+        )
+        self.assertEqual(
+            int(aligned.loc[0, "origin_tolerance_minutes_used"]),
+            3,
+        )
+        self.assertEqual(int(aligned.loc[1, "has_match"]), 0)
+        self.assertEqual(
+            aligned.loc[1, "unmatched_reason"],
+            "no_valid_pair_within_origin_tolerance",
+        )
+
+    def test_research_tolerance_cannot_exceed_five_minutes(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "cannot exceed",
+        ):
+            SessionAlignmentPolicy(origin_tolerance_minutes=6)
+
+    def test_closed_news_uses_next_open_and_complete_pair_window(self):
+        aligned = align_news_to_session_pairs(
+            self._news_frame(["2023-03-13T21:30:00Z"]),
+            [
+                "2023-03-13T22:04:00Z",
+                "2023-03-13T22:05:00Z",
+            ],
+            session_calendar=TreasuryGlobexSessionCalendar(),
+            policy=SessionAlignmentPolicy(origin_tolerance_minutes=5),
+        )
+        self.assertEqual(int(aligned.loc[0, "has_match"]), 1)
+        self.assertEqual(
+            aligned.loc[0, "scheduled_origin_utc"],
+            "2023-03-13T22:00:00Z",
+        )
+        self.assertEqual(
+            aligned.loc[0, "effective_origin_utc"],
+            "2023-03-13T22:05:00Z",
+        )
+        self.assertEqual(
+            aligned.loc[0, "current_window_start_utc"],
+            "2023-03-13T22:00:00Z",
+        )
+        self.assertEqual(int(aligned.loc[0, "matching_rank"]), 2)
+        self.assertEqual(
+            aligned.loc[0, "alignment_type"],
+            "closed_to_next_open",
+        )
+        self.assertEqual(
+            aligned.loc[0, "session_shift_reason"],
+            "daily_halt",
+        )
+
+    def test_weekend_news_moves_to_sunday_open(self):
+        aligned = align_news_to_session_pairs(
+            self._news_frame(["2023-03-24T21:30:00Z"]),
+            ["2023-03-26T22:05:00Z"],
+            session_calendar=TreasuryGlobexSessionCalendar(),
+        )
+        self.assertEqual(int(aligned.loc[0, "has_match"]), 1)
+        self.assertEqual(
+            aligned.loc[0, "scheduled_origin_utc"],
+            "2023-03-26T22:00:00Z",
+        )
+        self.assertEqual(
+            aligned.loc[0, "session_shift_reason"],
+            "weekend",
         )
 
 

@@ -26,6 +26,13 @@
       "relative_path": "cme_ty_monthly_expirations_2022_2024.csv",
       "sha256": "41ccef88d9b03968a315ac88526820f2cdfcde01c8938519f080cf634f4602e3",
       "url": "https://www.cmegroup.com/rulebook/CBOT/II/19A.pdf"
+    },
+    {
+      "category": "cme_treasury_session_calendar",
+      "notes": "Frozen regular-session holiday and early-close overrides for 2022-2023; individual CME source URLs are stored in the CSV.",
+      "relative_path": "cme_treasury_globex_closures_2022_2023.csv",
+      "sha256": "cb043278433002d58efb11402c1f84075736110f580ede070e6ac7d39b0cefd3",
+      "url": "https://www.cmegroup.com/trading-hours.html"
     }
   ]
 }

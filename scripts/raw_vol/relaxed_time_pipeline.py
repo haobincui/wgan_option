@@ -9,6 +9,7 @@ import glob
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -38,6 +39,8 @@ from wgan_option.surface_generation.data_helperd.all import (  # noqa: E402
 )
 from wgan_option.surface_generation.market_index import (  # noqa: E402
     ForwardAlignmentPolicy,
+    SessionAlignmentPolicy,
+    align_news_to_session_pairs,
     align_news_to_valid_pairs,
     alignment_summary,
     candidate_anchors_from_minutes,
@@ -53,6 +56,9 @@ from wgan_option.surface_generation.market_index import (  # noqa: E402
     to_utc_minute,
     utc_minute_string,
 )
+from wgan_option.market.treasury_sessions import (  # noqa: E402
+    TreasuryGlobexSessionCalendar,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -67,6 +73,10 @@ DEFAULT_NEWS_WORKBOOK = (
 DEFAULT_RATE_CURVE = (
     ROOT_DIR
     / "data/reference/us_treasury_par_yield_curve_2022_2023.csv"
+)
+DEFAULT_SESSION_CALENDAR = (
+    ROOT_DIR
+    / "data/reference/cme_treasury_globex_closures_2022_2023.csv"
 )
 DEFAULT_STRICT_BASELINE = (
     ROOT_DIR
@@ -805,6 +815,7 @@ def _materialize_dataset_inputs(
     min_expiries_per_minute: int,
     option_filter_mode: str,
     max_itm_moneyness_distance: float,
+    alignment_policy: Mapping[str, Any],
 ) -> None:
     matched = alignment[alignment["has_match"].eq(1)]
     origins = sorted(set(matched["effective_origin_utc"].astype(str)))
@@ -912,13 +923,7 @@ def _materialize_dataset_inputs(
                     max_itm_moneyness_distance
                 ),
                 "iv_aggregation_mode": "volume_weighted_median",
-                "news_alignment_mode": "forward_valid_pair",
-                "intraday_tolerance_minutes": 15,
-                "max_session_shift_minutes": 4320,
-                "require_complete_pair": True,
-                "require_origin_not_before_news": True,
-                "include_session_shifted": True,
-                "collision_policy": "pool_at_nearest_pair",
+                **dict(alignment_policy),
             },
         }
     }
@@ -962,6 +967,11 @@ def build_relaxed_dataset(args: argparse.Namespace) -> Path:
         raise FileNotFoundError(f"Market index does not exist: {database_path}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    alignment_mode = str(
+        getattr(args, "alignment_mode", "forward_valid_pair")
+    )
+    session_calendar_path: Path | None = None
+    session_calendar_snapshot_path: Path | None = None
     connection = connect_market_index(database_path)
     try:
         valid_origins = fetch_valid_pair_origins(connection)
@@ -975,30 +985,110 @@ def build_relaxed_dataset(args: argparse.Namespace) -> Path:
                 args.publication_availability_lag_minutes
             ),
         )
-        policy = ForwardAlignmentPolicy(
-            intraday_tolerance_minutes=int(
-                args.intraday_tolerance_minutes
-            ),
-            max_session_shift_minutes=int(args.max_session_shift_minutes),
-            horizon_minutes=int(args.window_minutes),
-            include_session_shifted=bool(args.include_session_shifted),
-        )
-        alignment = align_news_to_valid_pairs(
-            news,
-            valid_origins,
-            policy=policy,
-        )
-        unmatched_violations = find_unmatched_with_eligible_pair(
-            alignment,
-            valid_origins,
-            max_shift_minutes=int(args.max_session_shift_minutes),
-        )
-        if unmatched_violations:
-            raise AssertionError(
-                "Unmatched rows still have eligible forward pairs: "
-                f"{unmatched_violations[:10]}"
+        if alignment_mode == "exchange_session":
+            session_calendar_path = Path(
+                getattr(
+                    args,
+                    "session_calendar_path",
+                    DEFAULT_SESSION_CALENDAR,
+                )
+            ).expanduser().resolve()
+            session_calendar = TreasuryGlobexSessionCalendar.from_csv(
+                session_calendar_path
             )
-        alignment_path = output_dir / "news_market_alignment.csv"
+            session_policy = SessionAlignmentPolicy(
+                origin_tolerance_minutes=int(
+                    getattr(args, "origin_tolerance_minutes", 5)
+                ),
+                horizon_minutes=int(args.window_minutes),
+                current_window_minutes=int(args.window_minutes),
+            )
+            alignment = align_news_to_session_pairs(
+                news,
+                valid_origins,
+                session_calendar=session_calendar,
+                policy=session_policy,
+            )
+            alignment_path = (
+                output_dir / "news_market_session_alignment.csv"
+            )
+            session_calendar_snapshot_path = (
+                output_dir / "cme_session_calendar_snapshot.csv"
+            )
+            shutil.copy2(
+                session_calendar_path,
+                session_calendar_snapshot_path,
+            )
+            alignment_policy: dict[str, Any] = {
+                "news_alignment_mode": "exchange_session",
+                "session_calendar_path": str(session_calendar_path),
+                "origin_tolerance_minutes": int(
+                    session_policy.origin_tolerance_minutes
+                ),
+                "horizon_minutes": int(session_policy.horizon_minutes),
+                "current_window_minutes": int(
+                    session_policy.current_window_minutes
+                ),
+                "require_complete_pair": True,
+                "require_origin_not_before_scheduled_origin": True,
+                "require_single_continuous_session": True,
+                "closed_news_rule": "next_cme_continuous_session_open",
+                "open_news_rule": "publication_minute",
+                "collision_policy": "pool_at_first_valid_pair",
+            }
+        elif alignment_mode == "forward_valid_pair":
+            policy = ForwardAlignmentPolicy(
+                intraday_tolerance_minutes=int(
+                    args.intraday_tolerance_minutes
+                ),
+                max_session_shift_minutes=int(
+                    args.max_session_shift_minutes
+                ),
+                horizon_minutes=int(args.window_minutes),
+                include_session_shifted=bool(
+                    args.include_session_shifted
+                ),
+            )
+            alignment = align_news_to_valid_pairs(
+                news,
+                valid_origins,
+                policy=policy,
+            )
+            unmatched_violations = find_unmatched_with_eligible_pair(
+                alignment,
+                valid_origins,
+                max_shift_minutes=int(
+                    args.max_session_shift_minutes
+                ),
+            )
+            if unmatched_violations:
+                raise AssertionError(
+                    "Unmatched rows still have eligible forward pairs: "
+                    f"{unmatched_violations[:10]}"
+                )
+            alignment_path = output_dir / "news_market_alignment.csv"
+            alignment_policy = {
+                "news_alignment_mode": "forward_valid_pair",
+                "intraday_tolerance_minutes": int(
+                    args.intraday_tolerance_minutes
+                ),
+                "max_session_shift_minutes": int(
+                    args.max_session_shift_minutes
+                ),
+                "horizon_minutes": int(args.window_minutes),
+                "require_complete_pair": True,
+                "require_origin_not_before_news": True,
+                "include_session_shifted": bool(
+                    args.include_session_shifted
+                ),
+                "collision_policy": "pool_at_nearest_pair",
+            }
+        else:
+            raise ValueError(
+                "Unsupported alignment mode: "
+                f"{alignment_mode!r}"
+            )
+
         alignment.to_csv(alignment_path, index=False)
         alignment.loc[alignment["has_match"].ne(1)].to_csv(
             output_dir / "unmatched_news.csv",
@@ -1021,6 +1111,7 @@ def build_relaxed_dataset(args: argparse.Namespace) -> Path:
             max_itm_moneyness_distance=float(
                 args.max_itm_moneyness_distance
             ),
+            alignment_policy=alignment_policy,
         )
     finally:
         connection.close()
@@ -1039,30 +1130,67 @@ def build_relaxed_dataset(args: argparse.Namespace) -> Path:
     write_workbook(workbook_path, frames)
 
     gan = frames["gan_input_ready"]
-    relaxed_article_rows = int(len(gan))
-    relaxed_unique_pairs = int(
+    gan_article_rows = int(len(gan))
+    gan_unique_pairs = int(
         gan[
             ["current_snapshot_time_utc", "target_snapshot_time_utc"]
         ]
         .drop_duplicates()
         .shape[0]
     )
+    pair_audit = frames["news_surface_pair_audit"]
+    training_candidate = pd.to_numeric(
+        pair_audit["training_candidate_flag"],
+        errors="coerce",
+    ).fillna(0).eq(1)
+    nonempty_lp = (
+        pair_audit["lp_text"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .ne("")
+    )
+    strict_lineage = pair_audit.loc[
+        training_candidate & nonempty_lp
+    ]
+    strict_lineage_article_rows = int(len(strict_lineage))
+    strict_lineage_pair_samples = int(
+        strict_lineage[
+            [
+                "current_snapshot_time_utc",
+                "target_snapshot_time_utc",
+            ]
+        ]
+        .drop_duplicates()
+        .shape[0]
+    )
     strict = _load_strict_baseline(strict_workbook)
     coverage_increased = bool(
-        relaxed_article_rows > strict["strict_matched_article_rows"]
-        and relaxed_unique_pairs > strict["strict_unique_surface_pairs"]
+        gan_article_rows > strict["strict_matched_article_rows"]
+        and gan_unique_pairs > strict["strict_unique_surface_pairs"]
     )
     coverage = {
         "created_at_utc": _now_utc(),
+        "alignment_mode": alignment_mode,
         **alignment_summary(alignment),
         **strict,
-        "relaxed_gan_article_rows": relaxed_article_rows,
-        "relaxed_gan_unique_surface_pairs": relaxed_unique_pairs,
+        "gan_article_rows": gan_article_rows,
+        "gan_unique_surface_pairs": gan_unique_pairs,
+        "pair_level_training_samples": gan_unique_pairs,
+        "strict_text_lineage_article_rows": (
+            strict_lineage_article_rows
+        ),
+        "strict_text_lineage_pair_samples": (
+            strict_lineage_pair_samples
+        ),
+        # Retain legacy names for existing audit consumers.
+        "relaxed_gan_article_rows": gan_article_rows,
+        "relaxed_gan_unique_surface_pairs": gan_unique_pairs,
         "article_row_increase": (
-            relaxed_article_rows - strict["strict_matched_article_rows"]
+            gan_article_rows - strict["strict_matched_article_rows"]
         ),
         "unique_pair_increase": (
-            relaxed_unique_pairs - strict["strict_unique_surface_pairs"]
+            gan_unique_pairs - strict["strict_unique_surface_pairs"]
         ),
         "coverage_increased": coverage_increased,
     }
@@ -1080,38 +1208,32 @@ def build_relaxed_dataset(args: argparse.Namespace) -> Path:
     )
     validation = {
         **coverage,
-        "alignment_policy": {
-            "news_alignment_mode": "forward_valid_pair",
-            "intraday_tolerance_minutes": int(
-                args.intraday_tolerance_minutes
-            ),
-            "max_session_shift_minutes": int(
-                args.max_session_shift_minutes
-            ),
-            "horizon_minutes": int(args.window_minutes),
-            "require_complete_pair": True,
-            "require_origin_not_before_news": True,
-            "include_session_shifted": bool(args.include_session_shifted),
-            "collision_policy": "pool_at_nearest_pair",
-        },
+        "alignment_policy": alignment_policy,
         "status": "ok" if coverage_increased else "failed_no_coverage_gain",
     }
     _write_json(output_dir / "validation_summary.json", validation)
-    _write_dataset_manifest(
-        output_dir,
-        [
-            ("market_index", database_path),
-            ("news_workbook", news_workbook),
-            ("strict_baseline", strict_workbook),
-            ("rate_curve", rate_curve),
-            ("alignment", alignment_path),
-            ("merged_workbook", workbook_path),
-        ],
-    )
+    manifest_sources = [
+        ("market_index", database_path),
+        ("news_workbook", news_workbook),
+        ("strict_baseline", strict_workbook),
+        ("rate_curve", rate_curve),
+        ("alignment", alignment_path),
+        ("merged_workbook", workbook_path),
+    ]
+    if session_calendar_path is not None:
+        manifest_sources.append(
+            ("session_calendar_source", session_calendar_path)
+        )
+    if session_calendar_snapshot_path is not None:
+        manifest_sources.append(
+            ("session_calendar_snapshot", session_calendar_snapshot_path)
+        )
+    _write_dataset_manifest(output_dir, manifest_sources)
     if not coverage_increased:
         raise RuntimeError(
-            "Relaxed alignment did not improve both article-row and unique-pair "
-            "coverage; training must not start. See alignment_coverage_summary.csv."
+            f"{alignment_mode} alignment did not improve both article-row "
+            "and unique-pair coverage; training must not start. See "
+            "alignment_coverage_summary.csv."
         )
     return output_dir
 
@@ -1156,6 +1278,20 @@ def _add_dataset_arguments(parser: argparse.ArgumentParser) -> None:
         "--publication-availability-lag-minutes",
         type=int,
         default=0,
+    )
+    parser.add_argument(
+        "--alignment-mode",
+        choices=("forward_valid_pair", "exchange_session"),
+        default="forward_valid_pair",
+    )
+    parser.add_argument(
+        "--session-calendar-path",
+        default=str(DEFAULT_SESSION_CALENDAR),
+    )
+    parser.add_argument(
+        "--origin-tolerance-minutes",
+        type=int,
+        default=5,
     )
     parser.add_argument("--window-minutes", type=int, default=5)
     parser.add_argument("--intraday-tolerance-minutes", type=int, default=15)
@@ -1212,6 +1348,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--publication-availability-lag-minutes",
         type=int,
         default=0,
+    )
+    run.add_argument(
+        "--alignment-mode",
+        choices=("forward_valid_pair", "exchange_session"),
+        default="forward_valid_pair",
+    )
+    run.add_argument(
+        "--session-calendar-path",
+        default=str(DEFAULT_SESSION_CALENDAR),
+    )
+    run.add_argument(
+        "--origin-tolerance-minutes",
+        type=int,
+        default=5,
     )
     run.add_argument("--intraday-tolerance-minutes", type=int, default=15)
     run.add_argument("--max-session-shift-minutes", type=int, default=4320)

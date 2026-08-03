@@ -8,7 +8,7 @@ EXPERIMENT_ROOT="${EXPERIMENT_ROOT:-}"
 if [[ -z "${EXPERIMENT_ROOT}" ]]; then
   EXPERIMENT_ROOT="$(
     find outputs/experiments -maxdepth 1 -type d \
-      -name 'rq1_pair_text_raw_vol_rolling_*' -printf '%p\n' |
+      -name 'rq1_pair_text_raw_vol_continuation_*' -printf '%p\n' |
       sort |
       tail -n 1
   )"
@@ -40,7 +40,29 @@ fi
 if [[ -f "${REGISTRY_PATH}" ]]; then
   GENERATED_RUNS="$(( $(wc -l < "${REGISTRY_PATH}") - 1 ))"
   GENERATED_SAMPLES="$(awk -F, 'NR>1 {sum += $6} END {print sum + 0}' "${REGISTRY_PATH}")"
-  echo "generated_runs=${GENERATED_RUNS}/72"
+  EXPECTED_RUNS="$(python -c '
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+for relative in (
+    "inputs/experiment_design.json",
+    "final_tables/development_rq1_result_summary.json",
+    "validation_summary.json",
+):
+    path = root / relative
+    if not path.is_file():
+        continue
+    payload = json.load(open(path, encoding="utf-8"))
+    if payload.get("expected_training_runs"):
+        print(payload["expected_training_runs"])
+        break
+    if payload.get("seeds"):
+        print(4 * len(payload["seeds"]) * 7)
+        break
+else:
+    print("unknown")
+' "${EXPERIMENT_ROOT}")"
+  echo "generated_runs=${GENERATED_RUNS}/${EXPECTED_RUNS}"
   echo "generated_samples=${GENERATED_SAMPLES}"
 fi
 

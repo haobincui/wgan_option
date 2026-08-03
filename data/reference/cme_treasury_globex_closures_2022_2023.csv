@@ -1,0 +1,23 @@
+closed_start_utc,closed_end_utc,event_name,source_url,notes
+2022-01-17T18:00:00Z,2022-01-17T23:00:00Z,Martin Luther King Jr. Day,https://www.cmegroup.com/trading-hours.html,Interest Rate products halt at 12:00 CT and reopen at 17:00 CT.
+2022-02-21T18:00:00Z,2022-02-21T23:00:00Z,Presidents Day,https://www.cmegroup.com/trading-hours.html,Interest Rate products halt at 12:00 CT and reopen at 17:00 CT.
+2022-04-15T15:15:00Z,2022-04-15T21:00:00Z,Good Friday,https://www.cmegroup.com/trading-hours/files/good-friday.pdf,Interest Rate products close at 10:15 CT; the regular Friday close is 16:00 CT.
+2022-05-30T17:00:00Z,2022-05-30T22:00:00Z,Memorial Day,https://www.cmegroup.com/tools-information/holiday-calendar/files/memorial-day-holiday-settlement-times-2022.pdf,Interest Rate products halt at 12:00 CT and reopen at 17:00 CT.
+2022-06-20T17:00:00Z,2022-06-20T22:00:00Z,Juneteenth observed,https://www.cmegroup.com/trading-hours.html,Interest Rate products halt at 12:00 CT and reopen at 17:00 CT.
+2022-07-04T17:00:00Z,2022-07-04T22:00:00Z,Independence Day,https://www.cmegroup.com/trading-hours.html,Interest Rate products halt at 12:00 CT and reopen at 17:00 CT.
+2022-09-05T17:00:00Z,2022-09-05T22:00:00Z,Labor Day,https://www.cmegroup.com/trading-hours.html,Interest Rate products halt at 12:00 CT and reopen at 17:00 CT.
+2022-11-24T18:00:00Z,2022-11-24T23:00:00Z,Thanksgiving Day,https://www.cmegroup.com/trading-hours/files/thanksgiving-day-2023.pdf,Interest Rate products halt at 12:00 CT and reopen at 17:00 CT; the same product schedule applied in 2022.
+2022-11-25T18:15:00Z,2022-11-25T22:00:00Z,Thanksgiving Friday early close,https://www.cmegroup.com/trading-hours/files/thanksgiving-day-2023.pdf,Interest Rate products close at 12:15 CT instead of the regular 16:00 CT close.
+2022-12-25T23:00:00Z,2022-12-26T23:00:00Z,Christmas Day observed,https://www.cmegroup.com/tools-information/holiday-calendar/files/christmas-holiday-settlement-times-2022.pdf,The Sunday session does not open; Interest Rate products open Monday at 17:00 CT.
+2023-01-01T23:00:00Z,2023-01-02T23:00:00Z,New Years Day observed,https://www.cmegroup.com/trading-hours.html,The Sunday session does not open; Interest Rate products open Monday at 17:00 CT.
+2023-01-16T18:00:00Z,2023-01-16T23:00:00Z,Martin Luther King Jr. Day,https://www.cmegroup.com/trading-hours.html,Interest Rate products halt at 12:00 CT and reopen at 17:00 CT.
+2023-02-20T18:00:00Z,2023-02-20T23:00:00Z,Presidents Day,https://www.cmegroup.com/trading-hours.html,Interest Rate products halt at 12:00 CT and reopen at 17:00 CT.
+2023-04-07T15:15:00Z,2023-04-07T21:00:00Z,Good Friday,https://www.cmegroup.com/trading-hours/files/good-friday.pdf,Interest Rate products close at 10:15 CT; the regular Friday close is 16:00 CT.
+2023-05-29T17:00:00Z,2023-05-29T22:00:00Z,Memorial Day,https://www.cmegroup.com/trading-hours/files/memorial-day-2023.pdf,Interest Rate products halt at 12:00 CT and reopen at 17:00 CT.
+2023-06-19T17:00:00Z,2023-06-19T22:00:00Z,Juneteenth,https://www.cmegroup.com/trading-hours/files/juneteenth-2023.pdf,Interest Rate products halt at 12:00 CT and reopen at 17:00 CT.
+2023-07-04T17:00:00Z,2023-07-04T22:00:00Z,Independence Day,https://www.cmegroup.com/trading-hours/files/4th-of-july-2023.pdf,Interest Rate products halt at 12:00 CT and reopen at 17:00 CT.
+2023-09-04T17:00:00Z,2023-09-04T22:00:00Z,Labor Day,https://www.cmegroup.com/trading-hours/files/labor-day-2023.pdf,Interest Rate products halt at 12:00 CT and reopen at 17:00 CT.
+2023-11-23T18:00:00Z,2023-11-23T23:00:00Z,Thanksgiving Day,https://www.cmegroup.com/trading-hours/files/thanksgiving-day-2023.pdf,Interest Rate products halt at 12:00 CT and reopen at 17:00 CT.
+2023-11-24T18:15:00Z,2023-11-24T22:00:00Z,Thanksgiving Friday early close,https://www.cmegroup.com/trading-hours/files/thanksgiving-day-2023.pdf,Interest Rate products close at 12:15 CT instead of the regular 16:00 CT close.
+2023-12-24T23:00:00Z,2023-12-25T23:00:00Z,Christmas Day,https://www.cmegroup.com/trading-hours/files/christmas-day-2023.pdf,The Sunday session does not open; Interest Rate products open Monday at 17:00 CT.
+2023-12-31T23:00:00Z,2024-01-01T23:00:00Z,New Years Day,https://www.cmegroup.com/trading-hours/files/new-years-day-2024.pdf,The Sunday session does not open; Interest Rate products open Monday at 17:00 CT.

@@ -512,3 +512,16 @@ experiment size preserved: 163601236089 bytes
 
 One GPU-visible `table_c7.py` process remained after the stop. Its command and process group were
 unrelated to this RQ123 worktree and experiment, so it was intentionally left running.
+
+
+
+
+
+做一个滚动，e.g. 使用20天 (t - 20) 来预测下一个， 保证信息都拿到，
+
+attention weight， ， 历史某一个时间点对今天可能会有影响，，不需要手动处理weights。
+
+
+冲击对图像冲击的解释性， 不同的冲击大小对图像冲击的程度。
+
+使用MC来模拟，来做情景分析，讲究实用角度。

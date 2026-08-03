@@ -5,8 +5,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${REPO_ROOT}"
 
 EXPERIMENT_ROOT="${EXPERIMENT_ROOT:-}"
-GPU_IDS="${GPU_IDS:-0 1}"
-RUNS_PER_GPU="${RUNS_PER_GPU:-2}"
+GPU_IDS="${GPU_IDS:-0}"
+RUNS_PER_GPU="${RUNS_PER_GPU:-13}"
 ENV_NAME="${ENV_NAME:-py312}"
 TASKS_ONLY="${TASKS_ONLY:-0}"
 if [[ -z "${EXPERIMENT_ROOT}" ]]; then
@@ -41,7 +41,17 @@ for gpu in "${GPUS[@]}"; do
 done
 
 FOLDS=(2023Q1 2023Q2 2023Q3 2023Q4)
-SEEDS=(42 202 404)
+SEED_LIST="$(conda run -n "${ENV_NAME}" python -c '
+import sys
+from pathlib import Path
+from scripts.rq1_pair import rq1_pair_experiment
+print(" ".join(str(value) for value in rq1_pair_experiment._experiment_seeds(Path(sys.argv[1]))))
+' "${EXPERIMENT_ROOT}")"
+read -r -a SEEDS <<<"${SEED_LIST}"
+if [[ "${#SEEDS[@]}" -lt 1 ]]; then
+  echo "No seeds registered for ${EXPERIMENT_ROOT}." >&2
+  exit 1
+fi
 PARENT_VARIANT=pair_pca_no_text_residual
 STAGE_B_VARIANTS=(
   pair_pca_no_text_continued
@@ -77,7 +87,7 @@ run_phase() {
     done
   done
 
-  echo "Starting RQ1 ${phase}: gpus=${GPUS[*]}, runs_per_gpu=${RUNS_PER_GPU}, workers=${#SLOT_GPUS[@]}"
+  echo "Starting RQ1 ${phase}: seeds=${#SEEDS[@]}, gpus=${GPUS[*]}, runs_per_gpu=${RUNS_PER_GPU}, workers=${#SLOT_GPUS[@]}"
   if [[ "${TASKS_ONLY}" == "1" ]]; then
     wc -l "${task_files[@]}"
     return

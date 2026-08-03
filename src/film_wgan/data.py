@@ -37,6 +37,7 @@ _VOL_FLOOR = 1e-4
 _FORECAST_HORIZON_MINUTES = 5
 _INTRADAY_ALIGNMENT_MAX_MINUTES = 15
 _FORWARD_ALIGNMENT_MAX_MINUTES = 72 * 60
+_SESSION_ORIGIN_TOLERANCE_MAX_MINUTES = 5
 
 
 def _parse_serialized_list(value: Any) -> list[float]:
@@ -210,7 +211,7 @@ def _validate_sample_timing(sample: FilmWGANSample) -> None:
     ).strip().lower()
     if alignment_mode in {"", "nan", "none"}:
         alignment_mode = "exact"
-    if alignment_mode != "forward_valid_pair":
+    if alignment_mode not in {"forward_valid_pair", "exchange_session"}:
         if news_timestamp != current_timestamp:
             raise ValueError(
                 f"Sample {sample.sample_id} violates news=current timestamp: "
@@ -250,11 +251,6 @@ def _validate_sample_timing(sample: FilmWGANSample) -> None:
         raise ValueError(
             f"Sample {sample.sample_id} has an origin before news availability."
         )
-    if shift_minutes > _FORWARD_ALIGNMENT_MAX_MINUTES:
-        raise ValueError(
-            f"Sample {sample.sample_id} exceeds the "
-            f"{_FORWARD_ALIGNMENT_MAX_MINUTES}-minute forward alignment limit."
-        )
 
     recorded_shift = pd.to_numeric(
         pd.Series([sample.metadata.get("origin_shift_minutes")]),
@@ -271,15 +267,131 @@ def _validate_sample_timing(sample: FilmWGANSample) -> None:
             "the timestamp-derived shift."
         )
 
+    recorded_alignment_type = str(
+        sample.metadata.get("alignment_type", "")
+    ).strip().lower()
+    if alignment_mode == "exchange_session":
+        scheduled_origin = pd.Timestamp(
+            _canonical_timestamp(
+                sample.metadata.get("scheduled_origin_utc", "")
+            )
+        )
+        if scheduled_origin < available_timestamp:
+            raise ValueError(
+                f"Sample {sample.sample_id} scheduled origin precedes "
+                "news availability."
+            )
+        tolerance_minutes = (
+            current_timestamp - scheduled_origin
+        ).total_seconds() / 60.0
+        if tolerance_minutes < 0 or (
+            tolerance_minutes
+            > _SESSION_ORIGIN_TOLERANCE_MAX_MINUTES
+        ):
+            raise ValueError(
+                f"Sample {sample.sample_id} exceeds the "
+                f"{_SESSION_ORIGIN_TOLERANCE_MAX_MINUTES}-minute "
+                "session-origin tolerance."
+            )
+        recorded_tolerance = pd.to_numeric(
+            pd.Series(
+                [
+                    sample.metadata.get(
+                        "origin_tolerance_minutes_used"
+                    )
+                ]
+            ),
+            errors="coerce",
+        ).iloc[0]
+        if pd.isna(recorded_tolerance) or not np.isclose(
+            float(recorded_tolerance),
+            tolerance_minutes,
+            atol=1e-6,
+            rtol=0.0,
+        ):
+            raise ValueError(
+                f"Sample {sample.sample_id} origin tolerance does not "
+                "match the timestamp-derived tolerance."
+            )
+
+        market_state = str(
+            sample.metadata.get("publication_market_state", "")
+        ).strip().lower()
+        if market_state == "open":
+            if scheduled_origin != available_timestamp:
+                raise ValueError(
+                    f"Sample {sample.sample_id} open-session news must "
+                    "retain its publication minute."
+                )
+            expected_alignment_type = (
+                "exact"
+                if tolerance_minutes == 0
+                else "market_open_tolerance_shift"
+            )
+        elif market_state == "closed":
+            if scheduled_origin <= available_timestamp:
+                raise ValueError(
+                    f"Sample {sample.sample_id} closed-session news must "
+                    "move to a later session open."
+                )
+            expected_alignment_type = "closed_to_next_open"
+        else:
+            raise ValueError(
+                f"Sample {sample.sample_id} has invalid "
+                f"publication_market_state={market_state!r}."
+            )
+
+        session_open = pd.Timestamp(
+            _canonical_timestamp(
+                sample.metadata.get("session_open_utc", "")
+            )
+        )
+        session_close = pd.Timestamp(
+            _canonical_timestamp(
+                sample.metadata.get("session_close_utc", "")
+            )
+        )
+        current_window_start = pd.Timestamp(
+            _canonical_timestamp(
+                sample.metadata.get("current_window_start_utc", "")
+            )
+        )
+        target_window_end = pd.Timestamp(
+            _canonical_timestamp(
+                sample.metadata.get("target_window_end_utc", "")
+            )
+        )
+        if (
+            current_window_start
+            != current_timestamp
+            - pd.Timedelta(minutes=_FORECAST_HORIZON_MINUTES)
+            or target_window_end != target_timestamp
+            or current_window_start < session_open
+            or target_window_end > session_close
+        ):
+            raise ValueError(
+                f"Sample {sample.sample_id} crosses its recorded CME "
+                "continuous-session boundary."
+            )
+        if recorded_alignment_type != expected_alignment_type:
+            raise ValueError(
+                f"Sample {sample.sample_id} alignment_type="
+                f"{recorded_alignment_type!r} does not match "
+                f"{expected_alignment_type!r}."
+            )
+        return
+
+    if shift_minutes > _FORWARD_ALIGNMENT_MAX_MINUTES:
+        raise ValueError(
+            f"Sample {sample.sample_id} exceeds the "
+            f"{_FORWARD_ALIGNMENT_MAX_MINUTES}-minute forward alignment limit."
+        )
     if shift_minutes == 0:
         expected_alignment_type = "exact"
     elif shift_minutes <= _INTRADAY_ALIGNMENT_MAX_MINUTES:
         expected_alignment_type = "intraday_shift"
     else:
         expected_alignment_type = "session_shift"
-    recorded_alignment_type = str(
-        sample.metadata.get("alignment_type", "")
-    ).strip().lower()
     if recorded_alignment_type != expected_alignment_type:
         raise ValueError(
             f"Sample {sample.sample_id} alignment_type="
@@ -580,6 +692,42 @@ def load_film_wgan_samples(config: FilmWGANTrainConfig | FilmWGANSampleConfig) -
                     "effective_origin_quarter": getattr(
                         row,
                         "effective_origin_quarter",
+                        "",
+                    ),
+                    "publication_market_state": getattr(
+                        row,
+                        "publication_market_state",
+                        "",
+                    ),
+                    "scheduled_origin_utc": getattr(
+                        row,
+                        "scheduled_origin_utc",
+                        "",
+                    ),
+                    "origin_tolerance_minutes_used": getattr(
+                        row,
+                        "origin_tolerance_minutes_used",
+                        "",
+                    ),
+                    "session_shift_minutes": getattr(
+                        row,
+                        "session_shift_minutes",
+                        "",
+                    ),
+                    "session_shift_reason": getattr(
+                        row,
+                        "session_shift_reason",
+                        "",
+                    ),
+                    "session_id": getattr(row, "session_id", ""),
+                    "session_open_utc": getattr(
+                        row,
+                        "session_open_utc",
+                        "",
+                    ),
+                    "session_close_utc": getattr(
+                        row,
+                        "session_close_utc",
                         "",
                     ),
                     "quiet_buffer_minutes": getattr(row, "quiet_buffer_minutes", ""),

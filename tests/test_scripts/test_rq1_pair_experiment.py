@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from unittest import mock
 
@@ -253,6 +254,56 @@ class TestPairTextData(unittest.TestCase):
                     )
                 )
 
+    def test_exchange_session_timing_accepts_next_open_plus_tolerance(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook, news_workbook = _write_pair_fixture(tmpdir)
+            frame = pd.read_excel(workbook, sheet_name="gan_input_ready")
+            news_time = pd.Timestamp(frame.loc[0, "news_timestamp_utc"])
+            scheduled_origin = news_time + pd.Timedelta(minutes=30)
+            origin = scheduled_origin + pd.Timedelta(minutes=5)
+            target = origin + pd.Timedelta(minutes=5)
+            frame.loc[0, "news_alignment_mode"] = "exchange_session"
+            frame.loc[0, "news_available_time_utc"] = news_time.isoformat()
+            frame.loc[0, "effective_origin_utc"] = origin.isoformat()
+            frame.loc[0, "origin_shift_minutes"] = 35
+            frame.loc[0, "alignment_type"] = "closed_to_next_open"
+            frame.loc[0, "publication_market_state"] = "closed"
+            frame.loc[0, "scheduled_origin_utc"] = (
+                scheduled_origin.isoformat()
+            )
+            frame.loc[0, "origin_tolerance_minutes_used"] = 5
+            frame.loc[0, "session_shift_minutes"] = 30
+            frame.loc[0, "session_shift_reason"] = "daily_halt"
+            frame.loc[0, "session_id"] = "test_session"
+            frame.loc[0, "session_open_utc"] = (
+                scheduled_origin.isoformat()
+            )
+            frame.loc[0, "session_close_utc"] = (
+                scheduled_origin + pd.Timedelta(hours=23)
+            ).isoformat()
+            frame.loc[0, "current_window_start_utc"] = (
+                origin - pd.Timedelta(minutes=5)
+            ).isoformat()
+            frame.loc[0, "current_window_end_utc"] = origin.isoformat()
+            frame.loc[0, "target_window_start_utc"] = origin.isoformat()
+            frame.loc[0, "target_window_end_utc"] = target.isoformat()
+            frame.loc[0, "current_snapshot_time_utc"] = origin.isoformat()
+            frame.loc[0, "target_snapshot_time_utc"] = target.isoformat()
+            with pd.ExcelWriter(workbook, engine="openpyxl") as writer:
+                frame.to_excel(
+                    writer,
+                    sheet_name="gan_input_ready",
+                    index=False,
+                )
+
+            config = _pair_config(
+                workbook,
+                news_workbook,
+                Path(tmpdir) / "transform.npz",
+            )
+            bundle = create_train_val_bundle(config)
+            self.assertEqual(len(bundle.all_items), 8)
+
     def test_transform_round_trip_uses_only_supplied_train_pairs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             values = np.asarray(
@@ -424,6 +475,127 @@ class TestResidualFiLMArchitecture(unittest.TestCase):
 
 
 class TestPairRollingComparison(unittest.TestCase):
+    def test_default_seed_set_is_frozen_to_fifteen_unique_seeds(self):
+        self.assertEqual(len(rq1_pair_experiment.SEEDS), 15)
+        self.assertEqual(len(set(rq1_pair_experiment.SEEDS)), 15)
+        self.assertEqual(rq1_pair_experiment.SEEDS[:3], (42, 202, 404))
+
+    def test_experiment_seed_manifest_preserves_legacy_seed_set(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            design = root / "inputs/experiment_design.json"
+            design.parent.mkdir(parents=True)
+            design.write_text(
+                json.dumps({"seeds": [42, 202, 404]}),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                rq1_pair_experiment._experiment_seeds(root),
+                (42, 202, 404),
+            )
+
+    def test_compact_fifteen_seed_config_keeps_only_primary_checkpoints(self):
+        training = rq1_pair_experiment._read_yaml(
+            ROOT / "configs/film_wgan/train_rq1_pair_textbase_15seed.yaml"
+        )["training"]
+        self.assertEqual(int(training["save_every"]), 0)
+        self.assertEqual(training["extra_checkpoint_metrics"], [])
+        self.assertEqual(training["checkpoint_metric"], "val_mae")
+
+    def test_short_atm_support_audit_uses_distinct_train_supported_region(self):
+        params = json.dumps(
+            {
+                "business_days": [7, 45],
+                "percent_strikes": [
+                    [0.98, 1.0, 1.02, 1.04],
+                    [0.98, 1.0, 1.02, 1.04],
+                ],
+                "implied_vols": [
+                    [0.20, 0.19, 0.20, 0.21],
+                    [0.22, 0.21, 0.22, 0.23],
+                ],
+            }
+        )
+        samples = [
+            SimpleNamespace(
+                strike_grid=np.asarray([0.98, 1.0, 1.02, 1.04]),
+                maturity_days_grid=np.asarray([7.0, 14.0, 21.0, 30.0, 45.0]),
+                evaluation_support_mask=np.ones((5, 4), dtype=bool),
+                metadata={
+                    "current_surface_param_json": params,
+                    "target_surface_param_json": params,
+                },
+            )
+            for _ in range(4)
+        ]
+        split_items = (("train", samples), ("val", samples), ("test", samples))
+        support_rows = rq1_pair_experiment._short_atm_support_rows(
+            fold="2023Q1",
+            split_items=split_items,
+            atm_range=0.02,
+            selected_max_days=21.0,
+        )
+        rq1_pair_experiment._validate_selected_short_atm_rows(support_rows)
+        selected_train = next(
+            row
+            for row in support_rows
+            if row["split"] == "train" and row["selected"] == 1
+        )
+        self.assertEqual(selected_train["grid_atm_strike_count"], 3)
+        self.assertEqual(selected_train["grid_short_maturity_count"], 3)
+        self.assertAlmostEqual(
+            selected_train["local_supported_cell_share"],
+            9.0 / 20.0,
+        )
+        self.assertEqual(selected_train["eligible_pair_ratio"], 1.0)
+
+        maturity_rows = rq1_pair_experiment._raw_maturity_distribution_rows(
+            fold="2023Q1",
+            split_items=split_items,
+        )
+        train_combined = next(
+            row
+            for row in maturity_rows
+            if row["split"] == "train" and row["surface_side"] == "combined"
+        )
+        self.assertEqual(train_combined["raw_slice_count"], 16)
+        self.assertAlmostEqual(train_combined["p50_days"], 26.0)
+
+    def test_short_atm_support_audit_rejects_full_support_mask(self):
+        sample = SimpleNamespace(
+            strike_grid=np.asarray([0.98, 1.0, 1.02]),
+            maturity_days_grid=np.asarray([7.0, 21.0]),
+            evaluation_support_mask=np.ones((2, 3), dtype=bool),
+        )
+        rows = rq1_pair_experiment._short_atm_support_rows(
+            fold="2023Q1",
+            split_items=(("train", [sample] * 4),),
+            atm_range=0.10,
+            selected_max_days=45.0,
+            maturity_candidates=(45.0,),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "selected short-ATM support equals full support",
+        ):
+            rq1_pair_experiment._validate_selected_short_atm_rows(rows)
+
+    def test_rq1_and_rq2_configs_share_audited_short_atm_definition(self):
+        rq1_training = rq1_pair_experiment._read_yaml(
+            rq1_pair_experiment.DEFAULT_CONFIG
+        )["training"]
+        rq2_training = rq1_pair_experiment._read_yaml(
+            ROOT / "configs/film_wgan/train_rq2_pair_textbase.yaml"
+        )["training"]
+        for training in (rq1_training, rq2_training):
+            self.assertAlmostEqual(float(training["atm_short_range"]), 0.02)
+            self.assertAlmostEqual(float(training["atm_short_max_days"]), 21.0)
+            self.assertAlmostEqual(float(training["recon_atm_range"]), 0.02)
+            self.assertAlmostEqual(
+                float(training["recon_atm_short_end_max_days"]),
+                21.0,
+            )
+
     def test_no_text_continuation_uses_the_paired_stage_b_schedule(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             parent = Path(tmpdir) / "parent.pt"
@@ -610,7 +782,11 @@ class TestPairRollingComparison(unittest.TestCase):
                                     + pd.Timedelta(days=index % 40)
                                 ).isoformat(),
                                 "surface_mae": base + variant_offsets[variant],
-                                "short_atm_mae": base * 0.8 + variant_offsets[variant],
+                                "short_atm_mae": (
+                                    float("nan")
+                                    if index % 5 == 0
+                                    else base * 0.8 + variant_offsets[variant]
+                                ),
                                 "supported_shortest_atm_abs_err": (
                                     base * 0.9 + variant_offsets[variant]
                                 ),
@@ -723,6 +899,21 @@ class TestPairRollingComparison(unittest.TestCase):
             )
             self.assertEqual(set(primary_all["metric"]), set(rq1_pair_experiment.POINT_METRICS))
             self.assertEqual(set(overall["variant"]), set(rq1_pair_experiment.VARIANTS))
+            short_primary = primary_all[
+                primary_all["metric"] == "short_atm_mae"
+            ].iloc[0]
+            expected_short_pairs = sum(
+                int(specification["counts"][2])
+                - (int(specification["counts"][2]) + 4) // 5
+                for specification in rq1_pair_experiment.FOLDS.values()
+            )
+            self.assertEqual(
+                int(short_primary["pair_count"]),
+                expected_short_pairs,
+            )
+            self.assertTrue(
+                np.isfinite(float(short_primary["mean_difference"]))
+            )
             self.assertEqual(result_summary["status"], "ok")
             self.assertEqual(
                 result_summary["difference_direction"],

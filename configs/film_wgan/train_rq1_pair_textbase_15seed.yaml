@@ -67,7 +67,6 @@ training:
   lambda_smooth: 0.0
   lambda_recon: 20.0
   recon_weight_mode: short_atm_band
-  # Frozen from train-fold-only raw maturity/support audits.
   recon_atm_range: 0.02
   recon_atm_short_end_max_days: 21.0
   recon_atm_multiplier: 8.0
@@ -89,10 +88,9 @@ training:
   arbitrage_violation_tolerance: 1.0e-8
 
   checkpoint_metric: val_mae
-  extra_checkpoint_metrics:
-    - val_mae_gap_vs_current
-    - val_short_atm_mae_gap_vs_current
-    - val_atm_short_pure_mae_gap_vs_current
+  # The 420-run matrix retains the selected and final checkpoints. All
+  # per-epoch/alternative-metric values remain available in training_metrics.
+  extra_checkpoint_metrics: []
   checkpoint_warmup_epochs: 10
   use_early_stopping: true
   early_stopping_patience: 7
@@ -106,7 +104,7 @@ training:
   output_root: ""
   checkpoints_path: ""
   metrics_path: ""
-  save_every: 5
+  save_every: 0
 
 generate_result:
   mc_samples: 64

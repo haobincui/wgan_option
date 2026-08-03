@@ -156,9 +156,16 @@ SUPPORTED_GENERATE_SURFACE_CONFIG_KEYS = {
     "news_alignment_mode",
     "intraday_tolerance_minutes",
     "max_session_shift_minutes",
+    "session_calendar_path",
+    "origin_tolerance_minutes",
+    "current_window_minutes",
     "require_complete_pair",
     "require_origin_not_before_news",
+    "require_origin_not_before_scheduled_origin",
+    "require_single_continuous_session",
     "include_session_shifted",
+    "closed_news_rule",
+    "open_news_rule",
     "collision_policy",
 }
 
@@ -840,9 +847,16 @@ def _build_resolved_config_payload(args: argparse.Namespace) -> Dict[str, Any]:
         "news_alignment_mode",
         "intraday_tolerance_minutes",
         "max_session_shift_minutes",
+        "session_calendar_path",
+        "origin_tolerance_minutes",
+        "current_window_minutes",
         "require_complete_pair",
         "require_origin_not_before_news",
+        "require_origin_not_before_scheduled_origin",
+        "require_single_continuous_session",
         "include_session_shifted",
+        "closed_news_rule",
+        "open_news_rule",
         "collision_policy",
     )
     for key in optional_keys:

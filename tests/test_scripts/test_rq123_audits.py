@@ -12,6 +12,7 @@ from scripts.rq123.audit_sentiment_scores import prepare
 from scripts.rq123.corrected_pipeline import snapshot_inputs
 from scripts.raw_vol.raw_vol_pipeline import (
     _precalibration_audit_summary,
+    _workbook_summary,
 )
 
 
@@ -238,6 +239,57 @@ class Rq123AuditTests(unittest.TestCase):
             )
             self.assertFalse(
                 invalid["precalibration_corrected_inputs_ok"]
+            )
+
+    def test_workbook_summary_separates_surface_and_text_lineage_counts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workbook = Path(temporary) / "merged_vol.xlsx"
+            current = [
+                "2023-01-03T14:00:00Z",
+                "2023-01-03T14:10:00Z",
+                "2023-01-03T14:20:00Z",
+            ]
+            target = [
+                "2023-01-03T14:05:00Z",
+                "2023-01-03T14:15:00Z",
+                "2023-01-03T14:25:00Z",
+            ]
+            pair = pd.DataFrame(
+                {
+                    "training_candidate_flag": [1, 1, 1],
+                    "pair_quality_label": ["usable"] * 3,
+                    "lp_text": ["one", "", "three"],
+                    "current_snapshot_time_utc": current,
+                    "target_snapshot_time_utc": target,
+                }
+            )
+            gan = pd.DataFrame(
+                {
+                    "current_snapshot_time_utc": current,
+                    "target_snapshot_time_utc": target,
+                }
+            )
+            with pd.ExcelWriter(workbook, engine="openpyxl") as writer:
+                pair.to_excel(
+                    writer,
+                    sheet_name="news_surface_pair_audit",
+                    index=False,
+                )
+                gan.to_excel(
+                    writer,
+                    sheet_name="gan_input_ready",
+                    index=False,
+                )
+
+            summary = _workbook_summary(workbook)
+            self.assertEqual(summary["pair_level_training_samples"], 3)
+            self.assertEqual(
+                summary["strict_text_lineage_article_rows"],
+                2,
+            )
+            self.assertEqual(
+                summary["strict_text_lineage_pair_samples"],
+                2,
             )
 
 

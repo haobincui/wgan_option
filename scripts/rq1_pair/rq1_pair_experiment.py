@@ -32,6 +32,7 @@ from film_wgan.data import (  # noqa: E402
     create_train_val_bundle,
     load_film_wgan_samples,
 )
+from film_wgan.support import parse_raw_surface_params  # noqa: E402
 from film_wgan.text_transform import sha256_file  # noqa: E402
 from film_wgan.text_lineage import write_text_lineage_artifacts  # noqa: E402
 
@@ -45,8 +46,43 @@ SUMMARY_DOCUMENT = ROOT / "docs/summary/rq_research_logic_and_methodology_review
 EXPERIMENT_PREFIX = "rq1_pair_text_raw_vol_continuation_"
 EXPECTED_SURFACE_MODEL = "raw"
 EXPECTED_NEWS_SOURCE_TIMEZONE = "Europe/London"
+SHORT_MATURITY_CANDIDATES = (7.0, 14.0, 21.0, 30.0, 45.0)
+SHORT_ATM_MIN_TRAIN_PAIR_COVERAGE = 0.80
+SHORT_ATM_MIN_TRAIN_FOUR_CELL_COVERAGE = 0.65
+SHORT_ATM_MAX_TRAIN_CELL_SHARE = 0.80
+RAW_MATURITY_QUANTILES = (
+    0.0,
+    0.05,
+    0.10,
+    0.25,
+    0.50,
+    0.75,
+    0.90,
+    0.95,
+    1.0,
+)
 
-SEEDS = (42, 202, 404)
+SEED_SET_VERSION = "rq1_15_seed_v1"
+SEED_GENERATION_MASTER_SEED = 20260722
+# Keep the original three seeds, then append 12 values drawn once from the
+# preregistered master seed. The explicit tuple is the reproducibility record.
+SEEDS = (
+    42,
+    202,
+    404,
+    382624741,
+    1607127774,
+    1662128673,
+    2041145538,
+    2014889368,
+    1343862330,
+    779214671,
+    880839647,
+    2131106188,
+    2137949052,
+    1340168857,
+    1682828188,
+)
 PARENT_VARIANT = "pair_pca_no_text_residual"
 CONTINUATION_VARIANT = "pair_pca_no_text_continued"
 TEXT_RESIDUAL_VARIANT = "pair_pca_text_residual_pretrained"
@@ -157,6 +193,179 @@ def _write_json(path: Path, payload: Any) -> None:
     )
 
 
+def _raw_maturity_distribution_rows(
+    *,
+    fold: str,
+    split_items: Sequence[tuple[str, Sequence[Any]]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    quantile_names = (
+        "min_days",
+        "p05_days",
+        "p10_days",
+        "p25_days",
+        "p50_days",
+        "p75_days",
+        "p90_days",
+        "p95_days",
+        "max_days",
+    )
+    for split, items in split_items:
+        side_values: dict[str, list[float]] = {"current": [], "target": []}
+        for sample in items:
+            current = parse_raw_surface_params(
+                sample.metadata.get("current_surface_param_json", "")
+            )
+            target = parse_raw_surface_params(
+                sample.metadata.get("target_surface_param_json", "")
+            )
+            side_values["current"].extend(
+                float(value) for value in current["business_days"]
+            )
+            side_values["target"].extend(
+                float(value) for value in target["business_days"]
+            )
+        combined = side_values["current"] + side_values["target"]
+        for side, values in (*side_values.items(), ("combined", combined)):
+            maturity_days = np.asarray(values, dtype=np.float64)
+            if maturity_days.size == 0:
+                raise ValueError(f"{fold}/{split}/{side} has no raw maturity observations.")
+            quantiles = np.quantile(maturity_days, RAW_MATURITY_QUANTILES)
+            row: dict[str, Any] = {
+                "fold": fold,
+                "split": split,
+                "surface_side": side,
+                "pair_count": len(items),
+                "raw_slice_count": int(maturity_days.size),
+                "unique_maturity_count": int(np.unique(maturity_days).size),
+            }
+            row.update(
+                {
+                    name: float(value)
+                    for name, value in zip(quantile_names, quantiles)
+                }
+            )
+            rows.append(row)
+    return rows
+
+
+def _short_atm_support_rows(
+    *,
+    fold: str,
+    split_items: Sequence[tuple[str, Sequence[Any]]],
+    atm_range: float,
+    selected_max_days: float,
+    maturity_candidates: Sequence[float] = SHORT_MATURITY_CANDIDATES,
+) -> list[dict[str, Any]]:
+    if not any(
+        np.isclose(float(candidate), float(selected_max_days))
+        for candidate in maturity_candidates
+    ):
+        raise ValueError(
+            f"Selected short maturity {selected_max_days} is not present in "
+            f"candidates {tuple(maturity_candidates)}."
+        )
+    rows: list[dict[str, Any]] = []
+    for split, items in split_items:
+        if not items:
+            raise ValueError(
+                f"{fold}/{split} has no samples for short-ATM support audit."
+            )
+        strike_grid = np.asarray(items[0].strike_grid, dtype=np.float64)
+        maturity_grid = np.asarray(items[0].maturity_days_grid, dtype=np.float64)
+        support_masks = np.stack(
+            [np.asarray(sample.evaluation_support_mask, dtype=bool) for sample in items]
+        )
+        total_supported_cells = int(support_masks.sum())
+        if total_supported_cells <= 0:
+            raise ValueError(f"{fold}/{split} has no evaluation-supported raw-vol cells.")
+        strike_mask = np.abs(strike_grid - 1.0) <= float(atm_range) + 1e-9
+        for max_days in maturity_candidates:
+            local_template = (
+                maturity_grid[:, None] <= float(max_days) + 1e-9
+            ) & strike_mask[None, :]
+            local_counts = (support_masks & local_template).sum(axis=(1, 2))
+            eligible = local_counts > 0
+            four_or_more = local_counts >= 4
+            local_supported_cells = int(local_counts.sum())
+            rows.append(
+                {
+                    "fold": fold,
+                    "split": split,
+                    "atm_range": float(atm_range),
+                    "maturity_max_business_days": float(max_days),
+                    "selected": int(
+                        np.isclose(float(max_days), float(selected_max_days))
+                    ),
+                    "pair_count": len(items),
+                    "grid_atm_strike_count": int(strike_mask.sum()),
+                    "grid_short_maturity_count": int(
+                        (maturity_grid <= float(max_days) + 1e-9).sum()
+                    ),
+                    "grid_local_cell_count": int(local_template.sum()),
+                    "total_supported_cell_count": total_supported_cells,
+                    "local_supported_cell_count": local_supported_cells,
+                    "local_supported_cell_share": (
+                        float(local_supported_cells / total_supported_cells)
+                    ),
+                    "eligible_pair_count": int(eligible.sum()),
+                    "eligible_pair_ratio": float(eligible.mean()),
+                    "four_cell_pair_count": int(four_or_more.sum()),
+                    "four_cell_pair_ratio": float(four_or_more.mean()),
+                    "median_local_cells_all_pairs": float(np.median(local_counts)),
+                    "median_local_cells_eligible_pairs": (
+                        float(np.median(local_counts[eligible]))
+                        if bool(eligible.any())
+                        else 0.0
+                    ),
+                }
+            )
+    return rows
+
+
+def _validate_selected_short_atm_rows(rows: Sequence[dict[str, Any]]) -> None:
+    selected_train_rows = [
+        row
+        for row in rows
+        if row["split"] == "train" and int(row["selected"]) == 1
+    ]
+    if not selected_train_rows:
+        raise ValueError("Short-ATM audit has no selected train-fold rows.")
+    failures: list[str] = []
+    for row in selected_train_rows:
+        fold = str(row["fold"])
+        if int(row["grid_local_cell_count"]) <= 0:
+            failures.append(f"{fold}: selected short-ATM grid is empty")
+        if int(row["local_supported_cell_count"]) >= int(
+            row["total_supported_cell_count"]
+        ):
+            failures.append(f"{fold}: selected short-ATM support equals full support")
+        if float(row["eligible_pair_ratio"]) < SHORT_ATM_MIN_TRAIN_PAIR_COVERAGE:
+            failures.append(
+                f"{fold}: eligible_pair_ratio={row['eligible_pair_ratio']:.3f} "
+                f"< {SHORT_ATM_MIN_TRAIN_PAIR_COVERAGE:.3f}"
+            )
+        if (
+            float(row["four_cell_pair_ratio"])
+            < SHORT_ATM_MIN_TRAIN_FOUR_CELL_COVERAGE
+        ):
+            failures.append(
+                f"{fold}: four_cell_pair_ratio={row['four_cell_pair_ratio']:.3f} "
+                f"< {SHORT_ATM_MIN_TRAIN_FOUR_CELL_COVERAGE:.3f}"
+            )
+        if (
+            float(row["local_supported_cell_share"])
+            >= SHORT_ATM_MAX_TRAIN_CELL_SHARE
+        ):
+            failures.append(
+                f"{fold}: local_supported_cell_share="
+                f"{row['local_supported_cell_share']:.3f} "
+                f">= {SHORT_ATM_MAX_TRAIN_CELL_SHARE:.3f}"
+            )
+    if failures:
+        raise ValueError("Invalid selected short-ATM region: " + "; ".join(failures))
+
+
 def _latest_experiment() -> Path:
     candidates = sorted((ROOT / "outputs/experiments").glob(f"{EXPERIMENT_PREFIX}*"))
     if not candidates:
@@ -171,6 +380,40 @@ def _resolve_root(value: str | None, *, create: bool = False) -> Path:
     if create:
         return ROOT / "outputs/experiments" / f"{EXPERIMENT_PREFIX}{_utc_timestamp()}"
     return _latest_experiment()
+
+
+def _normalize_seeds(values: Sequence[int]) -> tuple[int, ...]:
+    seeds = tuple(int(value) for value in values)
+    if not seeds:
+        raise ValueError("At least one experiment seed is required.")
+    if len(set(seeds)) != len(seeds):
+        raise ValueError(f"Experiment seeds must be unique: {seeds}")
+    if any(seed < 0 or seed >= 2**31 for seed in seeds):
+        raise ValueError("Experiment seeds must be integers in [0, 2**31).")
+    return seeds
+
+
+def _experiment_seeds(root: Path) -> tuple[int, ...]:
+    """Read the frozen seed set while preserving legacy experiment archives."""
+    candidate_paths = (
+        root / "inputs/experiment_design.json",
+        root / "final_tables/development_rq1_result_summary.json",
+        root / "validation_summary.json",
+    )
+    for path in candidate_paths:
+        if not path.is_file():
+            continue
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        values = payload.get("seeds")
+        if values:
+            return _normalize_seeds(values)
+    registry_path = root / "registry/launch_registry.csv"
+    if registry_path.is_file():
+        registry = pd.read_csv(registry_path, usecols=["seed"])
+        values = sorted(int(value) for value in registry["seed"].dropna().unique())
+        if values:
+            return _normalize_seeds(values)
+    return _normalize_seeds(SEEDS)
 
 
 def _assert_py312() -> None:
@@ -455,6 +698,9 @@ def _stage_registry_fields(
 def prepare_experiment(args: argparse.Namespace) -> Path:
     _assert_py312()
     root = _resolve_root(args.experiment_root, create=True)
+    experiment_seeds = _normalize_seeds(
+        getattr(args, "seeds", None) or SEEDS
+    )
     if root.exists() and any(root.iterdir()) and not args.reuse:
         raise FileExistsError(f"Experiment directory is not empty: {root}")
     for relative in (
@@ -518,6 +764,24 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
         f"commit={commit}\n{git_state}",
         encoding="utf-8",
     )
+    _write_json(
+        root / "inputs/experiment_design.json",
+        {
+            "seed_set_version": (
+                SEED_SET_VERSION
+                if experiment_seeds == tuple(SEEDS)
+                else "custom"
+            ),
+            "seed_generation_master_seed": SEED_GENERATION_MASTER_SEED,
+            "seeds": list(experiment_seeds),
+            "seed_count": len(experiment_seeds),
+            "fold_count": len(FOLDS),
+            "variant_count": len(VARIANTS),
+            "expected_training_runs": (
+                len(FOLDS) * len(experiment_seeds) * len(VARIANTS)
+            ),
+        },
+    )
 
     training.update(
         data_path=str(copied_workbook),
@@ -537,6 +801,8 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
     }
 
     fold_validation: dict[str, Any] = {}
+    maturity_audit_rows: list[dict[str, Any]] = []
+    short_atm_audit_rows: list[dict[str, Any]] = []
     for fold, specification in FOLDS.items():
         fold_root = _fold_dir(root, fold)
         fold_root.mkdir(parents=True, exist_ok=True)
@@ -573,12 +839,36 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             fold_config_path,
             {"training": fold_training, "generate_result": generate},
         )
-        bundle = create_train_val_bundle(load_train_config(fold_config_path))
+        fold_config = load_train_config(fold_config_path)
+        bundle = create_train_val_bundle(fold_config)
         actual_counts = (bundle.train_samples, bundle.val_samples, bundle.test_samples)
         if min(actual_counts) <= 0:
             raise ValueError(
                 f"Rolling fold {fold} has an empty train/validation/test split: {actual_counts}."
             )
+        split_items = (
+            ("train", bundle.train_items),
+            ("val", bundle.val_items),
+            ("test", bundle.test_items),
+        )
+        maturity_audit_rows.extend(
+            _raw_maturity_distribution_rows(
+                fold=fold,
+                split_items=split_items,
+            )
+        )
+        fold_short_atm_rows = _short_atm_support_rows(
+            fold=fold,
+            split_items=split_items,
+            atm_range=float(fold_config.atm_short_range),
+            selected_max_days=float(fold_config.atm_short_max_days),
+        )
+        short_atm_audit_rows.extend(fold_short_atm_rows)
+        selected_train_row = next(
+            row
+            for row in fold_short_atm_rows
+            if row["split"] == "train" and int(row["selected"]) == 1
+        )
         pair_rows = []
         permutation_rows = []
         for split, items in (
@@ -650,7 +940,61 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             "text_transform_sha256": sha256_file(transform_path),
             "surface_support_sha256": sha256_file(surface_support_path),
             "surface_support_path": str(surface_support_path),
+            "short_atm_range": float(fold_config.atm_short_range),
+            "short_maturity_max_business_days": float(
+                fold_config.atm_short_max_days
+            ),
+            "short_atm_train_eligible_pair_ratio": float(
+                selected_train_row["eligible_pair_ratio"]
+            ),
+            "short_atm_train_four_cell_pair_ratio": float(
+                selected_train_row["four_cell_pair_ratio"]
+            ),
+            "short_atm_train_local_supported_cell_share": float(
+                selected_train_row["local_supported_cell_share"]
+            ),
         }
+
+    _validate_selected_short_atm_rows(short_atm_audit_rows)
+    maturity_audit_path = root / "inputs/audit/raw_maturity_distribution_by_fold.csv"
+    short_atm_audit_path = root / "inputs/audit/short_atm_support_by_fold.csv"
+    pd.DataFrame(maturity_audit_rows).to_csv(maturity_audit_path, index=False)
+    pd.DataFrame(short_atm_audit_rows).to_csv(short_atm_audit_path, index=False)
+    selected_train_rows = [
+        row
+        for row in short_atm_audit_rows
+        if row["split"] == "train" and int(row["selected"]) == 1
+    ]
+    short_atm_selection_path = root / "inputs/audit/short_atm_selection.json"
+    _write_json(
+        short_atm_selection_path,
+        {
+            "selection_basis": "rolling_fold_train_pairs_only",
+            "maturity_unit": "business_days",
+            "atm_definition": "abs(moneyness - 1.0) <= atm_range",
+            "selected_atm_range": float(training["atm_short_range"]),
+            "selected_maturity_max_business_days": float(
+                training["atm_short_max_days"]
+            ),
+            "candidate_maturity_max_business_days": list(
+                SHORT_MATURITY_CANDIDATES
+            ),
+            "acceptance_thresholds": {
+                "minimum_train_eligible_pair_ratio": (
+                    SHORT_ATM_MIN_TRAIN_PAIR_COVERAGE
+                ),
+                "minimum_train_four_cell_pair_ratio": (
+                    SHORT_ATM_MIN_TRAIN_FOUR_CELL_COVERAGE
+                ),
+                "maximum_train_local_supported_cell_share": (
+                    SHORT_ATM_MAX_TRAIN_CELL_SHARE
+                ),
+            },
+            "selected_train_fold_results": selected_train_rows,
+            "maturity_distribution_csv": str(maturity_audit_path),
+            "support_audit_csv": str(short_atm_audit_path),
+        },
+    )
 
     input_rows = []
     for path in sorted((root / "inputs").rglob("*")):
@@ -677,10 +1021,16 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             "text_lineage_manifest_sha256": sha256_file(
                 text_audit_paths["manifest"]
             ),
+            "short_atm_selection": str(short_atm_selection_path),
+            "short_atm_selection_sha256": sha256_file(
+                short_atm_selection_path
+            ),
             "models": list(VARIANTS),
-            "seeds": list(SEEDS),
+            "seeds": list(experiment_seeds),
             "folds": fold_validation,
-            "expected_training_runs": len(FOLDS) * len(SEEDS) * len(VARIANTS),
+            "expected_training_runs": (
+                len(FOLDS) * len(experiment_seeds) * len(VARIANTS)
+            ),
         },
     )
     print(root)
@@ -690,8 +1040,19 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
 def train_matrix(args: argparse.Namespace) -> Path:
     _assert_py312()
     root = _resolve_root(args.experiment_root)
+    experiment_seeds = _experiment_seeds(root)
     selected_folds = [args.fold] if getattr(args, "fold", "") else list(FOLDS)
-    selected_seeds = [int(args.seed)] if getattr(args, "seed", None) is not None else list(SEEDS)
+    requested_seed = getattr(args, "seed", None)
+    if requested_seed is not None and int(requested_seed) not in experiment_seeds:
+        raise ValueError(
+            f"Seed {requested_seed} is not registered for this experiment; "
+            f"expected one of {experiment_seeds}."
+        )
+    selected_seeds = (
+        [int(requested_seed)]
+        if requested_seed is not None
+        else list(experiment_seeds)
+    )
     selected_variants = (
         [args.variant] if getattr(args, "variant", "") else list(VARIANTS)
     )
@@ -798,9 +1159,10 @@ def train_matrix(args: argparse.Namespace) -> Path:
 
 def monitor(args: argparse.Namespace) -> Path:
     root = _resolve_root(args.experiment_root)
+    experiment_seeds = _experiment_seeds(root)
     rows = []
     for fold in FOLDS:
-        for seed in SEEDS:
+        for seed in experiment_seeds:
             for variant in VARIANTS:
                 output_root = root / "training_runs" / variant / fold / f"seed_{seed}"
                 runs = _run_dirs(output_root)
@@ -855,7 +1217,10 @@ def _cached_sha256(path: Path | None, cache: dict[Path, str]) -> str:
 def _paired_stage_audit(
     selected: pd.DataFrame,
     resolved_configs: dict[tuple[str, int, str], dict[str, Any]],
+    *,
+    seeds: Sequence[int] | None = None,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    selected_seeds = _normalize_seeds(seeds or SEEDS)
     selected_by_run = selected.set_index(["fold", "seed", "variant"], verify_integrity=True)
     sha_cache: dict[Path, str] = {}
     audit_rows: list[dict[str, Any]] = []
@@ -889,7 +1254,7 @@ def _paired_stage_audit(
     }
 
     for fold in FOLDS:
-        for seed in SEEDS:
+        for seed in selected_seeds:
             parent_key = (fold, seed, PARENT_VARIANT)
             parent_row = selected_by_run.loc[parent_key]
             expected_parent_path = Path(str(parent_row["checkpoint_path"])).resolve()
@@ -966,11 +1331,12 @@ def _paired_stage_audit(
 
 def collect_checkpoints(args: argparse.Namespace) -> Path:
     root = _resolve_root(args.experiment_root)
+    experiment_seeds = _experiment_seeds(root)
     rows = []
     resolved_configs: dict[tuple[str, int, str], dict[str, Any]] = {}
     artifact_sha_cache: dict[Path, str] = {}
     for fold in FOLDS:
-        for seed in SEEDS:
+        for seed in experiment_seeds:
             for variant in VARIANTS:
                 run_root = root / "training_runs" / variant / fold / f"seed_{seed}"
                 run_dir = _completed_run(run_root)
@@ -1037,9 +1403,11 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
     audit_rows = []
     failures = []
     for fold in FOLDS:
-        reference = resolved_configs[(fold, SEEDS[0], "pair_pca_no_text_residual")]
+        reference = resolved_configs[
+            (fold, experiment_seeds[0], "pair_pca_no_text_residual")
+        ]
         reference = dict(reference.get("training") or reference)
-        for seed in SEEDS:
+        for seed in experiment_seeds:
             for variant in VARIANTS:
                 candidate_raw = resolved_configs[(fold, seed, variant)]
                 candidate = dict(candidate_raw.get("training") or candidate_raw)
@@ -1071,7 +1439,11 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
         root / "checkpoint_selection/resolved_config_audit.csv",
         index=False,
     )
-    paired_stage_audit, paired_stage_failures = _paired_stage_audit(frame, resolved_configs)
+    paired_stage_audit, paired_stage_failures = _paired_stage_audit(
+        frame,
+        resolved_configs,
+        seeds=experiment_seeds,
+    )
     paired_stage_audit.to_csv(
         root / "checkpoint_selection/paired_stage_validation.csv",
         index=False,
@@ -1163,6 +1535,9 @@ def _cluster_bootstrap(
     iterations: int,
     seed: int,
 ) -> tuple[float, float, float, float]:
+    frame = frame.loc[
+        np.isfinite(pd.to_numeric(frame["difference"], errors="coerce"))
+    ].copy()
     cluster_values = [
         group["difference"].to_numpy(dtype=np.float64)
         for _day, group in frame.groupby("trading_day", sort=True)
@@ -1190,6 +1565,9 @@ def _dm_hac_daily(
     *,
     max_lag: int = 5,
 ) -> dict[str, float | int]:
+    frame = frame.loc[
+        np.isfinite(pd.to_numeric(frame["difference"], errors="coerce"))
+    ].copy()
     daily = (
         frame.groupby("trading_day", sort=True)["difference"]
         .mean()
@@ -1266,6 +1644,7 @@ def _write_result_summary(
     bootstrap: pd.DataFrame,
     seed_tests: pd.DataFrame,
 ) -> None:
+    experiment_seeds = _experiment_seeds(root)
     metric_columns = [*POINT_METRICS, *PROBABILISTIC_METRICS, *FINANCIAL_METRICS]
     overall_rows = []
     for variant, group in samples.groupby("variant", sort=True):
@@ -1279,6 +1658,12 @@ def _write_result_summary(
             "seed_count": int(group["seed"].nunique()),
         }
         row.update({metric: float(group[metric].mean()) for metric in metric_columns})
+        row.update(
+            {
+                f"{metric}_pair_count": int(group[metric].count())
+                for metric in metric_columns
+            }
+        )
         overall_rows.append(row)
     overall = pd.DataFrame(overall_rows)
     overall_path = root / "final_tables/development_rq1_model_overall_metrics.csv"
@@ -1305,7 +1690,7 @@ def _write_result_summary(
         "difference_direction": "no_text_error_minus_text_error",
         "positive_means_text_better": True,
         "folds": list(FOLDS),
-        "seeds": list(SEEDS),
+        "seeds": list(experiment_seeds),
         "variants": list(VARIANTS),
         "primary_metrics": json.loads(primary.to_json(orient="records")),
         "model_overall_point_metrics": json.loads(
@@ -1382,6 +1767,7 @@ def _write_result_summary(
 
 def build_comparison(args: argparse.Namespace) -> Path:
     root = _resolve_root(args.experiment_root)
+    experiment_seeds = _experiment_seeds(root)
     (root / "comparisons").mkdir(parents=True, exist_ok=True)
     (root / "final_tables").mkdir(parents=True, exist_ok=True)
     registry_path = root / "registry/generate_registry.csv"
@@ -1420,7 +1806,7 @@ def build_comparison(args: argparse.Namespace) -> Path:
     )
     expected_rows = (
         sum(_fold_counts(root, fold)[2] for fold in FOLDS)
-        * len(SEEDS)
+        * len(experiment_seeds)
         * len(VARIANTS)
     )
     if len(samples) != expected_rows:
@@ -1433,6 +1819,12 @@ def build_comparison(args: argparse.Namespace) -> Path:
     for keys, group in samples.groupby(["variant", "fold", "seed"], sort=True):
         row = {"variant": keys[0], "fold": keys[1], "seed": int(keys[2]), "n_pairs": len(group)}
         row.update({metric: float(group[metric].mean()) for metric in metric_columns})
+        row.update(
+            {
+                f"{metric}_pair_count": int(group[metric].count())
+                for metric in metric_columns
+            }
+        )
         summary_rows.append(row)
     model_summary = pd.DataFrame(summary_rows)
     model_summary["financial_metric_status"] = (
@@ -1448,6 +1840,10 @@ def build_comparison(args: argparse.Namespace) -> Path:
             n_pairs=("surface_pair_id", "size"),
             **{
                 metric: (metric, "mean")
+                for metric in metric_columns
+            },
+            **{
+                f"{metric}_pair_count": (metric, "count")
                 for metric in metric_columns
             },
         )
@@ -1521,7 +1917,11 @@ def build_comparison(args: argparse.Namespace) -> Path:
             ["contrast", "focal_variant", "baseline_variant", "fold", "seed", "metric"],
             as_index=False,
         )
-        .agg(mean_difference=("difference", "mean"), pair_count=("difference", "size"))
+        .agg(
+            mean_difference=("difference", "mean"),
+            pair_count=("difference", "count"),
+            total_pair_count=("difference", "size"),
+        )
     )
     fold_summary.to_csv(root / "comparisons/development_fold_seed_differences.csv", index=False)
 
@@ -1530,14 +1930,15 @@ def build_comparison(args: argparse.Namespace) -> Path:
         as_index=False,
     ).agg(
         mean_difference=("difference", "mean"),
-        pair_count=("difference", "size"),
+        pair_count=("difference", "count"),
+        total_pair_count=("difference", "size"),
     )
     fold_directions = fold_summary.groupby(
         ["contrast", "focal_variant", "baseline_variant", "seed", "metric"],
         as_index=False,
     ).agg(
         positive_fold_count=("mean_difference", lambda values: int(np.sum(np.asarray(values) > 0.0))),
-        fold_count=("mean_difference", "size"),
+        fold_count=("mean_difference", "count"),
     )
     seed_directions = seed_directions.merge(
         fold_directions,
@@ -1550,7 +1951,11 @@ def build_comparison(args: argparse.Namespace) -> Path:
         ["contrast", "focal_variant", "baseline_variant", "metric"],
         sort=True,
     ):
-        values = group.sort_values("seed")["mean_difference"].to_numpy(dtype=np.float64)
+        values = (
+            group.sort_values("seed")["mean_difference"]
+            .dropna()
+            .to_numpy(dtype=np.float64)
+        )
         t_result = stats.ttest_1samp(values, popmean=0.0)
         if np.allclose(values, 0.0):
             wilcoxon_statistic, wilcoxon_p = 0.0, 1.0
@@ -1589,6 +1994,9 @@ def build_comparison(args: argparse.Namespace) -> Path:
         ["contrast", "focal_variant", "baseline_variant", "metric"],
         sort=True,
     ):
+        group = group.loc[
+            np.isfinite(pd.to_numeric(group["difference"], errors="coerce"))
+        ].copy()
         seed_average = (
             group.groupby(
                 ["fold", "surface_pair_id", "current_snapshot_time_utc", "trading_day"],
@@ -1657,6 +2065,9 @@ def build_comparison(args: argparse.Namespace) -> Path:
         ],
         sort=True,
     ):
+        group = group.loc[
+            np.isfinite(pd.to_numeric(group["difference"], errors="coerce"))
+        ].copy()
         seed_average = (
             group.groupby(
                 [
@@ -1755,6 +2166,11 @@ def build_comparison(args: argparse.Namespace) -> Path:
     for policy, keep_mask in duplicate_policies.items():
         policy_frame = incremental.loc[keep_mask].copy()
         for metric, metric_frame in policy_frame.groupby("metric", sort=True):
+            metric_frame = metric_frame.loc[
+                np.isfinite(
+                    pd.to_numeric(metric_frame["difference"], errors="coerce")
+                )
+            ].copy()
             seed_average = (
                 metric_frame.groupby(
                     [
@@ -1840,6 +2256,11 @@ def build_comparison(args: argparse.Namespace) -> Path:
         "development_only": True,
         "claim_limit": "No untouched 2024+ confirmation data are available.",
         "training_runs": int(len(registry)),
+        "seeds": list(experiment_seeds),
+        "seed_count": len(experiment_seeds),
+        "expected_training_runs": (
+            len(FOLDS) * len(experiment_seeds) * len(VARIANTS)
+        ),
         "sample_metric_rows": int(len(samples)),
         "pairwise_difference_rows": int(len(differences)),
         "fold_test_pair_counts": {
@@ -1907,6 +2328,7 @@ for this irregular local-support experiment.
 def run_results_pipeline(args: argparse.Namespace) -> Path:
     _assert_py312()
     root = _resolve_root(args.experiment_root)
+    experiment_seeds = _experiment_seeds(root)
     status_path = root / "registry/results_pipeline_status.json"
     state: dict[str, Any] = {
         "status": "running",
@@ -1937,7 +2359,7 @@ def run_results_pipeline(args: argparse.Namespace) -> Path:
         update_stage("collect_checkpoints", "running")
         collect_checkpoints(argparse.Namespace(experiment_root=str(root)))
         selected = pd.read_csv(root / "checkpoint_selection/selected_checkpoints.csv")
-        expected_runs = len(FOLDS) * len(SEEDS) * len(VARIANTS)
+        expected_runs = len(FOLDS) * len(experiment_seeds) * len(VARIANTS)
         if len(selected) != expected_runs:
             raise ValueError(
                 f"Selected checkpoint count mismatch: {len(selected)} != {expected_runs}."
@@ -2044,13 +2466,14 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--config", default=str(DEFAULT_CONFIG))
     prepare.add_argument("--workbook", default=str(DEFAULT_WORKBOOK))
     prepare.add_argument("--news-workbook", default=str(DEFAULT_NEWS_WORKBOOK))
+    prepare.add_argument("--seeds", nargs="+", type=int, default=list(SEEDS))
     prepare.add_argument("--reuse", action="store_true")
 
     train = subparsers.add_parser("train-matrix")
     train.add_argument("--experiment-root", default="")
     train.add_argument("--resume", action="store_true")
     train.add_argument("--fold", choices=list(FOLDS), default="")
-    train.add_argument("--seed", type=int, choices=list(SEEDS), default=None)
+    train.add_argument("--seed", type=int, default=None)
     train.add_argument("--variant", choices=list(VARIANTS), default="")
     train.add_argument(
         "--no-registry-write",

@@ -35,6 +35,7 @@ from film_wgan.inference import (  # noqa: E402
     summarize_surface_scenarios,
 )
 from film_wgan.losses import (  # noqa: E402
+    atm_short_pure_mae,
     build_reconstruction_weight_template,
     gradient_penalty,
     weighted_surface_mae,
@@ -334,6 +335,27 @@ class TestFilmWGANLossWeighting(unittest.TestCase):
         plain = torch.nn.functional.l1_loss(predicted, target)
 
         self.assertLess(float(weighted.item()), float(plain.item()))
+
+    def test_atm_short_mae_excludes_batch_samples_without_local_support(self):
+        predicted = torch.tensor(
+            [
+                [[2.0, 4.0], [8.0, 16.0]],
+                [[100.0, 100.0], [100.0, 100.0]],
+            ],
+            dtype=torch.float32,
+        )
+        target = torch.zeros_like(predicted)
+        mask = torch.tensor(
+            [
+                [[1.0, 1.0], [0.0, 0.0]],
+                [[0.0, 0.0], [0.0, 0.0]],
+            ],
+            dtype=torch.float32,
+        )
+
+        value = atm_short_pure_mae(predicted, target, mask)
+
+        self.assertAlmostEqual(float(value.item()), 3.0, places=6)
 
 
 class TestFilmWGANConfiguration(unittest.TestCase):
@@ -986,7 +1008,7 @@ class TestFilmWGANTrainerMetrics(unittest.TestCase):
                         "cuda": False,
                         "num_workers": 0,
                         "output_root": str(output_root),
-                        "save_every": 20,
+                        "save_every": 0,
                         "checkpoint_metric": "val_atm_short_pure_mae_gap_vs_current",
                         "extra_checkpoint_metrics": [
                             "val_mae_gap_vs_current",
@@ -1129,6 +1151,7 @@ class TestFilmWGANTrainerMetrics(unittest.TestCase):
             self.assertTrue((checkpoints_dir / "film_wgan_best.pt").exists())
             self.assertTrue((checkpoints_dir / "film_wgan_best_val_mae_gap_vs_current.pt").exists())
             self.assertTrue((checkpoints_dir / "film_wgan_best_val_short_atm_mae_gap_vs_current.pt").exists())
+            self.assertFalse(any(checkpoints_dir.glob("film_wgan_epoch_*.pt")))
 
 
 class TestFilmWGANInitializationSmoke(unittest.TestCase):

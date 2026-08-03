@@ -71,6 +71,14 @@ ALIGNMENT_AUDIT_HEADERS = [
     "target_window_end_utc",
     "original_news_quarter",
     "effective_origin_quarter",
+    "publication_market_state",
+    "scheduled_origin_utc",
+    "origin_tolerance_minutes_used",
+    "session_shift_minutes",
+    "session_shift_reason",
+    "session_id",
+    "session_open_utc",
+    "session_close_utc",
 ]
 
 PAIR_AUDIT_HEADERS = [
@@ -347,7 +355,10 @@ def _base_pair_fields(
         ),
         "news_timestamp_utc": normalize_optional_text(news_row.get("timestamp_utc", "")),
         "news_alignment_mode": (
-            "forward_valid_pair" if has_alignment else "exact"
+            normalize_optional_text(
+                alignment.get("news_alignment_mode", "")
+            )
+            or ("forward_valid_pair" if has_alignment else "exact")
         ),
         "news_available_time_utc": normalize_optional_text(
             alignment.get(
@@ -390,6 +401,32 @@ def _base_pair_fields(
         ),
         "effective_origin_quarter": normalize_optional_text(
             alignment.get("effective_origin_quarter", "")
+        ),
+        "publication_market_state": normalize_optional_text(
+            alignment.get("publication_market_state", "")
+        ),
+        "scheduled_origin_utc": normalize_optional_text(
+            alignment.get("scheduled_origin_utc", "")
+        ),
+        "origin_tolerance_minutes_used": coerce_optional_numeric(
+            safe_float(
+                alignment.get("origin_tolerance_minutes_used")
+            )
+        ),
+        "session_shift_minutes": coerce_optional_numeric(
+            safe_float(alignment.get("session_shift_minutes"))
+        ),
+        "session_shift_reason": normalize_optional_text(
+            alignment.get("session_shift_reason", "")
+        ),
+        "session_id": normalize_optional_text(
+            alignment.get("session_id", "")
+        ),
+        "session_open_utc": normalize_optional_text(
+            alignment.get("session_open_utc", "")
+        ),
+        "session_close_utc": normalize_optional_text(
+            alignment.get("session_close_utc", "")
         ),
         "hd_text": normalize_optional_text(news_row.get("HD", "")),
         "lp_text": normalize_optional_text(news_row.get("LP", "")),

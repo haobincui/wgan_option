@@ -62,6 +62,19 @@ The corrected workflow fixes `Europe/London` Factiva timestamps, disjoint
 and prior futures, OTM filtering, fold-train-only raw support, strict text
 lineage, and dependence-aware RQ1-RQ3 inference.
 
+To rebuild only the training workbook with the frozen CME Treasury session
+calendar and a five-minute origin tolerance:
+
+```bash
+bash scripts/rq123/build_session_aligned_dataset.sh
+```
+
+This mode keeps in-session news at its publication minute. News published
+during the daily halt, weekend, or a frozen 2022-2023 holiday closure is moved
+to the next continuous-session open. The selected raw-vol origin must be the
+first complete pair within five minutes of that scheduled origin, and the
+full `[origin-5, origin+5]` interval must remain inside one session.
+
 RQ dataset construction reads the 728 daily 2022-2023 `0#TY+` files only. It
 does not read `ty_plus_merged.csv.gz`, avoiding duplicate source traversal.
 

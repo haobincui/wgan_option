@@ -18,6 +18,8 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import pandas as pd
 
+from wgan_option.market.treasury_sessions import TreasuryGlobexSessionCalendar
+
 
 ISO_UTC_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 SCHEMA_VERSION = "2"
@@ -364,9 +366,30 @@ class ForwardAlignmentPolicy:
             raise ValueError("horizon_minutes must be positive")
 
 
+@dataclass(frozen=True)
+class SessionAlignmentPolicy:
+    origin_tolerance_minutes: int = 5
+    horizon_minutes: int = 5
+    current_window_minutes: int = 5
+
+    def __post_init__(self) -> None:
+        if self.origin_tolerance_minutes < 0:
+            raise ValueError("origin_tolerance_minutes must be non-negative")
+        if self.origin_tolerance_minutes > 5:
+            raise ValueError(
+                "origin_tolerance_minutes cannot exceed the frozen "
+                "five-minute research tolerance"
+            )
+        if self.horizon_minutes <= 0:
+            raise ValueError("horizon_minutes must be positive")
+        if self.current_window_minutes <= 0:
+            raise ValueError("current_window_minutes must be positive")
+
+
 ALIGNMENT_COLUMNS = [
     "news_row_id",
     "sample_id",
+    "news_alignment_mode",
     "publication_timestamp_utc",
     "news_available_time_utc",
     "timestamp_parse_status",
@@ -386,6 +409,14 @@ ALIGNMENT_COLUMNS = [
     "target_window_end_utc",
     "original_news_quarter",
     "effective_origin_quarter",
+    "publication_market_state",
+    "scheduled_origin_utc",
+    "origin_tolerance_minutes_used",
+    "session_shift_minutes",
+    "session_shift_reason",
+    "session_id",
+    "session_open_utc",
+    "session_close_utc",
     "unmatched_reason",
 ]
 
@@ -421,6 +452,7 @@ def align_news_to_valid_pairs(
         base: dict[str, Any] = {
             "news_row_id": news_row_id,
             "sample_id": f"news_{news_row_id}",
+            "news_alignment_mode": "forward_valid_pair",
             "publication_timestamp_utc": str(
                 news_row.get("publication_timestamp_utc", "") or ""
             ),
@@ -444,6 +476,14 @@ def align_news_to_valid_pairs(
             "target_window_end_utc": "",
             "original_news_quarter": "",
             "effective_origin_quarter": "",
+            "publication_market_state": "",
+            "scheduled_origin_utc": "",
+            "origin_tolerance_minutes_used": "",
+            "session_shift_minutes": "",
+            "session_shift_reason": "",
+            "session_id": "",
+            "session_open_utc": "",
+            "session_close_utc": "",
             "unmatched_reason": "",
         }
         if pd.isna(available):
@@ -513,6 +553,285 @@ def align_news_to_valid_pairs(
         ].map(collision_counts)
     validate_forward_alignment(aligned, policy=policy)
     return aligned
+
+
+def align_news_to_session_pairs(
+    news_frame: pd.DataFrame,
+    valid_pair_origins: Sequence[Any],
+    *,
+    session_calendar: TreasuryGlobexSessionCalendar,
+    policy: SessionAlignmentPolicy | None = None,
+    available_time_column: str = "timestamp_utc",
+) -> pd.DataFrame:
+    """Align news using CME sessions and a bounded post-origin tolerance."""
+
+    policy = policy or SessionAlignmentPolicy()
+    required = {"news_row_id", available_time_column}
+    missing = sorted(required - set(news_frame.columns))
+    if missing:
+        raise ValueError(f"News frame is missing required columns: {missing}")
+
+    origins = sorted({to_utc_minute(value) for value in valid_pair_origins})
+    origin_ns = [int(value.value) for value in origins]
+    rows: list[dict[str, Any]] = []
+
+    for news_row in news_frame.to_dict(orient="records"):
+        news_row_id = int(news_row["news_row_id"])
+        raw_available = news_row.get(available_time_column)
+        available = pd.to_datetime(raw_available, errors="coerce", utc=True)
+        parse_status = str(news_row.get("timestamp_parse_status", "") or "")
+        base: dict[str, Any] = {
+            "news_row_id": news_row_id,
+            "sample_id": f"news_{news_row_id}",
+            "news_alignment_mode": "exchange_session",
+            "publication_timestamp_utc": str(
+                news_row.get("publication_timestamp_utc", "") or ""
+            ),
+            "news_available_time_utc": (
+                utc_minute_string(available) if not pd.isna(available) else ""
+            ),
+            "timestamp_parse_status": parse_status,
+            "has_match": 0,
+            "effective_origin_utc": "",
+            "target_anchor_utc": "",
+            "origin_shift_minutes": "",
+            "alignment_type": "unmatched",
+            "matching_rank": "",
+            "collision_count": 0,
+            "news_cluster_id": "",
+            "quiet_buffer_minutes": "",
+            "quiet_grid_minutes": "",
+            "current_window_start_utc": "",
+            "current_window_end_utc": "",
+            "target_window_start_utc": "",
+            "target_window_end_utc": "",
+            "original_news_quarter": "",
+            "effective_origin_quarter": "",
+            "publication_market_state": "",
+            "scheduled_origin_utc": "",
+            "origin_tolerance_minutes_used": "",
+            "session_shift_minutes": "",
+            "session_shift_reason": "",
+            "session_id": "",
+            "session_open_utc": "",
+            "session_close_utc": "",
+            "unmatched_reason": "",
+        }
+        if pd.isna(available):
+            base["unmatched_reason"] = "invalid_news_timestamp"
+            rows.append(base)
+            continue
+
+        available = to_utc_minute(available)
+        base["original_news_quarter"] = _quarter(available)
+        if session_calendar.is_open(available):
+            market_state = "open"
+            scheduled_origin = available
+            shift_reason = "none"
+        else:
+            market_state = "closed"
+            shift_reason = session_calendar.closed_reason(available)
+            scheduled_origin = session_calendar.next_open(available)
+
+        session_shift = int(
+            (scheduled_origin - available).total_seconds() // 60
+        )
+        base.update(
+            {
+                "publication_market_state": market_state,
+                "scheduled_origin_utc": utc_minute_string(scheduled_origin),
+                "session_shift_minutes": session_shift,
+                "session_shift_reason": shift_reason,
+            }
+        )
+
+        position = bisect.bisect_left(origin_ns, int(scheduled_origin.value))
+        deadline = scheduled_origin + pd.Timedelta(
+            minutes=policy.origin_tolerance_minutes
+        )
+        selected: tuple[pd.Timestamp, pd.Timestamp, Any, int] | None = None
+        rejected_session_window = False
+        rank = 0
+        while position < len(origins) and origins[position] <= deadline:
+            rank += 1
+            origin = origins[position]
+            target = origin + pd.Timedelta(minutes=policy.horizon_minutes)
+            current_start = origin - pd.Timedelta(
+                minutes=policy.current_window_minutes
+            )
+            session = session_calendar.session_for_interval(
+                current_start,
+                target,
+            )
+            if session is not None:
+                selected = (origin, target, session, rank)
+                break
+            rejected_session_window = True
+            position += 1
+
+        if selected is None:
+            base["unmatched_reason"] = (
+                "pair_window_crosses_session_boundary"
+                if rejected_session_window
+                else "no_valid_pair_within_origin_tolerance"
+            )
+            rows.append(base)
+            continue
+
+        origin, target, session, rank = selected
+        current_start = origin - pd.Timedelta(
+            minutes=policy.current_window_minutes
+        )
+        total_shift = int((origin - available).total_seconds() // 60)
+        tolerance_used = int(
+            (origin - scheduled_origin).total_seconds() // 60
+        )
+        if market_state == "closed":
+            alignment_type = "closed_to_next_open"
+        elif tolerance_used == 0:
+            alignment_type = "exact"
+        else:
+            alignment_type = "market_open_tolerance_shift"
+        base.update(
+            {
+                "has_match": 1,
+                "effective_origin_utc": utc_minute_string(origin),
+                "target_anchor_utc": utc_minute_string(target),
+                "origin_shift_minutes": total_shift,
+                "alignment_type": alignment_type,
+                "matching_rank": rank,
+                "news_cluster_id": (
+                    f"surface_pair_{origin.strftime('%Y%m%dT%H%MZ')}"
+                ),
+                "current_window_start_utc": utc_minute_string(current_start),
+                "current_window_end_utc": utc_minute_string(origin),
+                "target_window_start_utc": utc_minute_string(origin),
+                "target_window_end_utc": utc_minute_string(target),
+                "effective_origin_quarter": _quarter(origin),
+                "origin_tolerance_minutes_used": tolerance_used,
+                "session_id": session.session_id,
+                "session_open_utc": utc_minute_string(session.open_utc),
+                "session_close_utc": utc_minute_string(session.close_utc),
+            }
+        )
+        rows.append(base)
+
+    aligned = pd.DataFrame(rows, columns=ALIGNMENT_COLUMNS)
+    matched = aligned["has_match"].eq(1)
+    if matched.any():
+        collision_counts = (
+            aligned.loc[matched, "effective_origin_utc"]
+            .value_counts()
+            .to_dict()
+        )
+        aligned.loc[matched, "collision_count"] = aligned.loc[
+            matched, "effective_origin_utc"
+        ].map(collision_counts)
+    validate_session_alignment(
+        aligned,
+        session_calendar=session_calendar,
+        policy=policy,
+    )
+    return aligned
+
+
+def validate_session_alignment(
+    alignment: pd.DataFrame,
+    *,
+    session_calendar: TreasuryGlobexSessionCalendar,
+    policy: SessionAlignmentPolicy | None = None,
+) -> None:
+    policy = policy or SessionAlignmentPolicy()
+    missing = sorted(set(ALIGNMENT_COLUMNS) - set(alignment.columns))
+    if missing:
+        raise ValueError(f"Alignment frame is missing columns: {missing}")
+    if alignment["news_row_id"].duplicated().any():
+        raise ValueError("Session alignment contains duplicate news_row_id values")
+
+    matched = alignment.loc[alignment["has_match"].eq(1)].copy()
+    if matched.empty:
+        return
+    available = pd.to_datetime(
+        matched["news_available_time_utc"], utc=True, errors="raise"
+    )
+    scheduled = pd.to_datetime(
+        matched["scheduled_origin_utc"], utc=True, errors="raise"
+    )
+    origin = pd.to_datetime(
+        matched["effective_origin_utc"], utc=True, errors="raise"
+    )
+    target = pd.to_datetime(
+        matched["target_anchor_utc"], utc=True, errors="raise"
+    )
+    tolerance = origin.sub(scheduled).dt.total_seconds().div(60.0)
+    if scheduled.lt(available).any() or origin.lt(scheduled).any():
+        raise ValueError("Session alignment contains a pre-publication origin")
+    if tolerance.lt(0).any() or tolerance.gt(
+        policy.origin_tolerance_minutes
+    ).any():
+        raise ValueError("Session alignment exceeds origin tolerance")
+    if not target.sub(origin).eq(
+        pd.Timedelta(minutes=policy.horizon_minutes)
+    ).all():
+        raise ValueError("Session alignment target horizon is invalid")
+
+    current_start = pd.to_datetime(
+        matched["current_window_start_utc"], utc=True, errors="raise"
+    )
+    current_end = pd.to_datetime(
+        matched["current_window_end_utc"], utc=True, errors="raise"
+    )
+    target_start = pd.to_datetime(
+        matched["target_window_start_utc"], utc=True, errors="raise"
+    )
+    target_end = pd.to_datetime(
+        matched["target_window_end_utc"], utc=True, errors="raise"
+    )
+    if not (
+        current_end.eq(origin).all()
+        and target_start.eq(origin).all()
+        and target_end.eq(target).all()
+        and current_end.sub(current_start).eq(
+            pd.Timedelta(minutes=policy.current_window_minutes)
+        ).all()
+    ):
+        raise ValueError("Session alignment window boundaries are invalid")
+
+    for index in matched.index:
+        state = str(matched.at[index, "publication_market_state"])
+        available_at = to_utc_minute(
+            matched.at[index, "news_available_time_utc"]
+        )
+        scheduled_at = to_utc_minute(
+            matched.at[index, "scheduled_origin_utc"]
+        )
+        if state == "open":
+            if not session_calendar.is_open(available_at):
+                raise ValueError("Open-state news is outside a CME session")
+            if scheduled_at != available_at:
+                raise ValueError("Open-state news must retain its publication minute")
+        elif state == "closed":
+            if session_calendar.is_open(available_at):
+                raise ValueError("Closed-state news is inside a CME session")
+            if scheduled_at != session_calendar.next_open(available_at):
+                raise ValueError("Closed-state news did not use the next CME open")
+        else:
+            raise ValueError(f"Unknown publication_market_state: {state}")
+
+        session = session_calendar.session_for_interval(
+            matched.at[index, "current_window_start_utc"],
+            matched.at[index, "target_window_end_utc"],
+        )
+        if session is None:
+            raise ValueError("Matched pair crosses a CME session boundary")
+        if (
+            str(matched.at[index, "session_id"]) != session.session_id
+            or to_utc_minute(matched.at[index, "session_open_utc"])
+            != session.open_utc
+            or to_utc_minute(matched.at[index, "session_close_utc"])
+            != session.close_utc
+        ):
+            raise ValueError("Stored CME session metadata is inconsistent")
 
 
 def validate_forward_alignment(
@@ -596,7 +915,7 @@ def alignment_summary(alignment: pd.DataFrame) -> dict[str, Any]:
         matched.get("origin_shift_minutes", pd.Series(dtype=float)),
         errors="coerce",
     )
-    return {
+    summary = {
         "news_rows": int(len(alignment)),
         "matched_article_rows": int(len(matched)),
         "unmatched_article_rows": int(len(alignment) - len(matched)),
@@ -636,6 +955,24 @@ def alignment_summary(alignment: pd.DataFrame) -> dict[str, Any]:
             else 0
         ),
     }
+    if "publication_market_state" in alignment.columns:
+        summary["publication_market_state_counts"] = {
+            str(key): int(value)
+            for key, value in alignment["publication_market_state"]
+            .replace("", "not_applicable")
+            .value_counts(dropna=False)
+            .items()
+        }
+    if "origin_tolerance_minutes_used" in matched.columns:
+        tolerance = pd.to_numeric(
+            matched["origin_tolerance_minutes_used"],
+            errors="coerce",
+        ).dropna()
+        summary["origin_tolerance_minutes_used_counts"] = {
+            str(int(key)): int(value)
+            for key, value in tolerance.value_counts().sort_index().items()
+        }
+    return summary
 
 
 def find_unmatched_with_eligible_pair(

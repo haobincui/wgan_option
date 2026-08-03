@@ -1140,7 +1140,8 @@ class FilmWGANTrainer(BaseTrainer):
                         summary["best_value"] = float(metric_value)
                         if summary["tracking_mode"] == "extra":
                             save_checkpoint(extra_checkpoint_paths[metric_name], self._checkpoint_payload())
-            if epoch % int(self.config.save_every) == 0:
+            save_every = int(self.config.save_every)
+            if save_every > 0 and epoch % save_every == 0:
                 save_checkpoint(self.checkpoints_dir / f"film_wgan_epoch_{epoch:04d}.pt", self._checkpoint_payload())
 
             self.logger.info(

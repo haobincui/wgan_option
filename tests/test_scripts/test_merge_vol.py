@@ -521,6 +521,7 @@ class TestMergeVol(unittest.TestCase):
                     {
                         "news_row_id": 1,
                         "has_match": 1,
+                        "news_alignment_mode": "forward_valid_pair",
                         "news_available_time_utc": "2022-12-30T13:28:00Z",
                         "effective_origin_utc": "2022-12-30T13:40:00Z",
                         "target_anchor_utc": "2022-12-30T13:45:00Z",
@@ -563,6 +564,42 @@ class TestMergeVol(unittest.TestCase):
                 gan["effective_origin_utc"],
                 "2022-12-30T13:40:00Z",
             )
+
+    def test_session_alignment_metadata_is_preserved_in_workbook(self):
+        news_row = pd.Series(
+            {
+                "news_row_id": 7,
+                "timestamp_utc": "2023-03-13T21:30:00Z",
+                "publication_timestamp_utc": "2023-03-13T21:30:00Z",
+                "publication_availability_lag_minutes": 0,
+                "timestamp_parse_status": "ok",
+            }
+        )
+        from wgan_option.merge.merge_vol_core import _base_pair_fields
+
+        fields = _base_pair_fields(
+            news_row,
+            {
+                "news_alignment_mode": "exchange_session",
+                "news_available_time_utc": "2023-03-13T21:30:00Z",
+                "effective_origin_utc": "2023-03-13T22:05:00Z",
+                "origin_shift_minutes": 35,
+                "alignment_type": "closed_to_next_open",
+                "publication_market_state": "closed",
+                "scheduled_origin_utc": "2023-03-13T22:00:00Z",
+                "origin_tolerance_minutes_used": 5,
+                "session_shift_minutes": 30,
+                "session_shift_reason": "daily_halt",
+                "session_id": "cme_ty_20230313T2200Z",
+                "session_open_utc": "2023-03-13T22:00:00Z",
+                "session_close_utc": "2023-03-14T21:00:00Z",
+            },
+        )
+        self.assertEqual(fields["news_alignment_mode"], "exchange_session")
+        self.assertEqual(fields["publication_market_state"], "closed")
+        self.assertEqual(fields["scheduled_origin_utc"], "2023-03-13T22:00:00Z")
+        self.assertEqual(int(fields["origin_tolerance_minutes_used"]), 5)
+        self.assertEqual(fields["session_shift_reason"], "daily_halt")
 
     def test_build_workbook_frames_supports_model_aware_sabr_payload(self):
         with tempfile.TemporaryDirectory() as tmpdir:

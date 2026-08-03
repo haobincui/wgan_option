@@ -34,6 +34,10 @@ TREASURY_URL_TEMPLATE = (
     "?type=daily_treasury_yield_curve&field_tdr_date_value={year}&page&_format=csv"
 )
 CME_RULE_URL = "https://www.cmegroup.com/rulebook/CBOT/II/19A.pdf"
+CME_TRADING_HOURS_URL = "https://www.cmegroup.com/trading-hours.html"
+CME_SESSION_CALENDAR_NAME = (
+    "cme_treasury_globex_closures_2022_2023.csv"
+)
 
 
 def _sha256(path: Path) -> str:
@@ -142,6 +146,32 @@ def main() -> None:
     _, sources = build_treasury_curve(output_dir, years=(2022, 2023))
     _, expiry_source = build_ty_expiries(output_dir, years=(2022, 2023, 2024))
     sources.append(expiry_source)
+    frozen_calendar_source = (
+        ROOT / "data/reference" / CME_SESSION_CALENDAR_NAME
+    )
+    if not frozen_calendar_source.is_file():
+        raise FileNotFoundError(
+            "Frozen CME Treasury session calendar is missing: "
+            f"{frozen_calendar_source}"
+        )
+    frozen_calendar_output = output_dir / CME_SESSION_CALENDAR_NAME
+    if frozen_calendar_output.resolve() != frozen_calendar_source.resolve():
+        frozen_calendar_output.write_bytes(
+            frozen_calendar_source.read_bytes()
+        )
+    sources.append(
+        {
+            "category": "cme_treasury_session_calendar",
+            "url": CME_TRADING_HOURS_URL,
+            "relative_path": frozen_calendar_output.name,
+            "sha256": _sha256(frozen_calendar_output),
+            "notes": (
+                "Frozen regular-session holiday and early-close overrides "
+                "for 2022-2023; individual CME source URLs are stored in "
+                "the CSV."
+            ),
+        }
+    )
     manifest = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "generator": "scripts/raw_vol/build_reference_data.py",

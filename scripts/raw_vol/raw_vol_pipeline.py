@@ -186,9 +186,47 @@ def _workbook_summary(path: Path) -> dict[str, Any]:
                 .items()
             }
         if "training_candidate_flag" in pair:
-            summary["usable_pairs"] = int(pd.to_numeric(pair["training_candidate_flag"], errors="coerce").fillna(0).sum())
+            training_candidate = pd.to_numeric(
+                pair["training_candidate_flag"],
+                errors="coerce",
+            ).fillna(0).eq(1)
+            summary["usable_pairs"] = int(training_candidate.sum())
         else:
-            summary["usable_pairs"] = int((pair.get("pair_quality_label") == "usable").sum())
+            training_candidate = pair.get(
+                "pair_quality_label"
+            ).eq("usable")
+            summary["usable_pairs"] = int(training_candidate.sum())
+        if "lp_text" in pair:
+            nonempty_lp = (
+                pair["lp_text"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .ne("")
+            )
+            strict_lineage = pair.loc[
+                training_candidate & nonempty_lp
+            ]
+            summary["strict_text_lineage_article_rows"] = int(
+                len(strict_lineage)
+            )
+            required_pair_columns = {
+                "current_snapshot_time_utc",
+                "target_snapshot_time_utc",
+            }
+            if required_pair_columns.issubset(strict_lineage.columns):
+                summary["strict_text_lineage_pair_samples"] = int(
+                    strict_lineage[
+                        [
+                            "current_snapshot_time_utc",
+                            "target_snapshot_time_utc",
+                        ]
+                    ]
+                    .drop_duplicates()
+                    .shape[0]
+                )
+            else:
+                summary["strict_text_lineage_pair_samples"] = 0
     else:
         summary["pair_rows"] = 0
         summary["usable_pairs"] = 0
@@ -737,6 +775,14 @@ def validate_dataset(args: argparse.Namespace) -> int:
     print(
         "pair_level_training_samples="
         f"{int(validation.get('pair_level_training_samples', 0))}"
+    )
+    print(
+        "strict_text_lineage_article_rows="
+        f"{int(validation.get('strict_text_lineage_article_rows', 0))}"
+    )
+    print(
+        "strict_text_lineage_pair_samples="
+        f"{int(validation.get('strict_text_lineage_pair_samples', 0))}"
     )
     return 0 if validation["status"] == "ok" or args.no_fail else 2
 
