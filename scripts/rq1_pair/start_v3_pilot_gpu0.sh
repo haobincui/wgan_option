@@ -16,6 +16,7 @@ MATCHED_VARIANT="pair_pca_text_residual_pretrained"
 SHUFFLED_VARIANT="pair_pca_shuffled_residual_pretrained"
 ACTIVE_PIDS=()
 ACTIVE_LABELS=()
+CLEANUP_IN_PROGRESS=0
 
 cd "${REPO_ROOT}"
 
@@ -28,15 +29,53 @@ run_cli() {
     python "${ORCHESTRATOR}" "$@"
 }
 
-cleanup_children() {
+terminate_and_reap_children() {
   local pid
-  for pid in "${ACTIVE_PIDS[@]:-}"; do
-    if kill -0 "${pid}" 2>/dev/null; then
-      kill "${pid}" 2>/dev/null || true
-    fi
+  if (( CLEANUP_IN_PROGRESS != 0 )); then
+    return
+  fi
+  CLEANUP_IN_PROGRESS=1
+  trap - INT TERM
+
+  # Every tracked job is launched through setsid, so its PID is also the
+  # process-group ID. Signal the whole group to avoid leaving conda or Python
+  # descendants running on GPU0 after a peer failure or launcher interrupt.
+  for pid in "${ACTIVE_PIDS[@]}"; do
+    kill -TERM -- "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
   done
+
+  if (( ${#ACTIVE_PIDS[@]} > 0 )); then
+    sleep 0.2
+  fi
+  for pid in "${ACTIVE_PIDS[@]}"; do
+    kill -KILL -- "-${pid}" 2>/dev/null || kill -KILL "${pid}" 2>/dev/null || true
+  done
+  for pid in "${ACTIVE_PIDS[@]}"; do
+    wait "${pid}" 2>/dev/null || true
+  done
+
+  ACTIVE_PIDS=()
+  ACTIVE_LABELS=()
+  CLEANUP_IN_PROGRESS=0
 }
-trap cleanup_children INT TERM
+
+cleanup_on_exit() {
+  local exit_code=$?
+  trap - EXIT INT TERM
+  terminate_and_reap_children
+  exit "${exit_code}"
+}
+
+handle_signal() {
+  local signal_name="$1"
+  local exit_code="$2"
+  echo "v3 pilot launcher received ${signal_name}; stopping active jobs." >&2
+  exit "${exit_code}"
+}
+
+trap cleanup_on_exit EXIT
+trap 'handle_signal INT 130' INT
+trap 'handle_signal TERM 143' TERM
 
 wait_next_job() {
   local finished_pid=""
@@ -47,6 +86,10 @@ wait_next_job() {
   wait -n -p finished_pid "${ACTIVE_PIDS[@]}"
   exit_code=$?
   set -e
+  if [[ -z "${finished_pid-}" ]]; then
+    echo "v3 pilot wait returned without a child PID (exit=${exit_code})." >&2
+    exit 1
+  fi
   for index in "${!ACTIVE_PIDS[@]}"; do
     if [[ "${ACTIVE_PIDS[${index}]}" == "${finished_pid}" ]]; then
       finished_label="${ACTIVE_LABELS[${index}]}"
@@ -59,7 +102,6 @@ wait_next_job() {
   done
   if (( exit_code != 0 )); then
     echo "v3 pilot job failed: ${finished_label} (exit=${exit_code})" >&2
-    cleanup_children
     exit 1
   fi
 }
@@ -72,7 +114,8 @@ launch_training_job() {
     wait_next_job
   done
   echo "Launching on physical GPU0: ${label}"
-  run_cli train-matrix \
+  CUDA_VISIBLE_DEVICES=0 setsid --wait conda run --no-capture-output -n "${CONDA_ENV}" \
+    python "${ORCHESTRATOR}" train-matrix \
     --experiment-root "${EXPERIMENT_ROOT}" \
     --fold "${FOLD}" \
     --seed "${seed}" \
@@ -89,14 +132,24 @@ finish_phase() {
 }
 
 if [[ "${FILM_WGAN_LAUNCHER_WAIT_SELF_TEST:-0}" == "1" ]]; then
-  (sleep 2) &
+  setsid --wait bash -c 'sleep 2' &
   ACTIVE_PIDS+=("$!")
   ACTIVE_LABELS+=("slow-success")
-  (exit 7) &
+  setsid --wait bash -c 'exit 7' &
   ACTIVE_PIDS+=("$!")
   ACTIVE_LABELS+=("fast-failure")
   wait_next_job
   echo "wait self-test unexpectedly continued after a failed child" >&2
+  exit 99
+fi
+
+if [[ "${FILM_WGAN_LAUNCHER_SIGNAL_SELF_TEST:-0}" == "1" ]]; then
+  setsid --wait bash -c 'sleep 30' &
+  ACTIVE_PIDS+=("$!")
+  ACTIVE_LABELS+=("signal-cleanup-probe")
+  echo "signal self-test ready: ${ACTIVE_PIDS[0]}"
+  wait_next_job
+  echo "signal self-test unexpectedly continued without a signal" >&2
   exit 99
 fi
 

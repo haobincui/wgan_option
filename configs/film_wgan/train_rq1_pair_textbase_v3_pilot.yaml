@@ -106,7 +106,7 @@ training:
 
   checkpoint_metric: val_mae
   extra_checkpoint_metrics: []
-  checkpoint_warmup_epochs: 10
+  checkpoint_warmup_epochs: 0
   use_early_stopping: true
   early_stopping_patience: 10
   early_stopping_min_delta: 0.0

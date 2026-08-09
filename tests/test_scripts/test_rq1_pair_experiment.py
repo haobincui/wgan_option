@@ -1,6 +1,8 @@
 import argparse
 import json
 import math
+import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1517,6 +1519,7 @@ class TestRQ1ProtocolV3Orchestration(unittest.TestCase):
         self.assertEqual(training["matching_negative_source_plan_path"], "")
         self.assertEqual(int(training["scheduler_horizon_epochs"]), 60)
         self.assertEqual(int(training["diagnostics_schema_version"]), 1)
+        self.assertEqual(int(training["checkpoint_warmup_epochs"]), 0)
         self.assertEqual(generate["split"], "val")
 
         launcher = (
@@ -1528,6 +1531,8 @@ class TestRQ1ProtocolV3Orchestration(unittest.TestCase):
         self.assertIn("Phase 2/3", launcher)
         self.assertIn("Phase 3/3", launcher)
         self.assertIn("wait -n -p", launcher)
+        self.assertIn("setsid --wait", launcher)
+        self.assertIn("terminate_and_reap_children", launcher)
         self.assertIn("summarize-validation-pilot", launcher)
 
         result = subprocess.run(
@@ -1545,6 +1550,34 @@ class TestRQ1ProtocolV3Orchestration(unittest.TestCase):
         self.assertIn("fast-failure", result.stderr)
         self.assertNotIn("unexpectedly continued", result.stderr)
 
+    def test_v3_gpu0_launcher_signal_cleanup_reaps_child(self):
+        process = subprocess.Popen(
+            [str(ROOT / "scripts/rq1_pair/start_v3_pilot_gpu0.sh")],
+            cwd=ROOT,
+            env={
+                **dict(os.environ),
+                "FILM_WGAN_LAUNCHER_SIGNAL_SELF_TEST": "1",
+            },
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertIsNotNone(process.stdout)
+        ready_line = process.stdout.readline().strip()
+        self.assertTrue(
+            ready_line.startswith("signal self-test ready: "),
+            ready_line,
+        )
+        child_pid = int(ready_line.rsplit(" ", maxsplit=1)[1])
+        process.send_signal(signal.SIGINT)
+        stdout, stderr = process.communicate(timeout=10)
+
+        self.assertEqual(process.returncode, 130, (stdout, stderr))
+        self.assertIn("received INT", stderr)
+        self.assertNotIn("unbound variable", stderr)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child_pid, 0)
+
     def test_v3_epoch_policy_uses_continuation_anchor(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             transform = Path(tmpdir) / "transform.npz"
@@ -1557,6 +1590,9 @@ class TestRQ1ProtocolV3Orchestration(unittest.TestCase):
                     "critic_conditioning_mode": "transition_matching",
                     "lambda_critic_matching": 0.1,
                     "lambda_generator_matching": 0.01,
+                    # Exercise the bug directly: Stage-A must not inherit the
+                    # continuation-only selection warmup from a fold config.
+                    "checkpoint_warmup_epochs": 10,
                     "training_protocol_version": (
                         rq1_pair_experiment.TRAINING_PROTOCOL_VERSION_V3
                     ),
@@ -1584,14 +1620,54 @@ class TestRQ1ProtocolV3Orchestration(unittest.TestCase):
                 parent_checkpoint=parent,
                 continuation_anchor_epoch=37,
             )
-            self.assertEqual(parent_overrides["num_epochs"], 60)
-            self.assertEqual(parent_overrides["scheduler_horizon_epochs"], 60)
-            self.assertEqual(continued["num_epochs"], 100)
-            self.assertEqual(continued["early_stopping_patience"], 15)
-            self.assertEqual(continued["scheduler_horizon_epochs"], 100)
-            self.assertEqual(matched["num_epochs"], 37)
-            self.assertFalse(matched["use_early_stopping"])
-            self.assertEqual(matched["scheduler_horizon_epochs"], 100)
+            shuffled = rq1_pair_experiment._variant_overrides(
+                rq1_pair_experiment.SHUFFLED_RESIDUAL_VARIANT,
+                fold_config=fold_config,
+                output_root=Path(tmpdir) / "shuffled",
+                seed=42,
+                parent_checkpoint=parent,
+                continuation_anchor_epoch=37,
+            )
+            resolved_parent = {**fold_config["training"], **parent_overrides}
+            resolved_continued = {**fold_config["training"], **continued}
+            resolved_matched = {**fold_config["training"], **matched}
+            resolved_shuffled = {**fold_config["training"], **shuffled}
+
+            self.assertEqual(resolved_parent["num_epochs"], 60)
+            self.assertEqual(resolved_parent["scheduler_horizon_epochs"], 60)
+            self.assertEqual(resolved_parent["checkpoint_warmup_epochs"], 0)
+            self.assertEqual(resolved_continued["num_epochs"], 100)
+            self.assertEqual(resolved_continued["early_stopping_patience"], 15)
+            self.assertEqual(resolved_continued["scheduler_horizon_epochs"], 100)
+            self.assertEqual(resolved_continued["checkpoint_warmup_epochs"], 10)
+            for resolved in (resolved_matched, resolved_shuffled):
+                self.assertEqual(resolved["num_epochs"], 37)
+                self.assertFalse(resolved["use_early_stopping"])
+                self.assertEqual(resolved["scheduler_horizon_epochs"], 100)
+                self.assertEqual(resolved["checkpoint_warmup_epochs"], 0)
+
+            for variant in (
+                rq1_pair_experiment.TEXT_RESIDUAL_VARIANT,
+                rq1_pair_experiment.SHUFFLED_RESIDUAL_VARIANT,
+            ):
+                run_dir = Path(tmpdir) / f"comparison-{variant}"
+                (run_dir / "checkpoints").mkdir(parents=True)
+                (run_dir / "metrics").mkdir()
+                torch.save(
+                    {"epoch": 37},
+                    run_dir / "checkpoints/film_wgan_final.pt",
+                )
+                (run_dir / "metrics/best_checkpoint.json").write_text(
+                    json.dumps({"best_epoch": 12}),
+                    encoding="utf-8",
+                )
+                checkpoint, epoch = rq1_pair_experiment._comparison_checkpoint(
+                    run_dir,
+                    variant=variant,
+                    continuation_anchor_epoch=37,
+                )
+                self.assertEqual(checkpoint.name, "film_wgan_final.pt")
+                self.assertEqual(epoch, 37)
 
     def test_v3_paired_stage_audit_requires_common_scheduler_trace_and_checkpoint_roles(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1886,6 +1962,11 @@ class TestRQ1ProtocolV3Orchestration(unittest.TestCase):
                     encoding="utf-8",
                 )
                 is_stage_b = variant in rq1_pair_experiment.PAIRED_STAGE_B_VARIANTS
+                selected_epoch = (
+                    1
+                    if variant == rq1_pair_experiment.PARENT_VARIANT
+                    else comparison_epoch
+                )
                 checkpoint_payload = {
                     "checkpoint_schema_version": 6,
                     "training_protocol_version": (
@@ -1893,7 +1974,7 @@ class TestRQ1ProtocolV3Orchestration(unittest.TestCase):
                     ),
                     "critic_architecture_version": "transition_matching_v2",
                     "run_fingerprint_sha256": fingerprint,
-                    "epoch": comparison_epoch,
+                    "epoch": selected_epoch,
                     "initial_generator_state_sha256": (
                         f"{seed:064x}" if is_stage_b else ""
                     ),
@@ -1913,7 +1994,7 @@ class TestRQ1ProtocolV3Orchestration(unittest.TestCase):
                 (metrics_dir / "best_checkpoint.json").write_text(
                     json.dumps(
                         {
-                            "best_epoch": comparison_epoch,
+                            "best_epoch": selected_epoch,
                             "checkpoint_metric": "val_mae",
                         }
                     ),
@@ -1980,7 +2061,12 @@ class TestRQ1ProtocolV3Orchestration(unittest.TestCase):
                     else "film_wgan_best.pt"
                 )
                 self.assertEqual(Path(row.checkpoint_path).name, expected_name)
-                self.assertEqual(int(row.comparison_epoch), comparison_epoch)
+                expected_epoch = (
+                    1
+                    if row.variant == rq1_pair_experiment.PARENT_VARIANT
+                    else comparison_epoch
+                )
+                self.assertEqual(int(row.comparison_epoch), expected_epoch)
 
             generated_commands = []
             parsed_sample_configs = []

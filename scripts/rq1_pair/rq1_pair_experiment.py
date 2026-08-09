@@ -647,6 +647,7 @@ def _variant_overrides(
             training_protocol_version=TRAINING_PROTOCOL_VERSION_V3,
             scheduler_horizon_epochs=60,
             num_epochs=60,
+            checkpoint_warmup_epochs=0,
             use_early_stopping=True,
             early_stopping_patience=10,
         )
@@ -655,6 +656,7 @@ def _variant_overrides(
         continuation_values.update(
             scheduler_horizon_epochs=100,
             num_epochs=100,
+            checkpoint_warmup_epochs=10,
             use_early_stopping=True,
             early_stopping_patience=15,
         )
@@ -2833,6 +2835,11 @@ def _paired_stage_audit(
                     expected_schedule = {
                         "scheduler_horizon_epochs": 100,
                         "early_stopping_patience": 15,
+                        "checkpoint_warmup_epochs": (
+                            10
+                            if variant == CONTINUATION_VARIANT
+                            else 0
+                        ),
                         "num_epochs": (
                             100
                             if variant == CONTINUATION_VARIANT
@@ -3020,7 +3027,9 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
                     continuation_anchor_epoch=variant_anchor_epoch,
                     v3_protocol=v3_design,
                 )
-                if epoch <= 10:
+                if epoch <= 10 and not (
+                    v3_design and variant == PARENT_VARIANT
+                ):
                     raise ValueError(
                         f"Selected checkpoint must be after epoch 10: {run_dir} epoch={epoch}"
                     )
@@ -3147,6 +3156,7 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
         "metrics_path",
         "num_epochs",
         "scheduler_horizon_epochs",
+        "checkpoint_warmup_epochs",
         "use_early_stopping",
         "early_stopping_patience",
         "run_fingerprint_sha256",
