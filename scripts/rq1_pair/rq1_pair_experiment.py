@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import shutil
@@ -16,6 +17,7 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 import pandas as pd
+import torch
 import yaml
 from scipy import stats
 
@@ -497,6 +499,10 @@ def _variant_overrides(
     parent_checkpoint: Path | None,
 ) -> dict[str, Any]:
     training = dict(fold_config["training"])
+    residual_critic_mode = str(
+        training.get("critic_conditioning_mode", "projection")
+    ).strip().lower()
+    transition_matching = residual_critic_mode == "transition_matching"
     overrides: dict[str, Any] = {
         "seed": int(seed),
         "output_root": str(output_root),
@@ -507,9 +513,21 @@ def _variant_overrides(
         "text_preprocessing_mode": "pca",
         "normalize_text_embedding": False,
         "conditioning_mode": "residual_film",
-        "critic_conditioning_mode": "projection",
+        "critic_conditioning_mode": residual_critic_mode,
         "lambda_film": 1.0e-4,
-        "lambda_mismatch": 0.5,
+        "lambda_mismatch": (
+            0.0 if transition_matching else float(training.get("lambda_mismatch", 0.5))
+        ),
+        "lambda_critic_matching": (
+            float(training.get("lambda_critic_matching", 0.0))
+            if transition_matching
+            else 0.0
+        ),
+        "lambda_generator_matching": (
+            float(training.get("lambda_generator_matching", 0.0))
+            if transition_matching
+            else 0.0
+        ),
         "initial_generator_checkpoint_path": "",
         "freeze_backbone_epochs": 0,
     }
@@ -518,6 +536,8 @@ def _variant_overrides(
             text_embedding_mode="zero_lp",
             lambda_film=0.0,
             lambda_mismatch=0.0,
+            lambda_critic_matching=0.0,
+            lambda_generator_matching=0.0,
         )
     elif variant == CONTINUATION_VARIANT:
         if parent_checkpoint is None:
@@ -526,6 +546,8 @@ def _variant_overrides(
             text_embedding_mode="zero_lp",
             lambda_film=0.0,
             lambda_mismatch=0.0,
+            lambda_critic_matching=0.0,
+            lambda_generator_matching=0.0,
             initial_generator_checkpoint_path=str(parent_checkpoint),
             freeze_backbone_epochs=5,
         )
@@ -550,6 +572,8 @@ def _variant_overrides(
             critic_conditioning_mode="inherit",
             lambda_film=0.0,
             lambda_mismatch=0.0,
+            lambda_critic_matching=0.0,
+            lambda_generator_matching=0.0,
         )
     elif variant == "pair_pca_text_concat":
         overrides.update(
@@ -557,6 +581,8 @@ def _variant_overrides(
             critic_conditioning_mode="inherit",
             lambda_film=0.0,
             lambda_mismatch=0.0,
+            lambda_critic_matching=0.0,
+            lambda_generator_matching=0.0,
         )
     elif variant == "pair_l2_text_full_film":
         overrides.update(
@@ -566,6 +592,8 @@ def _variant_overrides(
             text_transform_path="",
             lambda_film=0.0,
             lambda_mismatch=0.0,
+            lambda_critic_matching=0.0,
+            lambda_generator_matching=0.0,
         )
     else:
         raise ValueError(f"Unsupported RQ1 pair variant: {variant}")
@@ -676,6 +704,46 @@ def _completed_run(output_root: Path) -> Path | None:
     return candidates[-1] if candidates else None
 
 
+def _validate_run_protocol(
+    run_dir: Path,
+    *,
+    critic_mode: str,
+    require_schema5: bool = False,
+) -> None:
+    """Reject completed v1 runs before they can be reused in a v2 matrix."""
+
+    transition_mode = (
+        str(critic_mode).strip().lower() == "transition_matching"
+    )
+    if not (transition_mode or require_schema5):
+        return
+    checkpoint_path = run_dir / "checkpoints/film_wgan_best.pt"
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    schema = int(checkpoint.get("checkpoint_schema_version", 0))
+    protocol = str(checkpoint.get("training_protocol_version", ""))
+    critic = str(checkpoint.get("critic_architecture_version", ""))
+    expected_protocol = (
+        "film_wgan_transition_matching_v2"
+        if transition_mode
+        else "film_wgan_v1_compatible"
+    )
+    expected_critic = (
+        "transition_matching_v2" if transition_mode else "legacy_v1"
+    )
+    if schema != 5 or protocol != expected_protocol or critic != expected_critic:
+        raise ValueError(
+            "Refusing to reuse a non-v2 completed run in a transition-matching "
+            f"experiment: run={run_dir}, schema={schema}, protocol={protocol!r}, "
+            f"critic={critic!r}. Use a new experiment root and retrain Stage A."
+        )
+
+
+def _variant_critic_mode(variant: str, *, residual_critic_mode: str) -> str:
+    if variant == PARENT_VARIANT or variant in PAIRED_STAGE_B_VARIANTS:
+        return str(residual_critic_mode).strip().lower()
+    return "inherit"
+
+
 def _stage_registry_fields(
     variant: str,
     *,
@@ -695,8 +763,138 @@ def _stage_registry_fields(
     }
 
 
+def _upsert_launch_registry(
+    root: Path,
+    rows: Sequence[dict[str, Any]],
+) -> Path:
+    """Merge run records without dropping rows from earlier CLI invocations."""
+
+    registry_path = root / "registry/launch_registry.csv"
+    if not rows:
+        return registry_path
+
+    incoming = pd.DataFrame(rows)
+    key_columns = ["fold", "seed", "variant"]
+    missing = [column for column in key_columns if column not in incoming.columns]
+    if missing:
+        raise ValueError(f"Launch registry rows are missing key columns: {missing}")
+
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = registry_path.with_suffix(".csv.lock")
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        if registry_path.is_file() and registry_path.stat().st_size > 0:
+            existing = pd.read_csv(registry_path)
+            existing_missing = [
+                column for column in key_columns if column not in existing.columns
+            ]
+            if existing_missing:
+                raise ValueError(
+                    "Existing launch registry is missing key columns: "
+                    f"{existing_missing}"
+                )
+            combined = pd.concat(
+                [existing, incoming],
+                ignore_index=True,
+                sort=False,
+            )
+        else:
+            combined = incoming
+
+        combined = combined.drop_duplicates(subset=key_columns, keep="last")
+        temporary_path = registry_path.with_suffix(".csv.tmp")
+        combined.to_csv(temporary_path, index=False)
+        temporary_path.replace(registry_path)
+    return registry_path
+
+
+def _assert_frozen_v2_worktree(root: Path) -> None:
+    """Keep every transition-matching run on the commit frozen at prepare."""
+
+    config_path = root / "inputs/configs/train_rq1_pair_textbase.yaml"
+    if not config_path.is_file():
+        raise FileNotFoundError(config_path)
+    payload = _read_yaml(config_path)
+    training = dict(payload.get("training") or payload)
+    if (
+        str(training.get("critic_conditioning_mode", "")).strip().lower()
+        != "transition_matching"
+    ):
+        return
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    if status.strip():
+        raise RuntimeError(
+            "transition_matching training requires a clean committed worktree."
+        )
+
+    git_state_path = root / "inputs/git_state.txt"
+    if not git_state_path.is_file():
+        raise FileNotFoundError(git_state_path)
+    git_state_lines = git_state_path.read_text(encoding="utf-8").splitlines()
+    first_line = git_state_lines[0] if git_state_lines else ""
+    if not first_line.startswith("commit=") or not first_line.removeprefix("commit="):
+        raise ValueError(f"Invalid frozen git state: {git_state_path}")
+    frozen_commit = first_line.removeprefix("commit=").strip()
+    current_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if current_commit != frozen_commit:
+        raise RuntimeError(
+            "Refusing to mix transition_matching runs across commits: "
+            f"experiment={frozen_commit}, current={current_commit}. "
+            "Prepare a new experiment root."
+        )
+
+
 def prepare_experiment(args: argparse.Namespace) -> Path:
     _assert_py312()
+    source_config = Path(args.config).resolve()
+    source_workbook = Path(args.workbook).resolve()
+    source_news = Path(args.news_workbook).resolve()
+    for source in (source_config, source_workbook, source_news):
+        if not source.is_file():
+            raise FileNotFoundError(source)
+    base_payload = _read_yaml(source_config)
+    training = dict(base_payload.get("training") or base_payload)
+    generate = dict(base_payload.get("generate_result") or {})
+    git_state = subprocess.run(
+        ["git", "status", "--short", "--branch"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if (
+        str(training.get("critic_conditioning_mode", "")).strip().lower()
+        == "transition_matching"
+        and any(
+            line.strip() and not line.startswith("##")
+            for line in git_state.splitlines()
+        )
+    ):
+        raise RuntimeError(
+            "transition_matching experiments require a clean committed worktree; "
+            "commit the v2 implementation before prepare."
+        )
+
     root = _resolve_root(args.experiment_root, create=True)
     experiment_seeds = _normalize_seeds(
         getattr(args, "seeds", None) or SEEDS
@@ -720,15 +918,6 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
     ):
         (root / relative).mkdir(parents=True, exist_ok=True)
 
-    source_config = Path(args.config).resolve()
-    source_workbook = Path(args.workbook).resolve()
-    source_news = Path(args.news_workbook).resolve()
-    for source in (source_config, source_workbook, source_news):
-        if not source.is_file():
-            raise FileNotFoundError(source)
-    base_payload = _read_yaml(source_config)
-    training = dict(base_payload.get("training") or base_payload)
-    generate = dict(base_payload.get("generate_result") or {})
     surface_model = _validate_raw_surface_workbook(
         source_workbook,
         sheet_name=str(training.get("sheet_name", "gan_input_ready")),
@@ -746,20 +935,6 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
     text_lineage_rows = pd.read_csv(text_audit_paths["row_audit"])
     if SUMMARY_DOCUMENT.is_file():
         shutil.copy2(SUMMARY_DOCUMENT, root / "inputs/docs/research_logic_review.md")
-    git_state = subprocess.run(
-        ["git", "status", "--short", "--branch"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
     (root / "inputs/git_state.txt").write_text(
         f"commit={commit}\n{git_state}",
         encoding="utf-8",
@@ -1040,6 +1215,7 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
 def train_matrix(args: argparse.Namespace) -> Path:
     _assert_py312()
     root = _resolve_root(args.experiment_root)
+    _assert_frozen_v2_worktree(root)
     experiment_seeds = _experiment_seeds(root)
     selected_folds = [args.fold] if getattr(args, "fold", "") else list(FOLDS)
     requested_seed = getattr(args, "seed", None)
@@ -1059,6 +1235,11 @@ def train_matrix(args: argparse.Namespace) -> Path:
     registry_rows: list[dict[str, Any]] = []
     for fold in selected_folds:
         fold_payload = _read_yaml(_fold_config(root, fold))
+        fold_training = dict(fold_payload.get("training") or fold_payload)
+        expected_critic_mode = str(
+            fold_training.get("critic_conditioning_mode", "projection")
+        )
+        v2_matrix = expected_critic_mode.strip().lower() == "transition_matching"
         for seed in selected_seeds:
             parent_run = _completed_run(
                 root
@@ -1072,6 +1253,12 @@ def train_matrix(args: argparse.Namespace) -> Path:
                 if parent_run is not None
                 else None
             )
+            if parent_run is not None:
+                _validate_run_protocol(
+                    parent_run,
+                    critic_mode=expected_critic_mode,
+                    require_schema5=v2_matrix,
+                )
             parent_checkpoint_sha256 = (
                 sha256_file(parent_checkpoint)
                 if parent_checkpoint is not None
@@ -1081,6 +1268,14 @@ def train_matrix(args: argparse.Namespace) -> Path:
                 output_root = root / "training_runs" / variant / fold / f"seed_{seed}"
                 completed = _completed_run(output_root)
                 if completed is not None:
+                    _validate_run_protocol(
+                        completed,
+                        critic_mode=_variant_critic_mode(
+                            variant,
+                            residual_critic_mode=expected_critic_mode,
+                        ),
+                        require_schema5=v2_matrix,
+                    )
                     if variant == PARENT_VARIANT:
                         parent_checkpoint = completed / "checkpoints/film_wgan_best.pt"
                         parent_checkpoint_sha256 = sha256_file(parent_checkpoint)
@@ -1145,15 +1340,9 @@ def train_matrix(args: argparse.Namespace) -> Path:
                     }
                 )
                 if not getattr(args, "no_registry_write", False):
-                    pd.DataFrame(registry_rows).to_csv(
-                        root / "registry/launch_registry.csv",
-                        index=False,
-                    )
+                    _upsert_launch_registry(root, registry_rows[-1:])
     if not getattr(args, "no_registry_write", False):
-        pd.DataFrame(registry_rows).to_csv(
-            root / "registry/launch_registry.csv",
-            index=False,
-        )
+        _upsert_launch_registry(root, registry_rows)
     return root
 
 
@@ -1225,34 +1414,6 @@ def _paired_stage_audit(
     sha_cache: dict[Path, str] = {}
     audit_rows: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
-    expected_variant_values = {
-        CONTINUATION_VARIANT: {
-            "text_embedding_mode": "zero_lp",
-            "text_alignment_mode": "matched",
-            "lambda_film": 0.0,
-            "lambda_mismatch": 0.0,
-        },
-        TEXT_RESIDUAL_VARIANT: {
-            "text_embedding_mode": "lp",
-            "text_alignment_mode": "matched",
-            "lambda_film": 1.0e-4,
-            "lambda_mismatch": 0.5,
-        },
-        SHUFFLED_RESIDUAL_VARIANT: {
-            "text_embedding_mode": "lp",
-            "text_alignment_mode": "permuted",
-            "lambda_film": 1.0e-4,
-            "lambda_mismatch": 0.5,
-        },
-    }
-    common_expected = {
-        "text_preprocessing_mode": "pca",
-        "normalize_text_embedding": False,
-        "conditioning_mode": "residual_film",
-        "critic_conditioning_mode": "projection",
-        "freeze_backbone_epochs": 5,
-    }
-
     for fold in FOLDS:
         for seed in selected_seeds:
             parent_key = (fold, seed, PARENT_VARIANT)
@@ -1263,6 +1424,53 @@ def _paired_stage_audit(
             parent_training = dict(parent_payload.get("training") or parent_payload)
             expected_transform_path = _config_artifact_path(parent_training.get("text_transform_path"))
             expected_transform_sha = _cached_sha256(expected_transform_path, sha_cache)
+            matched_key = (fold, seed, TEXT_RESIDUAL_VARIANT)
+            matched_payload = resolved_configs[matched_key]
+            matched_training = dict(matched_payload.get("training") or matched_payload)
+            residual_critic_mode = str(
+                matched_training.get("critic_conditioning_mode", "projection")
+            )
+            common_expected = {
+                "text_preprocessing_mode": "pca",
+                "normalize_text_embedding": False,
+                "conditioning_mode": "residual_film",
+                "critic_conditioning_mode": residual_critic_mode,
+                "freeze_backbone_epochs": 5,
+            }
+            expected_variant_values = {
+                CONTINUATION_VARIANT: {
+                    "text_embedding_mode": "zero_lp",
+                    "text_alignment_mode": "matched",
+                    "lambda_film": 0.0,
+                    "lambda_mismatch": 0.0,
+                    "lambda_critic_matching": 0.0,
+                    "lambda_generator_matching": 0.0,
+                },
+                TEXT_RESIDUAL_VARIANT: {
+                    "text_embedding_mode": "lp",
+                    "text_alignment_mode": "matched",
+                    "lambda_film": 1.0e-4,
+                    "lambda_mismatch": float(matched_training.get("lambda_mismatch", 0.0)),
+                    "lambda_critic_matching": float(
+                        matched_training.get("lambda_critic_matching", 0.0)
+                    ),
+                    "lambda_generator_matching": float(
+                        matched_training.get("lambda_generator_matching", 0.0)
+                    ),
+                },
+                SHUFFLED_RESIDUAL_VARIANT: {
+                    "text_embedding_mode": "lp",
+                    "text_alignment_mode": "permuted",
+                    "lambda_film": 1.0e-4,
+                    "lambda_mismatch": float(matched_training.get("lambda_mismatch", 0.0)),
+                    "lambda_critic_matching": float(
+                        matched_training.get("lambda_critic_matching", 0.0)
+                    ),
+                    "lambda_generator_matching": float(
+                        matched_training.get("lambda_generator_matching", 0.0)
+                    ),
+                },
+            }
 
             for variant in PAIRED_STAGE_B_VARIANTS:
                 key = (fold, seed, variant)
@@ -1286,10 +1494,18 @@ def _paired_stage_audit(
                     errors.append("text_transform_sha256_mismatch")
 
                 expected_values = {**common_expected, **expected_variant_values[variant]}
+                legacy_optional_defaults = {
+                    "lambda_critic_matching": 0.0,
+                    "lambda_generator_matching": 0.0,
+                }
                 mismatched_fields = sorted(
                     field
                     for field, expected in expected_values.items()
-                    if training.get(field) != expected
+                    if training.get(
+                        field,
+                        legacy_optional_defaults.get(field),
+                    )
+                    != expected
                 )
                 errors.extend(f"config_mismatch:{field}" for field in mismatched_fields)
                 audit_rows.append(
@@ -1342,6 +1558,31 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
                 run_dir = _completed_run(run_root)
                 if run_dir is None:
                     raise FileNotFoundError(f"Missing completed run: {variant}/{fold}/seed_{seed}")
+                resolved_fold = _read_yaml(_fold_config(root, fold))
+                resolved_fold_training = dict(
+                    resolved_fold.get("training") or resolved_fold
+                )
+                _validate_run_protocol(
+                    run_dir,
+                    critic_mode=_variant_critic_mode(
+                        variant,
+                        residual_critic_mode=str(
+                            resolved_fold_training.get(
+                                "critic_conditioning_mode",
+                                "projection",
+                            )
+                        ),
+                    ),
+                    require_schema5=(
+                        str(
+                            resolved_fold_training.get(
+                                "critic_conditioning_mode",
+                                "projection",
+                            )
+                        ).strip().lower()
+                        == "transition_matching"
+                    ),
+                )
                 best = json.loads((run_dir / "metrics/best_checkpoint.json").read_text(encoding="utf-8"))
                 epoch = int(best["best_epoch"])
                 if epoch <= 10:
@@ -1393,6 +1634,8 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
         "critic_conditioning_mode",
         "lambda_film",
         "lambda_mismatch",
+        "lambda_critic_matching",
+        "lambda_generator_matching",
         "initial_generator_checkpoint_path",
         "freeze_backbone_epochs",
         "seed",
@@ -1470,6 +1713,38 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
 def generate_matrix(args: argparse.Namespace) -> Path:
     _assert_py312()
     root = _resolve_root(args.experiment_root)
+    frozen_config = _read_yaml(
+        root / "inputs/configs/train_rq1_pair_textbase.yaml"
+    )
+    generate_config = dict(frozen_config.get("generate_result") or {})
+    generation_split = str(generate_config.get("split", "test")).strip().lower()
+    if generation_split not in {"val", "test"}:
+        raise ValueError(
+            "RQ1 matrix generation supports only an explicit val or test split."
+        )
+    generation_output_dir = str(
+        generate_config.get(
+            "output_dir",
+            "validation_pilot_json"
+            if generation_split == "val"
+            else "development_test_json",
+        )
+    ).strip()
+    output_path = Path(generation_output_dir)
+    if (
+        not generation_output_dir
+        or output_path.is_absolute()
+        or ".." in output_path.parts
+    ):
+        raise ValueError("generate_result.output_dir must be a safe relative path.")
+    if (
+        str(generate_config.get("selection_mode", "all")).strip().lower()
+        != "all"
+        or int(generate_config.get("selection_count", 0)) != 0
+    ):
+        raise ValueError(
+            "RQ1 matrix generation requires selection_mode=all and selection_count=0."
+        )
     selected_path = root / "checkpoint_selection/selected_checkpoints.csv"
     if not selected_path.is_file():
         collect_checkpoints(argparse.Namespace(experiment_root=str(root)))
@@ -1477,9 +1752,10 @@ def generate_matrix(args: argparse.Namespace) -> Path:
     registry_rows = []
     for row in selected.itertuples(index=False):
         run_dir = Path(row.run_dir)
-        output_dir = run_dir / "development_test_json"
+        output_dir = run_dir / generation_output_dir
         summary_path = output_dir / "summary.csv"
-        expected = _fold_counts(root, str(row.fold))[2]
+        split_index = 1 if generation_split == "val" else 2
+        expected = _fold_counts(root, str(row.fold))[split_index]
         if summary_path.is_file() and len(pd.read_csv(summary_path)) == expected:
             status = "reused"
         else:
@@ -1492,9 +1768,9 @@ def generate_matrix(args: argparse.Namespace) -> Path:
                 "--checkpoint",
                 str(row.checkpoint_path),
                 "--output-dir",
-                "development_test_json",
+                generation_output_dir,
                 "--split",
-                "test",
+                generation_split,
                 "--selection-mode",
                 "all",
                 "--selection-count",
@@ -1518,6 +1794,8 @@ def generate_matrix(args: argparse.Namespace) -> Path:
                 "seed": int(row.seed),
                 "variant": row.variant,
                 "status": status,
+                "split": generation_split,
+                "output_dir": generation_output_dir,
                 "summary_path": str(summary_path),
                 "sample_count": expected,
             }
@@ -1774,6 +2052,19 @@ def build_comparison(args: argparse.Namespace) -> Path:
     if not registry_path.is_file():
         raise FileNotFoundError("Run generate before building the comparison archive.")
     registry = pd.read_csv(registry_path)
+    registry_splits = set(
+        registry.get("split", pd.Series(["test"] * len(registry)))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+    if registry_splits != {"test"}:
+        raise RuntimeError(
+            "Validation-only pilot outputs cannot enter the test comparison "
+            "or results pipeline. Inspect validation metrics in the run "
+            "directories and freeze a separate test protocol first."
+        )
     rows = []
     for record in registry.itertuples(index=False):
         summary = pd.read_csv(record.summary_path)
@@ -2328,6 +2619,15 @@ for this irregular local-support experiment.
 def run_results_pipeline(args: argparse.Namespace) -> Path:
     _assert_py312()
     root = _resolve_root(args.experiment_root)
+    frozen_config_path = root / "inputs/configs/train_rq1_pair_textbase.yaml"
+    if frozen_config_path.is_file():
+        frozen_config = _read_yaml(frozen_config_path)
+        frozen_generate = dict(frozen_config.get("generate_result") or {})
+        if str(frozen_generate.get("split", "test")).strip().lower() != "test":
+            raise RuntimeError(
+                "results-pipeline is disabled for validation-only pilot protocols; "
+                "it would otherwise create misleading test-labelled tables."
+            )
     experiment_seeds = _experiment_seeds(root)
     status_path = root / "registry/results_pipeline_status.json"
     state: dict[str, Any] = {

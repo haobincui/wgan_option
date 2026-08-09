@@ -65,7 +65,13 @@ class FilmWGANTrainConfig:
     forecast_mode: str = "stochastic_wgan"
     conditioning_mode: str = "film"
     critic_conditioning_mode: str = "inherit"
+    # `text_dropout` is the generator-side text dropout.  The critic has a
+    # separate setting because WGAN scores and gradient penalties should be
+    # evaluated by a deterministic network.
     text_dropout: float = 0.0
+    # Negative preserves the v1 behavior by inheriting `text_dropout`.  V2
+    # configs set this explicitly to zero.
+    critic_text_dropout: float = -1.0
     text_gate_initial_value: float = 0.0
 
     learning_rate: float = 1e-4
@@ -77,13 +83,24 @@ class FilmWGANTrainConfig:
     beta_2: float = 0.9
     critic_iter: int = 5
     lambda_gp: float = 10.0
+    gradient_penalty_mode: str = "legacy_full_grid"
     num_epochs: int = 100
     batch_size: int = 32
 
     lambda_adv: float = 1.0
     lambda_film: float = 0.0
+    # Legacy projection objective.  V2 uses the two explicit matching weights
+    # below so the old and new estimands cannot be confused.
     lambda_mismatch: float = 0.0
+    lambda_critic_matching: float = 0.0
+    lambda_generator_matching: float = 0.0
+    matching_logit_scale: float = 4.0
+    matching_negative_count: int = 2
+    matching_min_supported_cells: int = 16
+    matching_negative_seed: int = 20260809
+    matching_duplicate_cosine_threshold: float = 0.995
     adv_warmup_epochs: int = 0
+    adv_ramp_epochs: int = 0
     lambda_calendar: float = 2.0
     lambda_butterfly: float = 2.0
     lambda_smooth: float = 0.1
@@ -103,6 +120,7 @@ class FilmWGANTrainConfig:
     atm_short_max_days: float = 60.0
 
     eval_mc_samples: int = 32
+    evaluation_noise_seed: int = -1
     eval_reweight_beta_mode: str = "fixed"
     eval_reweight_beta: float = 25.0
     eval_aggregation_mode: str = "weighted_mean"
@@ -164,6 +182,7 @@ class FilmWGANSampleConfig:
 
     checkpoint_path: str = ""
     seed: int = 42
+    evaluation_noise_seed: int = -1
     cuda: bool = torch.cuda.is_available()
 
     mc_samples: int = 64
@@ -218,6 +237,7 @@ _SHARED_GENERATE_FIELDS = {
     "support_min_train_pair_cells",
     "report_atm7_metric",
     "seed",
+    "evaluation_noise_seed",
     "cuda",
 }
 
@@ -242,6 +262,8 @@ def _validate_split_fields(config: FilmWGANTrainConfig | FilmWGANSampleConfig) -
 
 def _validate_common_fields(config: FilmWGANTrainConfig | FilmWGANSampleConfig) -> None:
     _validate_split_fields(config)
+    if int(config.evaluation_noise_seed) < -1:
+        raise ValueError("evaluation_noise_seed must be -1 (inherit seed) or non-negative.")
     alignment = str(config.text_alignment_mode).strip().lower()
     if alignment not in {"matched", "permuted"}:
         raise ValueError("text_alignment_mode must be one of ['matched', 'permuted'].")
@@ -320,12 +342,32 @@ def _validate_train_fields(config: FilmWGANTrainConfig) -> None:
     if conditioning_mode not in {"film", "concat", "residual_film"}:
         raise ValueError("conditioning_mode must be one of ['film', 'concat', 'residual_film'].")
     critic_conditioning_mode = str(config.critic_conditioning_mode).strip().lower()
-    if critic_conditioning_mode not in {"inherit", "film", "concat", "projection"}:
+    if critic_conditioning_mode not in {
+        "inherit",
+        "film",
+        "concat",
+        "projection",
+        "transition_matching",
+    }:
         raise ValueError(
-            "critic_conditioning_mode must be one of ['inherit', 'film', 'concat', 'projection']."
+            "critic_conditioning_mode must be one of "
+            "['inherit', 'film', 'concat', 'projection', 'transition_matching']."
         )
-    if conditioning_mode == "residual_film" and critic_conditioning_mode != "projection":
-        raise ValueError("conditioning_mode=residual_film requires critic_conditioning_mode=projection.")
+    if conditioning_mode == "residual_film" and critic_conditioning_mode not in {
+        "projection",
+        "transition_matching",
+    }:
+        raise ValueError(
+            "conditioning_mode=residual_film requires critic_conditioning_mode="
+            "projection or transition_matching."
+        )
+    if critic_conditioning_mode == "transition_matching" and not (
+        bool(config.normalize_current_surface) and bool(config.normalize_target_delta)
+    ):
+        raise ValueError(
+            "transition_matching requires normalize_current_surface=true and "
+            "normalize_target_delta=true."
+        )
     if str(config.initial_generator_checkpoint_path).strip() and conditioning_mode != "residual_film":
         raise ValueError("initial_generator_checkpoint_path is supported only for residual_film.")
     parent_transform_policy = str(config.parent_text_transform_policy).strip().lower()
@@ -335,14 +377,99 @@ def _validate_train_fields(config: FilmWGANTrainConfig) -> None:
         )
     if not 0.0 <= float(config.text_dropout) < 1.0:
         raise ValueError("text_dropout must be in [0, 1).")
-    if float(config.lambda_film) < 0.0 or float(config.lambda_mismatch) < 0.0:
-        raise ValueError("lambda_film and lambda_mismatch must be non-negative.")
+    critic_text_dropout = float(config.critic_text_dropout)
+    if not (
+        abs(critic_text_dropout + 1.0) <= 1e-12
+        or 0.0 <= critic_text_dropout < 1.0
+    ):
+        raise ValueError("critic_text_dropout must be -1 (inherit) or in [0, 1).")
+    if (
+        critic_conditioning_mode == "transition_matching"
+        and abs(critic_text_dropout) > 1e-12
+    ):
+        raise ValueError(
+            "critic_conditioning_mode=transition_matching requires critic_text_dropout=0."
+        )
+    if any(
+        value < 0.0
+        for value in (
+            float(config.lambda_film),
+            float(config.lambda_mismatch),
+            float(config.lambda_critic_matching),
+            float(config.lambda_generator_matching),
+        )
+    ):
+        raise ValueError(
+            "lambda_film, lambda_mismatch, lambda_critic_matching, and "
+            "lambda_generator_matching must be non-negative."
+        )
+    if float(config.matching_logit_scale) <= 0.0:
+        raise ValueError("matching_logit_scale must be positive.")
+    if int(config.matching_negative_count) < 1:
+        raise ValueError("matching_negative_count must be positive.")
+    if int(config.matching_min_supported_cells) < 1:
+        raise ValueError("matching_min_supported_cells must be positive.")
+    if int(config.matching_negative_seed) < 0:
+        raise ValueError("matching_negative_seed must be non-negative.")
+    if not -1.0 < float(config.matching_duplicate_cosine_threshold) < 1.0:
+        raise ValueError(
+            "matching_duplicate_cosine_threshold must be strictly between -1 and 1."
+        )
+    if critic_conditioning_mode == "transition_matching" and abs(
+        float(config.lambda_mismatch)
+    ) > 1e-12:
+        raise ValueError(
+            "transition_matching uses lambda_critic_matching; lambda_mismatch must be zero."
+        )
+    if critic_conditioning_mode != "transition_matching" and any(
+        abs(value) > 1e-12
+        for value in (
+            float(config.lambda_critic_matching),
+            float(config.lambda_generator_matching),
+        )
+    ):
+        raise ValueError(
+            "lambda_critic_matching and lambda_generator_matching require "
+            "critic_conditioning_mode=transition_matching."
+        )
+    if (
+        float(config.lambda_generator_matching) > 0.0
+        and float(config.lambda_critic_matching) <= 0.0
+    ):
+        raise ValueError(
+            "lambda_generator_matching requires a positive "
+            "lambda_critic_matching so the generator cannot optimize against "
+            "an untrained matching head."
+        )
+    gradient_penalty_mode = str(config.gradient_penalty_mode).strip().lower()
+    if gradient_penalty_mode not in {"legacy_full_grid", "support_masked"}:
+        raise ValueError(
+            "gradient_penalty_mode must be one of ['legacy_full_grid', 'support_masked']."
+        )
+    if (
+        critic_conditioning_mode == "transition_matching"
+        and gradient_penalty_mode != "support_masked"
+    ):
+        raise ValueError(
+            "critic_conditioning_mode=transition_matching requires "
+            "gradient_penalty_mode=support_masked."
+        )
+    if int(config.adv_warmup_epochs) < 0 or int(config.adv_ramp_epochs) < 0:
+        raise ValueError("adv_warmup_epochs and adv_ramp_epochs must be non-negative.")
     if int(config.freeze_backbone_epochs) < 0:
         raise ValueError("freeze_backbone_epochs must be non-negative.")
     if float(config.backbone_learning_rate) <= 0.0 or float(config.text_adapter_learning_rate) <= 0.0:
         raise ValueError("backbone_learning_rate and text_adapter_learning_rate must be positive.")
     if forecast_mode == "deterministic" and abs(float(config.lambda_adv)) > 1e-12:
         raise ValueError("forecast_mode=deterministic requires lambda_adv=0.")
+    if (
+        forecast_mode == "deterministic"
+        and critic_conditioning_mode == "transition_matching"
+    ):
+        raise ValueError(
+            "forecast_mode=deterministic does not construct a critic and cannot "
+            "use critic_conditioning_mode=transition_matching."
+        )
     levels = [float(value) for value in config.eval_calibration_levels]
     if any(not 0.0 < value < 1.0 for value in levels):
         raise ValueError("eval_calibration_levels must contain values strictly between 0 and 1.")

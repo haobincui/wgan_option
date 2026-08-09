@@ -16,6 +16,39 @@ def generator_wgan_loss(fake_scores: torch.Tensor) -> torch.Tensor:
     return -fake_scores.mean()
 
 
+def critic_transition_matching_loss(
+    matched_logits: torch.Tensor,
+    mismatched_logits: torch.Tensor,
+) -> torch.Tensor:
+    """Balanced logistic loss for bounded real transition--text scores."""
+
+    positive = matched_logits.reshape(-1)
+    if positive.numel() == 0:
+        raise ValueError("matched_logits must not be empty.")
+    if mismatched_logits.numel() == 0:
+        raise ValueError("mismatched_logits must not be empty.")
+    negative = mismatched_logits.reshape(positive.numel(), -1)
+    positive_loss = torch.nn.functional.softplus(-positive).mean()
+    negative_loss = torch.nn.functional.softplus(negative).mean()
+    return 0.5 * (positive_loss + negative_loss)
+
+
+def generator_transition_matching_loss(
+    matched_logits: torch.Tensor,
+    mismatched_logits: torch.Tensor,
+) -> torch.Tensor:
+    """Relative logistic loss requiring matched text to outrank negatives."""
+
+    positive = matched_logits.reshape(-1)
+    if positive.numel() == 0:
+        raise ValueError("matched_logits must not be empty.")
+    if mismatched_logits.numel() == 0:
+        raise ValueError("mismatched_logits must not be empty.")
+    negative = mismatched_logits.reshape(positive.numel(), -1)
+    margins = positive.unsqueeze(1) - negative
+    return torch.nn.functional.softplus(-margins).mean()
+
+
 def gradient_penalty(
     *,
     critic,
@@ -25,20 +58,48 @@ def gradient_penalty(
     text_embedding: torch.Tensor,
     lambda_gp: float,
     has_text: torch.Tensor | None = None,
+    support_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     batch_size = real_future_surface.size(0)
     alpha = torch.rand(batch_size, 1, 1, 1, device=real_future_surface.device)
     interpolated = alpha * real_future_surface + (1.0 - alpha) * fake_future_surface
     interpolated.requires_grad_(True)
 
+    critic_future = interpolated
+    critic_kwargs = {}
+    if support_mask is not None:
+        support = support_mask.to(device=interpolated.device, dtype=interpolated.dtype)
+        if support.ndim == 2:
+            support = support.view_as(interpolated)
+        elif support.ndim == 3:
+            support = support.unsqueeze(1)
+        if support.shape != interpolated.shape:
+            raise ValueError(
+                "support_mask must match the interpolated future surface shape; "
+                f"got support={tuple(support.shape)} future={tuple(interpolated.shape)}."
+            )
+        if bool(torch.any(support.sum(dim=(1, 2, 3)) <= 0.0)):
+            raise ValueError("Every sample must contain at least one supported future cell.")
+        # Differentiate with respect to the unmasked interpolation while the
+        # critic sees only supported coordinates.  The chain rule then makes
+        # every unsupported input gradient exactly zero.
+        critic_future = interpolated * support
+        critic_kwargs["support_mask"] = support
+
     if has_text is None:
-        interpolated_scores = critic(interpolated, current_surface, text_embedding)
+        interpolated_scores = critic(
+            critic_future,
+            current_surface,
+            text_embedding,
+            **critic_kwargs,
+        )
     else:
         interpolated_scores = critic(
-            interpolated,
+            critic_future,
             current_surface,
             text_embedding,
             has_text=has_text,
+            **critic_kwargs,
         )
     grad_outputs = torch.ones_like(interpolated_scores, device=real_future_surface.device)
     gradients = autograd.grad(

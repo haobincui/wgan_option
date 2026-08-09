@@ -494,6 +494,7 @@ class FilmWGANDataset(Dataset):
         normalize_text_embedding: bool,
         include_has_text: bool = False,
         include_support_mask: bool = False,
+        include_sample_index: bool = False,
     ):
         self.samples = list(samples)
         self.normalization_stats = normalization_stats
@@ -502,6 +503,7 @@ class FilmWGANDataset(Dataset):
         self.normalize_text_embedding = bool(normalize_text_embedding)
         self.include_has_text = bool(include_has_text)
         self.include_support_mask = bool(include_support_mask)
+        self.include_sample_index = bool(include_sample_index)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -560,6 +562,8 @@ class FilmWGANDataset(Dataset):
                 *extras,
                 torch.tensor(float(sample.metadata.get("has_text", 1.0)), dtype=torch.float32),
             )
+        if self.include_sample_index:
+            extras = (*extras, torch.tensor(index, dtype=torch.long))
         return (*tensors, *extras)
 
 
@@ -1725,6 +1729,21 @@ def apply_text_alignment(
                 "text_alignment_mode": "permuted",
                 "text_source_sample_id": donor.sample_id,
                 "text_source_surface_pair_id": donor.surface_pair_id,
+                "text_source_article_ids": list(
+                    donor.metadata.get("article_ids", [])
+                ),
+                "text_source_files": list(
+                    donor.metadata.get("source_files", [])
+                ),
+                "text_source_event_group": donor.metadata.get("event_group", ""),
+                "text_source_news_cluster_id": donor.metadata.get(
+                    "news_cluster_id",
+                    "",
+                ),
+                "text_source_feature_sha256": donor.metadata.get(
+                    "pair_text_feature_sha256",
+                    "",
+                ),
             }
         )
         aligned.append(replace(sample, text_embedding=donor.text_embedding.copy(), metadata=metadata))
@@ -1758,6 +1777,10 @@ def create_train_val_bundle(config: FilmWGANTrainConfig) -> FilmWGANDataBundle:
     )
     normalization_stats = _compute_normalization_stats(train_items)
     support_enabled = str(config.surface_support_mode).strip().lower() == "raw_observed"
+    matching_enabled = (
+        str(config.critic_conditioning_mode).strip().lower()
+        == "transition_matching"
+    )
     train_loader = DataLoader(
         FilmWGANDataset(
             train_items,
@@ -1767,6 +1790,7 @@ def create_train_val_bundle(config: FilmWGANTrainConfig) -> FilmWGANDataBundle:
             normalize_text_embedding=config.normalize_text_embedding,
             include_has_text=str(config.conditioning_mode).strip().lower() == "residual_film",
             include_support_mask=support_enabled,
+            include_sample_index=matching_enabled,
         ),
         batch_size=int(config.batch_size),
         shuffle=True,
@@ -1783,6 +1807,7 @@ def create_train_val_bundle(config: FilmWGANTrainConfig) -> FilmWGANDataBundle:
                 normalize_text_embedding=config.normalize_text_embedding,
                 include_has_text=str(config.conditioning_mode).strip().lower() == "residual_film",
                 include_support_mask=support_enabled,
+                include_sample_index=matching_enabled,
             ),
             batch_size=int(config.batch_size),
             shuffle=False,
@@ -1799,6 +1824,7 @@ def create_train_val_bundle(config: FilmWGANTrainConfig) -> FilmWGANDataBundle:
                 normalize_text_embedding=config.normalize_text_embedding,
                 include_has_text=str(config.conditioning_mode).strip().lower() == "residual_film",
                 include_support_mask=support_enabled,
+                include_sample_index=matching_enabled,
             ),
             batch_size=int(config.batch_size),
             shuffle=False,

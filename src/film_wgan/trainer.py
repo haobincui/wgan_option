@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import random
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Mapping, Optional
@@ -31,7 +32,9 @@ from .losses import (
     atm_short_pure_mae,
     build_atm_short_mask,
     build_reconstruction_weight_template,
+    critic_transition_matching_loss,
     critic_wgan_loss,
+    generator_transition_matching_loss,
     generator_wgan_loss,
     gradient_penalty,
     maturity_smoothness_penalty,
@@ -39,7 +42,14 @@ from .losses import (
     strike_smoothness_penalty,
     weighted_surface_mae,
 )
-from .models import FilmWGANCritic, FilmWGANGenerator, reconstruct_future_surface
+from .matching import build_transition_matching_donor_mapping
+from .models import (
+    VOL_CEIL,
+    VOL_FLOOR,
+    FilmWGANCritic,
+    FilmWGANGenerator,
+    reconstruct_future_surface,
+)
 from .text_transform import sha256_file
 from .training_plots import plot_training_curves
 from wgan_option.config_parsing import load_yaml_mapping
@@ -74,6 +84,21 @@ def _finite_mean(values: list[float], *, default: float = 0.0) -> float:
     finite = np.asarray(values, dtype=np.float64)
     finite = finite[np.isfinite(finite)]
     return float(np.mean(finite)) if finite.size else float(default)
+
+
+@contextmanager
+def _temporarily_freeze_parameters(module: torch.nn.Module):
+    """Keep input gradients while preventing parameter gradients for one forward."""
+
+    parameters = list(module.parameters())
+    original_flags = [parameter.requires_grad for parameter in parameters]
+    try:
+        for parameter in parameters:
+            parameter.requires_grad_(False)
+        yield
+    finally:
+        for parameter, requires_grad in zip(parameters, original_flags):
+            parameter.requires_grad_(requires_grad)
 
 
 class FilmWGANTrainer(BaseTrainer):
@@ -112,6 +137,10 @@ class FilmWGANTrainer(BaseTrainer):
         self._initial_generator_state_sha256: str = ""
         self._initial_critic_state_sha256: str = ""
         self._backbone_frozen: bool = False
+        self._matching_donor_indices: Optional[torch.Tensor] = None
+        self._matching_text_bank: Optional[torch.Tensor] = None
+        self._matching_donor_mapping_sha256: str = ""
+        self._matching_eligible_samples: int = 0
 
     def _set_seed(self) -> None:
         random.seed(int(self.config.seed))
@@ -153,6 +182,28 @@ class FilmWGANTrainer(BaseTrainer):
         if not checkpoint_path.is_file():
             raise FileNotFoundError(f"initial_generator_checkpoint_path does not exist: {checkpoint_path}")
         checkpoint = load_checkpoint(checkpoint_path, self.device)
+        if (
+            str(self.config.critic_conditioning_mode).strip().lower()
+            == "transition_matching"
+        ):
+            schema_version = int(checkpoint.get("checkpoint_schema_version", 0))
+            protocol_version = str(
+                checkpoint.get("training_protocol_version", "")
+            )
+            critic_version = str(
+                checkpoint.get("critic_architecture_version", "")
+            )
+            if (
+                schema_version != 5
+                or protocol_version != "film_wgan_transition_matching_v2"
+                or critic_version != "transition_matching_v2"
+            ):
+                raise ValueError(
+                    "transition_matching Stage B requires a schema-5 v2 parent "
+                    "trained with the same transition-matching critic protocol; "
+                    f"found schema={schema_version}, protocol={protocol_version!r}, "
+                    f"critic={critic_version!r}."
+                )
         parent_shape = tuple(int(value) for value in checkpoint.get("surface_shape", ()))
         if parent_shape != tuple(self.bundle.surface_shape):
             raise ValueError(
@@ -277,6 +328,7 @@ class FilmWGANTrainer(BaseTrainer):
         self.logger.info("Loading merged-vol workbook from %s (%s)", self.config.data_path, self.config.sheet_name)
         self.bundle = create_train_val_bundle(self.config)
         self.bundle.split_manifest.to_csv(self.metrics_dir / "split_manifest_resolved.csv", index=False)
+        self._prepare_transition_matching_donors()
         self.normalization = normalization_stats_to_tensors(self.bundle.normalization_stats, self.device)
         self._strike_grid = torch.tensor(self.bundle.strike_grid, dtype=torch.float32, device=self.device)
         self._maturity_days_grid = torch.tensor(self.bundle.maturity_days_grid, dtype=torch.float32, device=self.device)
@@ -321,6 +373,9 @@ class FilmWGANTrainer(BaseTrainer):
         ).to(self.device)
         self._load_initial_generator_checkpoint()
         if not deterministic:
+            critic_text_dropout = float(self.config.critic_text_dropout)
+            if critic_text_dropout < 0.0:
+                critic_text_dropout = float(self.config.text_dropout)
             self.critic = FilmWGANCritic(
                 surface_height=surface_height,
                 surface_width=surface_width,
@@ -332,8 +387,9 @@ class FilmWGANTrainer(BaseTrainer):
                 fusion_hidden_dim=self.config.fusion_hidden_dim,
                 conditioning_mode=self.config.conditioning_mode,
                 critic_conditioning_mode=self.config.critic_conditioning_mode,
-                text_dropout=float(self.config.text_dropout),
+                text_dropout=critic_text_dropout,
                 current_surface_channels=current_surface_channels,
+                matching_logit_scale=float(self.config.matching_logit_scale),
             ).to(self.device)
         self._initial_generator_state_sha256 = module_state_sha256(self.generator)
         self._initial_critic_state_sha256 = module_state_sha256(self.critic)
@@ -352,6 +408,15 @@ class FilmWGANTrainer(BaseTrainer):
                 "surface_support_path": self.bundle.surface_support_path,
                 "surface_support_sha256": self.bundle.surface_support_sha256,
                 "current_surface_channels": current_surface_channels,
+                "generator_text_dropout": float(self.config.text_dropout),
+                "critic_text_dropout": (
+                    float(self.config.text_dropout)
+                    if float(self.config.critic_text_dropout) < 0.0
+                    else float(self.config.critic_text_dropout)
+                ),
+                "gradient_penalty_mode": str(self.config.gradient_penalty_mode),
+                "matching_donor_mapping_sha256": self._matching_donor_mapping_sha256,
+                "matching_eligible_samples": self._matching_eligible_samples,
                 "initial_generator_state_sha256": self._initial_generator_state_sha256,
                 "initial_critic_state_sha256": self._initial_critic_state_sha256,
             },
@@ -407,19 +472,193 @@ class FilmWGANTrainer(BaseTrainer):
             surface_height * surface_width,
         )
         self.logger.info(
-            "Adversarial weighting: lambda_adv=%.4f adv_warmup_epochs=%d",
+            "Adversarial weighting: lambda_adv=%.4f adv_warmup_epochs=%d adv_ramp_epochs=%d",
             float(self.config.lambda_adv),
             int(self.config.adv_warmup_epochs),
+            int(self.config.adv_ramp_epochs),
         )
+        self.logger.info(
+            "Critic protocol: conditioning=%s text_dropout=%.4f gp_mode=%s "
+            "lambda_matching_d=%.4f lambda_matching_g=%.4f logit_scale=%.4f "
+            "matcher_updates_per_generator_batch=%d",
+            str(self.config.critic_conditioning_mode),
+            (
+                float(self.config.text_dropout)
+                if float(self.config.critic_text_dropout) < 0.0
+                else float(self.config.critic_text_dropout)
+            ),
+            str(self.config.gradient_penalty_mode),
+            float(self.config.lambda_critic_matching),
+            float(self.config.lambda_generator_matching),
+            float(self.config.matching_logit_scale),
+            int(
+                str(self.config.critic_conditioning_mode).strip().lower()
+                == "transition_matching"
+                and float(self.config.lambda_critic_matching) > 0.0
+            ),
+        )
+
+    def _prepare_transition_matching_donors(self) -> None:
+        assert self.bundle is not None
+        assert self.metrics_dir is not None
+        transition_mode = (
+            str(self.config.critic_conditioning_mode).strip().lower()
+            == "transition_matching"
+        )
+        loss_enabled = (
+            float(self.config.lambda_critic_matching) > 0.0
+            or float(self.config.lambda_generator_matching) > 0.0
+        )
+        if not (transition_mode and loss_enabled):
+            return
+
+        mapping, rows = build_transition_matching_donor_mapping(
+            self.bundle.train_items,
+            negative_count=int(self.config.matching_negative_count),
+            minimum_supported_cells=int(
+                self.config.matching_min_supported_cells
+            ),
+            seed=int(self.config.matching_negative_seed),
+            duplicate_cosine_threshold=float(
+                self.config.matching_duplicate_cosine_threshold
+            ),
+        )
+        mapping_path = self.metrics_dir / "transition_matching_donor_mapping.csv"
+        write_csv(mapping_path, rows)
+        self._matching_donor_mapping_sha256 = sha256_file(mapping_path)
+        self._matching_donor_indices = torch.as_tensor(
+            mapping,
+            dtype=torch.long,
+            device=self.device,
+        )
+        matching_text_bank = np.stack(
+            [sample.text_embedding for sample in self.bundle.train_items],
+            axis=0,
+        ).astype(np.float32)
+        if bool(self.config.normalize_text_embedding):
+            matching_text_bank = (
+                (matching_text_bank - self.bundle.normalization_stats.text_mean)
+                / self.bundle.normalization_stats.text_std
+            ).astype(np.float32)
+        self._matching_text_bank = torch.as_tensor(
+            matching_text_bank,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self._matching_eligible_samples = int(np.all(mapping >= 0, axis=1).sum())
+        self.logger.info(
+            "Transition-matching donor mapping: eligible=%d/%d K=%d seed=%d sha256=%s",
+            self._matching_eligible_samples,
+            len(self.bundle.train_items),
+            int(self.config.matching_negative_count),
+            int(self.config.matching_negative_seed),
+            self._matching_donor_mapping_sha256,
+        )
+
+    def _adversarial_ramp_factor(self) -> float:
+        warmup_epochs = max(0, int(self.config.adv_warmup_epochs))
+        if self._current_epoch <= warmup_epochs:
+            return 0.0
+        ramp_epochs = max(0, int(self.config.adv_ramp_epochs))
+        if ramp_epochs == 0:
+            return 1.0
+        return min(1.0, float(self._current_epoch - warmup_epochs) / float(ramp_epochs))
+
+    def _matching_indices(
+        self,
+        has_text: torch.Tensor,
+        support_mask_flat: torch.Tensor,
+        sample_indices: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if sample_indices is None:
+            raise ValueError(
+                "transition matching requires dataset sample indices in each batch."
+            )
+        if self._matching_donor_indices is None:
+            raise RuntimeError(
+                "Transition-matching donor mapping has not been prepared."
+            )
+        sample_indices = sample_indices.reshape(-1).to(
+            device=self._matching_donor_indices.device,
+            dtype=torch.long,
+        )
+        if sample_indices.numel() != has_text.numel():
+            raise ValueError("sample_indices must contain one index per batch row.")
+        mapped_donors = self._matching_donor_indices[sample_indices]
+        support_counts = support_mask_flat.reshape(support_mask_flat.size(0), -1).sum(dim=1)
+        eligible_mask = (has_text.reshape(-1) > 0.0) & (
+            support_counts >= float(self.config.matching_min_supported_cells)
+        ) & torch.all(mapped_donors >= 0, dim=1)
+        eligible = torch.nonzero(eligible_mask, as_tuple=False).reshape(-1)
+        if eligible.numel() == 0:
+            empty = torch.empty(
+                (0, int(self.config.matching_negative_count)),
+                dtype=torch.long,
+                device=eligible.device,
+            )
+            return eligible, empty
+        return eligible, mapped_donors[eligible]
+
+    def _transition_matching_logits(
+        self,
+        transition_surface: torch.Tensor,
+        text_features: torch.Tensor,
+        support_surface: torch.Tensor,
+        eligible: torch.Tensor,
+        donors: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self.critic is not None
+        if eligible.numel() == 0 or donors.numel() == 0:
+            empty = transition_surface.new_empty((0,))
+            return empty, transition_surface.new_empty((0, 0))
+        if self._matching_text_bank is None:
+            raise RuntimeError("Transition-matching text bank has not been prepared.")
+        positive_has_text = torch.ones(
+            eligible.numel(),
+            device=transition_surface.device,
+            dtype=transition_surface.dtype,
+        )
+        matched = self.critic.matching_logits(
+            transition_surface[eligible],
+            text_features[eligible],
+            support_mask=support_surface[eligible],
+            has_text=positive_has_text,
+        ).reshape(-1)
+
+        negative_count = donors.size(1)
+        repeated_transition = transition_surface[eligible].repeat_interleave(
+            negative_count,
+            dim=0,
+        )
+        repeated_support = support_surface[eligible].repeat_interleave(
+            negative_count,
+            dim=0,
+        )
+        donor_text = self._matching_text_bank[donors.reshape(-1)]
+        donor_has_text = torch.ones(
+            donor_text.size(0),
+            device=transition_surface.device,
+            dtype=transition_surface.dtype,
+        )
+        mismatched = self.critic.matching_logits(
+            repeated_transition,
+            donor_text,
+            support_mask=repeated_support,
+            has_text=donor_has_text,
+        ).view(eligible.numel(), negative_count)
+        return matched, mismatched
 
     def _discriminator_step(
         self,
         current_features: torch.Tensor,
         text_features: torch.Tensor,
+        real_delta_norm: torch.Tensor,
         current_flat: torch.Tensor,
         target_flat: torch.Tensor,
         has_text: torch.Tensor,
         support_mask_flat: torch.Tensor,
+        sample_indices: torch.Tensor | None = None,
+        update_matching: bool = True,
     ) -> dict[str, float]:
         assert self.generator is not None
         assert self.critic is not None
@@ -441,29 +680,33 @@ class FilmWGANTrainer(BaseTrainer):
                 else fake_delta_norm
             )
             fake_future_flat = reconstruct_future_surface(current_flat, fake_delta)
-        fake_future_surface = self._normalize_surface_flat(fake_future_flat)
-        real_future_surface = self._normalize_surface_flat(target_flat)
+        fake_future_unmasked = self._normalize_surface_flat(fake_future_flat)
+        real_future_unmasked = self._normalize_surface_flat(target_flat)
         support_surface = support_mask_flat.view(
             support_mask_flat.size(0),
             1,
-            fake_future_surface.size(2),
-            fake_future_surface.size(3),
+            fake_future_unmasked.size(2),
+            fake_future_unmasked.size(3),
         )
-        fake_future_surface = fake_future_surface * support_surface
-        real_future_surface = real_future_surface * support_surface
+        fake_future_surface = fake_future_unmasked * support_surface
+        real_future_surface = real_future_unmasked * support_surface
 
         fake_scores = self.critic(
             fake_future_surface,
             current_features,
             text_features,
             has_text=has_text,
+            support_mask=support_surface,
         )
         real_scores = self.critic(
             real_future_surface,
             current_features,
             text_features,
             has_text=has_text,
+            support_mask=support_surface,
         )
+        adversarial_disc_loss = critic_wgan_loss(real_scores, fake_scores)
+        zero = torch.zeros((), device=self.device, dtype=real_scores.dtype)
         mismatch_loss = torch.zeros((), device=self.device, dtype=real_scores.dtype)
         mismatch_scores = None
         mismatch_enabled = (
@@ -482,28 +725,80 @@ class FilmWGANTrainer(BaseTrainer):
                 current_features,
                 text_features[donor_indices],
                 has_text=has_text[donor_indices],
+                support_mask=support_surface,
             )
             mismatch_loss = mismatch_scores.mean()
-        self._disc_step_count += 1
-        warmup_factor = min(1.0, self._disc_step_count / max(1, self._gp_warmup_steps))
-        effective_lambda_gp = float(self.config.lambda_gp) * warmup_factor
-        gp = gradient_penalty(
-            critic=self.critic,
-            real_future_surface=real_future_surface,
-            fake_future_surface=fake_future_surface,
-            current_surface=current_features,
-            text_embedding=text_features,
-            lambda_gp=effective_lambda_gp,
-            has_text=has_text,
-        )
-        if mismatch_scores is None:
-            adversarial_disc_loss = critic_wgan_loss(real_scores, fake_scores)
-        else:
             mismatch_weight = float(self.config.lambda_mismatch)
             adversarial_disc_loss = (
                 fake_scores.mean() + mismatch_weight * mismatch_loss
             ) / (1.0 + mismatch_weight) - real_scores.mean()
-        disc_loss = adversarial_disc_loss + gp
+
+        matching_loss = zero
+        matched_logit_mean = zero
+        mismatched_logit_mean = zero
+        matching_margin = zero
+        matching_pairwise_accuracy = zero
+        matching_eligible_fraction = zero
+        if (
+            self.critic.conditioning_mode == "transition_matching"
+            and float(self.config.lambda_critic_matching) > 0.0
+            and bool(update_matching)
+        ):
+            eligible, donors = self._matching_indices(
+                has_text,
+                support_mask_flat,
+                sample_indices,
+            )
+            matching_eligible_fraction = real_scores.new_tensor(
+                float(eligible.numel()) / float(max(1, has_text.numel()))
+            )
+            if eligible.numel() > 0 and donors.numel() > 0:
+                real_transition = real_delta_norm.view(
+                    real_delta_norm.size(0),
+                    1,
+                    real_future_surface.size(2),
+                    real_future_surface.size(3),
+                )
+                matched_logits, mismatched_logits = self._transition_matching_logits(
+                    real_transition,
+                    text_features,
+                    support_surface,
+                    eligible,
+                    donors,
+                )
+                matching_loss = critic_transition_matching_loss(
+                    matched_logits,
+                    mismatched_logits,
+                )
+                matched_logit_mean = matched_logits.mean()
+                mismatched_logit_mean = mismatched_logits.mean()
+                matching_margin = (
+                    matched_logits.unsqueeze(1) - mismatched_logits
+                ).mean()
+                matching_pairwise_accuracy = (
+                    matched_logits.unsqueeze(1) > mismatched_logits
+                ).float().mean()
+        self._disc_step_count += 1
+        warmup_factor = min(1.0, self._disc_step_count / max(1, self._gp_warmup_steps))
+        effective_lambda_gp = float(self.config.lambda_gp) * warmup_factor
+        support_aware_gp = (
+            str(self.config.gradient_penalty_mode).strip().lower() == "support_masked"
+        )
+        gp = gradient_penalty(
+            critic=self.critic,
+            real_future_surface=(real_future_unmasked if support_aware_gp else real_future_surface),
+            fake_future_surface=(fake_future_unmasked if support_aware_gp else fake_future_surface),
+            current_surface=current_features,
+            text_embedding=text_features,
+            lambda_gp=effective_lambda_gp,
+            has_text=has_text,
+            support_mask=(support_surface if support_aware_gp else None),
+        )
+        disc_loss = (
+            adversarial_disc_loss
+            + gp
+            + float(self.config.lambda_critic_matching) * matching_loss
+        )
         disc_loss.backward()
         if torch.isfinite(disc_loss):
             torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=self._grad_clip)
@@ -516,6 +811,23 @@ class FilmWGANTrainer(BaseTrainer):
             "d_real": float(real_scores.mean().detach().cpu()),
             "d_fake": float(fake_scores.mean().detach().cpu()),
             "d_mismatch": float(mismatch_loss.detach().cpu()),
+            "d_wgan": float(adversarial_disc_loss.detach().cpu()),
+            "d_matching": float(matching_loss.detach().cpu()),
+            "d_aux_matching_contribution": float(
+                (
+                    float(self.config.lambda_critic_matching)
+                    * matching_loss
+                ).detach().cpu()
+            ),
+            "d_matching_positive": float(matched_logit_mean.detach().cpu()),
+            "d_matching_negative": float(mismatched_logit_mean.detach().cpu()),
+            "d_matching_margin": float(matching_margin.detach().cpu()),
+            "d_matching_pairwise_accuracy": float(
+                matching_pairwise_accuracy.detach().cpu()
+            ),
+            "d_matching_eligible_fraction": float(
+                matching_eligible_fraction.detach().cpu()
+            ),
             "gp": float(gp.detach().cpu()),
         }
 
@@ -527,6 +839,7 @@ class FilmWGANTrainer(BaseTrainer):
         target_flat: torch.Tensor,
         has_text: torch.Tensor,
         support_mask_flat: torch.Tensor,
+        sample_indices: torch.Tensor | None = None,
     ) -> dict[str, float]:
         assert self.generator is not None
         assert self.generator_optimizer is not None
@@ -537,6 +850,15 @@ class FilmWGANTrainer(BaseTrainer):
         assert self._recon_weights_flat is not None
 
         self.generator_optimizer.zero_grad(set_to_none=True)
+        if (
+            self.critic_optimizer is not None
+            and self.critic is not None
+            and self.critic.conditioning_mode == "transition_matching"
+        ):
+            # The matching critic is frozen during the generator update.  Also
+            # clear the preceding D-step gradients so `.grad` remains an exact
+            # audit of this separation rather than stale optimizer state.
+            self.critic_optimizer.zero_grad(set_to_none=True)
         noise = None
         if self.generator.noise_dim > 0:
             noise = torch.randn(
@@ -557,27 +879,115 @@ class FilmWGANTrainer(BaseTrainer):
             else fake_delta_norm
         )
         fake_future_flat = reconstruct_future_surface(current_flat, fake_delta)
-        fake_future_surface = self._normalize_surface_flat(fake_future_flat)
+        saturated_flat = (
+            fake_future_flat <= VOL_FLOOR * (1.0 + 1.0e-5)
+        ) | (fake_future_flat >= VOL_CEIL * (1.0 - 1.0e-5))
+        actual_delta = torch.log(
+            torch.clamp(fake_future_flat, min=VOL_FLOOR)
+        ) - torch.log(torch.clamp(current_flat, min=VOL_FLOOR))
+        actual_delta_norm = (
+            (actual_delta - self.normalization.delta_mean)
+            / torch.clamp(self.normalization.delta_std, min=1e-6)
+            if self.config.normalize_target_delta
+            else actual_delta
+        )
+        fake_future_unmasked = self._normalize_surface_flat(fake_future_flat)
         support_surface = support_mask_flat.view(
             support_mask_flat.size(0),
             1,
             self.bundle.surface_shape[0],
             self.bundle.surface_shape[1],
         )
-        fake_future_surface = fake_future_surface * support_surface
+        fake_future_surface = fake_future_unmasked * support_surface
+        matching_generator_loss = torch.zeros(
+            (),
+            device=fake_future_flat.device,
+            dtype=fake_future_flat.dtype,
+        )
+        matching_generator_margin = matching_generator_loss
         if self.critic is not None:
-            fake_scores = self.critic(
-                fake_future_surface,
-                current_features,
-                text_features,
-                has_text=has_text,
+            freeze_context = (
+                _temporarily_freeze_parameters(self.critic)
+                if self.critic.conditioning_mode == "transition_matching"
+                else nullcontext()
             )
-            adv_loss = generator_wgan_loss(fake_scores)
+            with freeze_context:
+                fake_scores = self.critic(
+                    fake_future_surface,
+                    current_features,
+                    text_features,
+                    has_text=has_text,
+                    support_mask=support_surface,
+                )
+                adv_loss = generator_wgan_loss(fake_scores)
+                if (
+                    self.critic.conditioning_mode == "transition_matching"
+                    and float(self.config.lambda_generator_matching) > 0.0
+                ):
+                    eligible, donors = self._matching_indices(
+                        has_text,
+                        support_mask_flat,
+                        sample_indices,
+                    )
+                    if eligible.numel() > 0 and donors.numel() > 0:
+                        # Match the transition represented by the delivered,
+                        # clamped future surface.  This prevents the generator
+                        # from optimizing an out-of-range latent delta that the
+                        # adversarial/reconstruction objectives never observe.
+                        fake_transition = actual_delta_norm.view(
+                            actual_delta_norm.size(0),
+                            1,
+                            self.bundle.surface_shape[0],
+                            self.bundle.surface_shape[1],
+                        )
+                        matched_logits, mismatched_logits = self._transition_matching_logits(
+                            fake_transition,
+                            text_features,
+                            support_surface,
+                            eligible,
+                            donors,
+                        )
+                        matching_generator_loss = generator_transition_matching_loss(
+                            matched_logits,
+                            mismatched_logits,
+                        )
+                        matching_generator_margin = (
+                            matched_logits.unsqueeze(1) - mismatched_logits
+                        ).mean()
         else:
             adv_loss = torch.zeros((), device=fake_future_flat.device, dtype=fake_future_flat.dtype)
 
         future_surface_level = fake_future_flat.view(current_features.size(0), self.bundle.surface_shape[0], self.bundle.surface_shape[1])
-        future_log_surface = torch.log(torch.clamp(future_surface_level, min=1e-4))
+        future_log_surface = torch.log(
+            torch.clamp(future_surface_level, min=VOL_FLOOR)
+        )
+        supported_count = support_mask_flat.sum().clamp_min(1.0)
+        saturation_rate = (
+            saturated_flat.to(dtype=support_mask_flat.dtype) * support_mask_flat
+        ).sum() / supported_count
+        supported_transition_gap = torch.abs(
+            actual_delta_norm - fake_delta_norm
+        )[support_mask_flat > 0.0]
+        transition_delivery_max_abs_gap = (
+            torch.max(supported_transition_gap)
+            if supported_transition_gap.numel() > 0
+            else torch.zeros(
+                (),
+                device=fake_future_flat.device,
+                dtype=fake_future_flat.dtype,
+            )
+        )
+        transition_audit_mask = (support_mask_flat > 0.0) & (~saturated_flat)
+        if bool(torch.any(transition_audit_mask)):
+            transition_nonsaturated_max_abs_error = torch.max(
+                torch.abs(actual_delta_norm - fake_delta_norm)[transition_audit_mask]
+            )
+        else:
+            transition_nonsaturated_max_abs_error = torch.zeros(
+                (),
+                device=fake_future_flat.device,
+                dtype=fake_future_flat.dtype,
+            )
         zero_penalty = torch.zeros(
             (),
             device=fake_future_flat.device,
@@ -629,13 +1039,18 @@ class FilmWGANTrainer(BaseTrainer):
         else:
             atm_short_penalty = torch.zeros((), device=fake_future_flat.device, dtype=fake_future_flat.dtype)
 
-        adv_warmup_epochs = max(0, int(self.config.adv_warmup_epochs))
-        if self.critic is None or self._current_epoch <= adv_warmup_epochs:
-            effective_lambda_adv = 0.0
-        else:
-            effective_lambda_adv = float(self.config.lambda_adv)
+        adversarial_ramp_factor = self._adversarial_ramp_factor()
+        if self.critic is None:
+            adversarial_ramp_factor = 0.0
+        effective_lambda_adv = float(self.config.lambda_adv) * adversarial_ramp_factor
+        effective_lambda_generator_matching = (
+            float(self.config.lambda_generator_matching) * adversarial_ramp_factor
+        )
 
-        total_loss = effective_lambda_adv * adv_loss
+        total_loss = (
+            effective_lambda_adv * adv_loss
+            + effective_lambda_generator_matching * matching_generator_loss
+        )
         if self.config.use_calendar_constraint:
             total_loss = total_loss + float(self.config.lambda_calendar) * calendar_penalty
         if self.config.use_butterfly_constraint:
@@ -660,6 +1075,16 @@ class FilmWGANTrainer(BaseTrainer):
             "g_total": float(total_loss.detach().cpu()),
             "g_adv": float(adv_loss.detach().cpu()),
             "g_adv_effective_lambda": float(effective_lambda_adv),
+            "g_matching": float(matching_generator_loss.detach().cpu()),
+            "g_matching_margin": float(matching_generator_margin.detach().cpu()),
+            "g_matching_effective_lambda": float(effective_lambda_generator_matching),
+            "g_saturation_rate": float(saturation_rate.detach().cpu()),
+            "g_transition_delivery_max_abs_gap": float(
+                transition_delivery_max_abs_gap.detach().cpu()
+            ),
+            "g_transition_nonsaturated_max_abs_error": float(
+                transition_nonsaturated_max_abs_error.detach().cpu()
+            ),
             "g_calendar": float(calendar_penalty.detach().cpu()),
             "g_butterfly": float(butterfly_penalty.detach().cpu()),
             "g_smooth": float(smooth_penalty.detach().cpu()),
@@ -707,7 +1132,11 @@ class FilmWGANTrainer(BaseTrainer):
                 normalization=self.normalization,
                 noise_dim=int(self.generator.noise_dim),
                 mc_samples=int(self.config.eval_mc_samples),
-                seed=int(self.config.seed),
+                seed=(
+                    int(self.config.evaluation_noise_seed)
+                    if int(self.config.evaluation_noise_seed) >= 0
+                    else int(self.config.seed)
+                ),
                 device=self.device,
                 reweight_beta_mode=self.config.eval_reweight_beta_mode,
                 reweight_beta=float(self.config.eval_reweight_beta),
@@ -879,10 +1308,23 @@ class FilmWGANTrainer(BaseTrainer):
         assert self.bundle is not None
         assert self.generator is not None
         return {
-            "checkpoint_schema_version": 4,
+            "checkpoint_schema_version": 5,
             "architecture_version": "pair_text_residual_film_v1"
             if self.generator.conditioning_mode == "residual_film"
             else "film_wgan_legacy_v2",
+            "critic_architecture_version": (
+                "transition_matching_v2"
+                if self.critic is not None
+                and self.critic.conditioning_mode == "transition_matching"
+                else "legacy_v1"
+            ),
+            "training_protocol_version": (
+                "film_wgan_transition_matching_v2"
+                if self.critic is not None
+                and self.critic.conditioning_mode == "transition_matching"
+                else "film_wgan_v1_compatible"
+            ),
+            "matching_donor_mapping_sha256": self._matching_donor_mapping_sha256,
             "epoch": int(self._current_epoch),
             "forecast_mode": str(self.config.forecast_mode),
             "conditioning_mode": str(self.config.conditioning_mode),
@@ -1008,10 +1450,24 @@ class FilmWGANTrainer(BaseTrainer):
                 "d_real": [],
                 "d_fake": [],
                 "d_mismatch": [],
+                "d_wgan": [],
+                "d_matching": [],
+                "d_aux_matching_contribution": [],
+                "d_matching_positive": [],
+                "d_matching_negative": [],
+                "d_matching_margin": [],
+                "d_matching_pairwise_accuracy": [],
+                "d_matching_eligible_fraction": [],
                 "gp": [],
                 "g_total": [],
                 "g_adv": [],
                 "g_adv_effective_lambda": [],
+                "g_matching": [],
+                "g_matching_margin": [],
+                "g_matching_effective_lambda": [],
+                "g_saturation_rate": [],
+                "g_transition_delivery_max_abs_gap": [],
+                "g_transition_nonsaturated_max_abs_error": [],
                 "g_calendar": [],
                 "g_butterfly": [],
                 "g_smooth": [],
@@ -1024,7 +1480,7 @@ class FilmWGANTrainer(BaseTrainer):
                 (
                     current_features,
                     text_features,
-                    _real_delta_norm,
+                    real_delta_norm,
                     current_flat,
                     target_flat,
                 ) = batch[:5]
@@ -1036,26 +1492,43 @@ class FilmWGANTrainer(BaseTrainer):
                     support_mask_flat = torch.ones_like(current_flat)
                 if str(self.config.conditioning_mode).strip().lower() == "residual_film":
                     has_text = batch[extra_index]
+                    extra_index += 1
                 else:
                     has_text = torch.ones(current_features.size(0), dtype=torch.float32)
+                sample_indices = None
+                if (
+                    str(self.config.critic_conditioning_mode).strip().lower()
+                    == "transition_matching"
+                ):
+                    sample_indices = batch[extra_index]
                 current_features = self._to_device(current_features)
                 text_features = self._to_device(text_features)
+                real_delta_norm = self._to_device(real_delta_norm)
                 current_flat = self._to_device(current_flat)
                 target_flat = self._to_device(target_flat)
                 has_text = self._to_device(has_text)
                 support_mask_flat = self._to_device(support_mask_flat)
+                if sample_indices is not None:
+                    sample_indices = self._to_device(sample_indices)
 
                 if self.critic is not None:
-                    for _ in range(max(1, int(self.config.critic_iter))):
+                    critic_steps = max(1, int(self.config.critic_iter))
+                    for critic_step_index in range(critic_steps):
+                        update_matching = critic_step_index == 0
                         d_metrics = self._discriminator_step(
                             current_features,
                             text_features,
+                            real_delta_norm,
                             current_flat,
                             target_flat,
                             has_text,
                             support_mask_flat,
+                            sample_indices,
+                            update_matching=update_matching,
                         )
                         for key, value in d_metrics.items():
+                            if key.startswith("d_matching") and not update_matching:
+                                continue
                             running[key].append(float(value))
 
                 g_metrics = self._generator_step(
@@ -1065,6 +1538,7 @@ class FilmWGANTrainer(BaseTrainer):
                     target_flat,
                     has_text,
                     support_mask_flat,
+                    sample_indices,
                 )
                 for key, value in g_metrics.items():
                     running[key].append(float(value))
@@ -1075,11 +1549,61 @@ class FilmWGANTrainer(BaseTrainer):
                 "d_real": float(np.mean(running["d_real"])) if running["d_real"] else 0.0,
                 "d_fake": float(np.mean(running["d_fake"])) if running["d_fake"] else 0.0,
                 "d_mismatch": float(np.mean(running["d_mismatch"])) if running["d_mismatch"] else 0.0,
+                "d_wgan": float(np.mean(running["d_wgan"])) if running["d_wgan"] else 0.0,
+                "d_matching": float(np.mean(running["d_matching"])) if running["d_matching"] else 0.0,
+                "d_aux_matching_contribution": float(
+                    np.mean(running["d_aux_matching_contribution"])
+                )
+                if running["d_aux_matching_contribution"]
+                else 0.0,
+                "d_matching_positive": float(np.mean(running["d_matching_positive"]))
+                if running["d_matching_positive"]
+                else 0.0,
+                "d_matching_negative": float(np.mean(running["d_matching_negative"]))
+                if running["d_matching_negative"]
+                else 0.0,
+                "d_matching_margin": float(np.mean(running["d_matching_margin"]))
+                if running["d_matching_margin"]
+                else 0.0,
+                "d_matching_pairwise_accuracy": float(
+                    np.mean(running["d_matching_pairwise_accuracy"])
+                )
+                if running["d_matching_pairwise_accuracy"]
+                else 0.0,
+                "d_matching_eligible_fraction": float(
+                    np.mean(running["d_matching_eligible_fraction"])
+                )
+                if running["d_matching_eligible_fraction"]
+                else 0.0,
                 "gp": float(np.mean(running["gp"])) if running["gp"] else 0.0,
                 "g_total": float(np.mean(running["g_total"])) if running["g_total"] else 0.0,
                 "g_adv": float(np.mean(running["g_adv"])) if running["g_adv"] else 0.0,
                 "g_adv_effective_lambda": float(np.mean(running["g_adv_effective_lambda"]))
                 if running["g_adv_effective_lambda"]
+                else 0.0,
+                "g_matching": float(np.mean(running["g_matching"]))
+                if running["g_matching"]
+                else 0.0,
+                "g_matching_margin": float(np.mean(running["g_matching_margin"]))
+                if running["g_matching_margin"]
+                else 0.0,
+                "g_matching_effective_lambda": float(
+                    np.mean(running["g_matching_effective_lambda"])
+                )
+                if running["g_matching_effective_lambda"]
+                else 0.0,
+                "g_saturation_rate": float(np.mean(running["g_saturation_rate"]))
+                if running["g_saturation_rate"]
+                else 0.0,
+                "g_transition_delivery_max_abs_gap": float(
+                    np.max(running["g_transition_delivery_max_abs_gap"])
+                )
+                if running["g_transition_delivery_max_abs_gap"]
+                else 0.0,
+                "g_transition_nonsaturated_max_abs_error": float(
+                    np.max(running["g_transition_nonsaturated_max_abs_error"])
+                )
+                if running["g_transition_nonsaturated_max_abs_error"]
                 else 0.0,
                 "g_calendar": float(np.mean(running["g_calendar"])) if running["g_calendar"] else 0.0,
                 "g_butterfly": float(np.mean(running["g_butterfly"])) if running["g_butterfly"] else 0.0,

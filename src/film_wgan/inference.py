@@ -1046,7 +1046,11 @@ class FilmWGANSampler:
                     normalization=normalization,
                     noise_dim=int(generator.noise_dim),
                     mc_samples=int(self.config.mc_samples),
-                    seed=int(self.config.seed),
+                    seed=(
+                        int(self.config.evaluation_noise_seed)
+                        if int(self.config.evaluation_noise_seed) >= 0
+                        else int(self.config.seed)
+                    ),
                     device=self.device,
                     reweight_beta_mode=self.config.reweight_beta_mode,
                     reweight_beta=float(self.config.reweight_beta),

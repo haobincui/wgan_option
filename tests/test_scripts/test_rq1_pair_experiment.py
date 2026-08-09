@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from unittest import mock
 import numpy as np
 import pandas as pd
 import torch
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
@@ -23,7 +25,7 @@ from film_wgan.config import FilmWGANTrainConfig  # noqa: E402
 from film_wgan.data import create_train_val_bundle, write_split_manifest  # noqa: E402
 from film_wgan.models import FilmWGANCritic, FilmWGANGenerator  # noqa: E402
 from film_wgan.text_transform import FilmWGANTextTransform, fit_text_transform  # noqa: E402
-from film_wgan.trainer import FilmWGANTrainer  # noqa: E402
+from film_wgan.trainer import FilmWGANTrainer, module_state_sha256  # noqa: E402
 from scripts.rq1_pair import rq1_pair_experiment  # noqa: E402
 
 
@@ -400,6 +402,199 @@ class TestResidualFiLMArchitecture(unittest.TestCase):
             second = critic(future, current, torch.randn(2, 2), has_text=torch.zeros(2))
         self.assertTrue(torch.equal(first, second))
 
+    def test_transition_matching_trainer_steps_are_finite_and_keep_critic_frozen_for_g(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook, news_workbook = _write_pair_fixture(tmpdir)
+            transform_path = Path(tmpdir) / "transform.npz"
+            manifest_path = Path(tmpdir) / "manifest.csv"
+            config = replace(
+                _pair_config(workbook, news_workbook, transform_path),
+                critic_conditioning_mode="transition_matching",
+                critic_text_dropout=0.0,
+                gradient_penalty_mode="support_masked",
+                lambda_mismatch=0.0,
+                lambda_critic_matching=0.1,
+                lambda_generator_matching=0.01,
+                matching_min_supported_cells=1,
+                matching_negative_count=2,
+                adv_warmup_epochs=0,
+                adv_ramp_epochs=0,
+                use_calendar_constraint=False,
+                use_butterfly_constraint=False,
+                use_smooth_constraint=False,
+                output_root=str(Path(tmpdir) / "training"),
+            )
+            write_split_manifest(config, manifest_path)
+            config = replace(config, split_manifest_path=str(manifest_path))
+            trainer = FilmWGANTrainer(config)
+            trainer._ensure_runtime_prepared()
+            trainer.setup()
+            trainer.config = replace(
+                trainer.config,
+                adv_warmup_epochs=2,
+                adv_ramp_epochs=5,
+            )
+            trainer._current_epoch = 2
+            self.assertEqual(trainer._adversarial_ramp_factor(), 0.0)
+            trainer._current_epoch = 3
+            self.assertAlmostEqual(trainer._adversarial_ramp_factor(), 0.2)
+            trainer._current_epoch = 7
+            self.assertEqual(trainer._adversarial_ramp_factor(), 1.0)
+            trainer.config = replace(
+                trainer.config,
+                adv_warmup_epochs=0,
+                adv_ramp_epochs=0,
+            )
+            trainer._current_epoch = 1
+            batch = next(iter(trainer.bundle.train_loader))
+            (
+                current_features,
+                text_features,
+                real_delta_norm,
+                current_flat,
+                target_flat,
+                has_text,
+                sample_indices,
+            ) = [tensor.to(trainer.device) for tensor in batch]
+            support = torch.ones_like(current_flat)
+            torch.testing.assert_close(
+                trainer._matching_text_bank[sample_indices],
+                text_features,
+            )
+
+            d_metrics = trainer._discriminator_step(
+                current_features,
+                text_features,
+                real_delta_norm,
+                current_flat,
+                target_flat,
+                has_text,
+                support,
+                sample_indices,
+            )
+            self.assertTrue(all(math.isfinite(float(value)) for value in d_metrics.values()))
+            self.assertGreater(d_metrics["d_matching"], 0.0)
+            self.assertEqual(d_metrics["d_matching_eligible_fraction"], 1.0)
+            self.assertAlmostEqual(
+                d_metrics["d_total"],
+                d_metrics["d_wgan"]
+                + d_metrics["gp"]
+                + config.lambda_critic_matching * d_metrics["d_matching"],
+                places=5,
+            )
+            self.assertTrue(
+                any(parameter.grad is not None for parameter in trainer.critic.parameters())
+            )
+
+            critic_hash_before_g = module_state_sha256(trainer.critic)
+            generator_hash_before_g = module_state_sha256(trainer.generator)
+            g_metrics = trainer._generator_step(
+                current_features,
+                text_features,
+                current_flat,
+                target_flat,
+                has_text,
+                support,
+                sample_indices,
+            )
+            self.assertTrue(all(math.isfinite(float(value)) for value in g_metrics.values()))
+            self.assertGreater(g_metrics["g_matching"], 0.0)
+            self.assertAlmostEqual(
+                g_metrics["g_total"],
+                g_metrics["g_adv_effective_lambda"] * g_metrics["g_adv"]
+                + g_metrics["g_matching_effective_lambda"]
+                * g_metrics["g_matching"],
+                places=5,
+            )
+            self.assertTrue(all(parameter.grad is None for parameter in trainer.critic.parameters()))
+            self.assertEqual(module_state_sha256(trainer.critic), critic_hash_before_g)
+            self.assertNotEqual(module_state_sha256(trainer.generator), generator_hash_before_g)
+
+    def test_generator_matching_uses_the_delivered_clamped_transition(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook, news_workbook = _write_pair_fixture(tmpdir)
+            transform_path = Path(tmpdir) / "transform.npz"
+            manifest_path = Path(tmpdir) / "manifest.csv"
+            config = replace(
+                _pair_config(workbook, news_workbook, transform_path),
+                critic_conditioning_mode="transition_matching",
+                critic_text_dropout=0.0,
+                gradient_penalty_mode="support_masked",
+                lambda_mismatch=0.0,
+                lambda_critic_matching=0.1,
+                lambda_generator_matching=0.01,
+                matching_min_supported_cells=1,
+                matching_negative_count=2,
+                adv_warmup_epochs=0,
+                adv_ramp_epochs=0,
+                use_calendar_constraint=False,
+                use_butterfly_constraint=False,
+                use_smooth_constraint=False,
+                output_root=str(Path(tmpdir) / "training"),
+            )
+            write_split_manifest(config, manifest_path)
+            trainer = FilmWGANTrainer(
+                replace(config, split_manifest_path=str(manifest_path))
+            )
+            trainer._ensure_runtime_prepared()
+            trainer.setup()
+            trainer._current_epoch = 1
+            batch = next(iter(trainer.bundle.train_loader))
+            (
+                current_features,
+                text_features,
+                _real_delta_norm,
+                current_flat,
+                target_flat,
+                has_text,
+                sample_indices,
+            ) = [tensor.to(trainer.device) for tensor in batch]
+            support = torch.ones_like(current_flat)
+            extreme = torch.full_like(current_flat, 1.0e6)
+            captured_transitions = []
+            original_matching_logits = trainer.critic.matching_logits
+
+            def extreme_forward(*_args, **_kwargs):
+                anchor = next(trainer.generator.parameters()).sum() * 0.0
+                return extreme + anchor
+
+            def capture_matching_logits(transition_surface, *args, **kwargs):
+                captured_transitions.append(transition_surface.detach().clone())
+                return original_matching_logits(transition_surface, *args, **kwargs)
+
+            with (
+                patch.object(trainer.generator, "forward", side_effect=extreme_forward),
+                patch.object(
+                    trainer.critic,
+                    "matching_logits",
+                    side_effect=capture_matching_logits,
+                ),
+            ):
+                metrics = trainer._generator_step(
+                    current_features,
+                    text_features,
+                    current_flat,
+                    target_flat,
+                    has_text,
+                    support,
+                    sample_indices,
+                )
+
+            delivered = torch.full_like(current_flat, 5.0)
+            delivered_delta = torch.log(delivered) - torch.log(current_flat)
+            expected = (
+                delivered_delta - trainer.normalization.delta_mean
+            ) / trainer.normalization.delta_std.clamp_min(1.0e-6)
+            self.assertTrue(captured_transitions)
+            torch.testing.assert_close(
+                captured_transitions[0],
+                expected.view_as(captured_transitions[0]),
+                rtol=0.0,
+                atol=1.0e-5,
+            )
+            self.assertEqual(metrics["g_saturation_rate"], 1.0)
+            self.assertGreater(metrics["g_transition_delivery_max_abs_gap"], 1.0)
+
     def test_parent_checkpoint_freezes_then_unfreezes_backbone(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook, news_workbook = _write_pair_fixture(tmpdir)
@@ -450,6 +645,22 @@ class TestResidualFiLMArchitecture(unittest.TestCase):
             self.assertTrue(trainer._backbone_frozen)
             self.assertFalse(any(parameter.requires_grad for parameter in trainer.generator.backbone_parameters()))
 
+            transition_config = replace(
+                text_config,
+                critic_conditioning_mode="transition_matching",
+                critic_text_dropout=0.0,
+                gradient_penalty_mode="support_masked",
+                lambda_mismatch=0.0,
+                lambda_critic_matching=0.1,
+                lambda_generator_matching=0.01,
+                matching_min_supported_cells=1,
+                output_root=str(Path(tmpdir) / "v2-parent-rejection"),
+            )
+            transition_trainer = FilmWGANTrainer(transition_config)
+            transition_trainer._ensure_runtime_prepared()
+            with self.assertRaisesRegex(ValueError, "schema-5 v2 parent"):
+                transition_trainer.setup()
+
             continued_config = replace(
                 base,
                 split_manifest_path=str(manifest_path),
@@ -475,6 +686,206 @@ class TestResidualFiLMArchitecture(unittest.TestCase):
 
 
 class TestPairRollingComparison(unittest.TestCase):
+    def test_v2_training_rejects_a_different_clean_commit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "inputs/configs/train_rq1_pair_textbase.yaml"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "training": {
+                            "critic_conditioning_mode": "transition_matching",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "inputs/git_state.txt").write_text(
+                "commit=frozen-commit\n## rq1-film-wgan-v2\n",
+                encoding="utf-8",
+            )
+            clean_status = SimpleNamespace(stdout="")
+            different_head = SimpleNamespace(stdout="different-commit\n")
+            with patch.object(
+                rq1_pair_experiment.subprocess,
+                "run",
+                side_effect=[clean_status, different_head],
+            ):
+                with self.assertRaisesRegex(RuntimeError, "across commits"):
+                    rq1_pair_experiment._assert_frozen_v2_worktree(root)
+
+    def test_launch_registry_upsert_preserves_prior_runs_and_replaces_same_key(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            first = {
+                "fold": "2023Q1",
+                "seed": 42,
+                "variant": rq1_pair_experiment.PARENT_VARIANT,
+                "status": "completed",
+                "run_dir": "first-parent",
+            }
+            rq1_pair_experiment._upsert_launch_registry(root, [first])
+
+            second = {
+                "fold": "2023Q1",
+                "seed": 42,
+                "variant": rq1_pair_experiment.TEXT_RESIDUAL_VARIANT,
+                "status": "completed",
+                "run_dir": "first-text",
+            }
+            updated_first = {
+                **first,
+                "status": "reused",
+                "run_dir": "reused-parent",
+                "checkpoint": "parent.pt",
+            }
+            registry_path = rq1_pair_experiment._upsert_launch_registry(
+                root,
+                [second, updated_first],
+            )
+
+            registry = pd.read_csv(registry_path).sort_values("variant")
+            self.assertEqual(len(registry), 2)
+            parent = registry[
+                registry["variant"] == rq1_pair_experiment.PARENT_VARIANT
+            ].iloc[0]
+            text = registry[
+                registry["variant"]
+                == rq1_pair_experiment.TEXT_RESIDUAL_VARIANT
+            ].iloc[0]
+            self.assertEqual(parent["status"], "reused")
+            self.assertEqual(parent["run_dir"], "reused-parent")
+            self.assertEqual(parent["checkpoint"], "parent.pt")
+            self.assertEqual(text["run_dir"], "first-text")
+
+    def test_transition_matching_run_reuse_requires_v2_checkpoint_protocol(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            checkpoint = run_dir / "checkpoints/film_wgan_best.pt"
+            checkpoint.parent.mkdir(parents=True)
+            torch.save(
+                {
+                    "checkpoint_schema_version": 4,
+                    "critic_architecture_version": "legacy_v1",
+                },
+                checkpoint,
+            )
+            with self.assertRaisesRegex(ValueError, "non-v2 completed run"):
+                rq1_pair_experiment._validate_run_protocol(
+                    run_dir,
+                    critic_mode="transition_matching",
+                )
+
+            torch.save(
+                {
+                    "checkpoint_schema_version": 5,
+                    "training_protocol_version": "film_wgan_transition_matching_v2",
+                    "critic_architecture_version": "transition_matching_v2",
+                },
+                checkpoint,
+            )
+            rq1_pair_experiment._validate_run_protocol(
+                run_dir,
+                critic_mode="transition_matching",
+            )
+
+            torch.save(
+                {
+                    "checkpoint_schema_version": 5,
+                    "training_protocol_version": "film_wgan_v1_compatible",
+                    "critic_architecture_version": "legacy_v1",
+                },
+                checkpoint,
+            )
+            rq1_pair_experiment._validate_run_protocol(
+                run_dir,
+                critic_mode="inherit",
+                require_schema5=True,
+            )
+
+    def test_generate_matrix_respects_frozen_validation_only_protocol(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "inputs/configs/train_rq1_pair_textbase.yaml"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "training": {},
+                        "generate_result": {
+                            "split": "val",
+                            "output_dir": "validation_pilot_json",
+                            "selection_mode": "all",
+                            "selection_count": 0,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            run_dir = root / "run"
+            checkpoint = run_dir / "checkpoints/model.pt"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_bytes(b"checkpoint")
+            selected_path = root / "checkpoint_selection/selected_checkpoints.csv"
+            selected_path.parent.mkdir(parents=True)
+            (root / "registry").mkdir(parents=True)
+            pd.DataFrame(
+                [
+                    {
+                        "run_dir": str(run_dir),
+                        "checkpoint_path": str(checkpoint),
+                        "fold": "2023Q1",
+                        "seed": 42,
+                        "variant": rq1_pair_experiment.TEXT_RESIDUAL_VARIANT,
+                    }
+                ]
+            ).to_csv(selected_path, index=False)
+
+            observed_commands = []
+
+            def fake_run(command, *, log_path):
+                del log_path
+                observed_commands.append(command)
+                output_dir = run_dir / "validation_pilot_json"
+                output_dir.mkdir(parents=True)
+                pd.DataFrame({"sample": [0, 1]}).to_csv(
+                    output_dir / "summary.csv",
+                    index=False,
+                )
+
+            with (
+                patch.object(rq1_pair_experiment, "_assert_py312"),
+                patch.object(
+                    rq1_pair_experiment,
+                    "_fold_counts",
+                    return_value=(4, 2, 3),
+                ),
+                patch.object(rq1_pair_experiment, "_run", side_effect=fake_run),
+            ):
+                rq1_pair_experiment.generate_matrix(
+                    argparse.Namespace(experiment_root=str(root))
+                )
+
+            self.assertEqual(len(observed_commands), 1)
+            command = observed_commands[0]
+            self.assertEqual(command[command.index("--split") + 1], "val")
+            self.assertEqual(
+                command[command.index("--output-dir") + 1],
+                "validation_pilot_json",
+            )
+            registry = pd.read_csv(root / "registry/generate_registry.csv")
+            self.assertEqual(int(registry.loc[0, "sample_count"]), 2)
+            self.assertEqual(registry.loc[0, "split"], "val")
+            with self.assertRaisesRegex(RuntimeError, "Validation-only pilot"):
+                rq1_pair_experiment.build_comparison(
+                    argparse.Namespace(
+                        experiment_root=str(root),
+                        bootstrap_iterations=10,
+                        bootstrap_seed=123,
+                    )
+                )
+
     def test_default_seed_set_is_frozen_to_fifteen_unique_seeds(self):
         self.assertEqual(len(rq1_pair_experiment.SEEDS), 15)
         self.assertEqual(len(set(rq1_pair_experiment.SEEDS)), 15)
@@ -646,6 +1057,61 @@ class TestPairRollingComparison(unittest.TestCase):
                     parent_checkpoint=None,
                 )
 
+    def test_v2_variant_overrides_keep_matching_only_for_text_residual_runs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            parent = Path(tmpdir) / "parent.pt"
+            parent.write_bytes(b"parent")
+            transform = Path(tmpdir) / "transform.npz"
+            transform.write_bytes(b"transform")
+            fold_config = {
+                "training": {
+                    "text_transform_path": str(transform),
+                    "critic_conditioning_mode": "transition_matching",
+                    "lambda_mismatch": 0.0,
+                    "lambda_critic_matching": 0.1,
+                    "lambda_generator_matching": 0.01,
+                }
+            }
+
+            parent_overrides = rq1_pair_experiment._variant_overrides(
+                rq1_pair_experiment.PARENT_VARIANT,
+                fold_config=fold_config,
+                output_root=Path(tmpdir) / "parent",
+                seed=42,
+                parent_checkpoint=None,
+            )
+            continued = rq1_pair_experiment._variant_overrides(
+                rq1_pair_experiment.CONTINUATION_VARIANT,
+                fold_config=fold_config,
+                output_root=Path(tmpdir) / "continued",
+                seed=42,
+                parent_checkpoint=parent,
+            )
+            matched = rq1_pair_experiment._variant_overrides(
+                rq1_pair_experiment.TEXT_RESIDUAL_VARIANT,
+                fold_config=fold_config,
+                output_root=Path(tmpdir) / "matched",
+                seed=42,
+                parent_checkpoint=parent,
+            )
+            shuffled = rq1_pair_experiment._variant_overrides(
+                rq1_pair_experiment.SHUFFLED_RESIDUAL_VARIANT,
+                fold_config=fold_config,
+                output_root=Path(tmpdir) / "shuffled",
+                seed=42,
+                parent_checkpoint=parent,
+            )
+
+            for overrides in (parent_overrides, continued):
+                self.assertEqual(overrides["critic_conditioning_mode"], "transition_matching")
+                self.assertEqual(overrides["lambda_critic_matching"], 0.0)
+                self.assertEqual(overrides["lambda_generator_matching"], 0.0)
+            for overrides in (matched, shuffled):
+                self.assertEqual(overrides["critic_conditioning_mode"], "transition_matching")
+                self.assertEqual(overrides["lambda_mismatch"], 0.0)
+                self.assertEqual(overrides["lambda_critic_matching"], 0.1)
+                self.assertEqual(overrides["lambda_generator_matching"], 0.01)
+
     def test_paired_stage_audit_requires_one_parent_and_transform(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             parent = Path(tmpdir) / "parent.pt"
@@ -687,6 +1153,22 @@ class TestPairRollingComparison(unittest.TestCase):
                 self.assertEqual(len(audit), 3)
                 self.assertFalse(failures)
                 self.assertEqual(set(audit["status"]), {"ok"})
+
+                legacy_resolved = dict(resolved)
+                for variant in rq1_pair_experiment.PAIRED_STAGE_B_VARIANTS:
+                    key = ("2023Q1", 42, variant)
+                    legacy_training = dict(legacy_resolved[key]["training"])
+                    legacy_training.pop("lambda_critic_matching", None)
+                    legacy_training.pop("lambda_generator_matching", None)
+                    legacy_resolved[key] = {"training": legacy_training}
+                legacy_audit, legacy_failures = (
+                    rq1_pair_experiment._paired_stage_audit(
+                        selected,
+                        legacy_resolved,
+                    )
+                )
+                self.assertFalse(legacy_failures)
+                self.assertEqual(set(legacy_audit["status"]), {"ok"})
 
                 wrong_parent = Path(tmpdir) / "wrong-parent.pt"
                 wrong_parent.write_bytes(b"wrong")

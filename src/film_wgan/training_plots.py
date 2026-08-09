@@ -30,7 +30,23 @@ def plot_training_curves(
     output.parent.mkdir(parents=True, exist_ok=True)
 
     metric_groups: list[tuple[str, tuple[str, ...], str]] = [
-        ("Adversarial", ("g_total", "g_adv", "g_adv_effective_lambda", "d_total", "gp"), "loss"),
+        (
+            "Adversarial",
+            ("g_total", "g_adv", "g_adv_effective_lambda", "d_total", "d_wgan", "gp"),
+            "loss",
+        ),
+        (
+            "Transition--Text Matching",
+            (
+                "d_matching",
+                "d_aux_matching_contribution",
+                "d_matching_margin",
+                "d_matching_pairwise_accuracy",
+                "g_matching",
+                "g_matching_margin",
+            ),
+            "matching",
+        ),
         (
             "Constraints",
             ("g_calendar", "g_butterfly", "g_smooth", "g_recon", "g_recon_weighted", "g_atm_short"),
@@ -60,7 +76,7 @@ def plot_training_curves(
         ("Arbitrage and Weighting", ("val_calendar", "val_butterfly", "val_penalty_mean", "val_penalty_std", "val_weight_entropy"), "metric"),
     ]
 
-    fig, axes = plt.subplots(len(metric_groups), 1, figsize=(12, 14), sharex=True)
+    fig, axes = plt.subplots(len(metric_groups), 1, figsize=(12, 16), sharex=True)
     if len(metric_groups) == 1:
         axes = [axes]
 
