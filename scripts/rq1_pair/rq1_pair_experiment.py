@@ -2377,6 +2377,36 @@ _RUN_FINGERPRINT_EXCLUDED_CONFIG_FIELDS = {
     "run_fingerprint_sha256",
 }
 
+_RUNTIME_DERIVED_TRAINING_PATHS = {
+    "checkpoints_path": "checkpoints",
+    "metrics_path": "metrics",
+}
+
+
+def _expected_resolved_training_overrides(
+    overrides: dict[str, Any],
+    *,
+    run_dir: Path,
+) -> dict[str, Any]:
+    """Apply the trainer's deterministic run-local path resolution."""
+
+    expected = dict(overrides)
+    for field, directory_name in _RUNTIME_DERIVED_TRAINING_PATHS.items():
+        expected[field] = str(run_dir / directory_name)
+    return expected
+
+
+def _resolved_override_matches(field: str, actual: Any, expected: Any) -> bool:
+    if field not in _RUNTIME_DERIVED_TRAINING_PATHS:
+        return actual == expected
+    actual_path = _config_artifact_path(actual)
+    expected_path = _config_artifact_path(expected)
+    return (
+        actual_path is not None
+        and expected_path is not None
+        and actual_path == expected_path
+    )
+
 
 def _frozen_commit(root: Path) -> str:
     path = root / "inputs/git_state.txt"
@@ -3061,10 +3091,20 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
                         raise ValueError(
                             f"Resolved run fingerprint mismatch: {variant}/{fold}/seed_{seed}"
                         )
+                    expected_resolved_overrides = (
+                        _expected_resolved_training_overrides(
+                            overrides,
+                            run_dir=run_dir,
+                        )
+                    )
                     mismatched_overrides = sorted(
                         key
-                        for key, expected in overrides.items()
-                        if resolved_training.get(key) != expected
+                        for key, expected in expected_resolved_overrides.items()
+                        if not _resolved_override_matches(
+                            key,
+                            resolved_training.get(key),
+                            expected,
+                        )
                     )
                     if mismatched_overrides:
                         raise ValueError(

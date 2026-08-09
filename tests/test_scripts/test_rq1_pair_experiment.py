@@ -1955,6 +1955,12 @@ class TestRQ1ProtocolV3Orchestration(unittest.TestCase):
                 )
                 overrides["run_fingerprint_sha256"] = fingerprint
                 resolved_training = {**base_training, **overrides}
+                self.assertEqual(resolved_training["checkpoints_path"], "")
+                self.assertEqual(resolved_training["metrics_path"], "")
+                resolved_training.update(
+                    checkpoints_path=str(checkpoints),
+                    metrics_path=str(metrics_dir),
+                )
                 (metrics_dir / "training_resolved_config.yaml").write_text(
                     yaml.safe_dump(
                         {"training": resolved_training}, sort_keys=False
@@ -2051,6 +2057,20 @@ class TestRQ1ProtocolV3Orchestration(unittest.TestCase):
                 },
             )
             for row in selected.itertuples(index=False):
+                resolved_training = yaml.safe_load(
+                    (
+                        Path(row.run_dir)
+                        / "metrics/training_resolved_config.yaml"
+                    ).read_text(encoding="utf-8")
+                )["training"]
+                self.assertEqual(
+                    Path(resolved_training["checkpoints_path"]),
+                    Path(row.run_dir) / "checkpoints",
+                )
+                self.assertEqual(
+                    Path(resolved_training["metrics_path"]),
+                    Path(row.run_dir) / "metrics",
+                )
                 expected_name = (
                     "film_wgan_final.pt"
                     if row.variant
