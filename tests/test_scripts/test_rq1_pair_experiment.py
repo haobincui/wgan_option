@@ -1,6 +1,7 @@
 import argparse
 import json
 import math
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -21,7 +22,11 @@ for path in (ROOT, SRC):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from film_wgan.config import FilmWGANTrainConfig  # noqa: E402
+from film_wgan.config import (  # noqa: E402
+    FilmWGANTrainConfig,
+    load_sample_config,
+    parse_sample_overrides,
+)
 from film_wgan.data import create_train_val_bundle, write_split_manifest  # noqa: E402
 from film_wgan.models import FilmWGANCritic, FilmWGANGenerator  # noqa: E402
 from film_wgan.text_transform import FilmWGANTextTransform, fit_text_transform  # noqa: E402
@@ -827,6 +832,12 @@ class TestPairRollingComparison(unittest.TestCase):
             checkpoint = run_dir / "checkpoints/model.pt"
             checkpoint.parent.mkdir(parents=True)
             checkpoint.write_bytes(b"checkpoint")
+            metrics_dir = run_dir / "metrics"
+            metrics_dir.mkdir(parents=True)
+            (metrics_dir / "training_resolved_config.yaml").write_text(
+                yaml.safe_dump({"training": {}}, sort_keys=False),
+                encoding="utf-8",
+            )
             selected_path = root / "checkpoint_selection/selected_checkpoints.csv"
             selected_path.parent.mkdir(parents=True)
             (root / "registry").mkdir(parents=True)
@@ -869,9 +880,14 @@ class TestPairRollingComparison(unittest.TestCase):
 
             self.assertEqual(len(observed_commands), 1)
             command = observed_commands[0]
-            self.assertEqual(command[command.index("--split") + 1], "val")
+            merged_generation = yaml.safe_load(
+                Path(command[command.index("--config") + 1]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(merged_generation["generate_result"]["split"], "val")
             self.assertEqual(
-                command[command.index("--output-dir") + 1],
+                merged_generation["generate_result"]["output_dir"],
                 "validation_pilot_json",
             )
             registry = pd.read_csv(root / "registry/generate_registry.csv")
@@ -1483,6 +1499,833 @@ class TestPairRollingComparison(unittest.TestCase):
                 expected_runs,
             )
             self.assertEqual(status["stages"]["build_comparison"]["status"], "completed")
+
+
+class TestRQ1ProtocolV3Orchestration(unittest.TestCase):
+    def test_v3_config_and_gpu0_launcher_are_fail_closed(self):
+        payload = rq1_pair_experiment._read_yaml(
+            ROOT
+            / "configs/film_wgan/train_rq1_pair_textbase_v3_pilot.yaml"
+        )
+        training = payload["training"]
+        generate = payload["generate_result"]
+        self.assertEqual(
+            training["training_protocol_version"],
+            rq1_pair_experiment.TRAINING_PROTOCOL_VERSION_V3,
+        )
+        self.assertEqual(training["text_alignment_plan_path"], "")
+        self.assertEqual(training["matching_negative_source_plan_path"], "")
+        self.assertEqual(int(training["scheduler_horizon_epochs"]), 60)
+        self.assertEqual(int(training["diagnostics_schema_version"]), 1)
+        self.assertEqual(generate["split"], "val")
+
+        launcher = (
+            ROOT / "scripts/rq1_pair/start_v3_pilot_gpu0.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("CUDA_VISIBLE_DEVICES=0", launcher)
+        self.assertIn("FILM_WGAN_MAX_PARALLEL:-5", launcher)
+        self.assertIn("Phase 1/3", launcher)
+        self.assertIn("Phase 2/3", launcher)
+        self.assertIn("Phase 3/3", launcher)
+        self.assertIn("wait -n -p", launcher)
+        self.assertIn("summarize-validation-pilot", launcher)
+
+        result = subprocess.run(
+            [str(ROOT / "scripts/rq1_pair/start_v3_pilot_gpu0.sh")],
+            cwd=ROOT,
+            env={
+                **dict(__import__("os").environ),
+                "FILM_WGAN_LAUNCHER_WAIT_SELF_TEST": "1",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("fast-failure", result.stderr)
+        self.assertNotIn("unexpectedly continued", result.stderr)
+
+    def test_v3_epoch_policy_uses_continuation_anchor(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            transform = Path(tmpdir) / "transform.npz"
+            transform.write_bytes(b"transform")
+            parent = Path(tmpdir) / "parent.pt"
+            parent.write_bytes(b"parent")
+            fold_config = {
+                "training": {
+                    "text_transform_path": str(transform),
+                    "critic_conditioning_mode": "transition_matching",
+                    "lambda_critic_matching": 0.1,
+                    "lambda_generator_matching": 0.01,
+                    "training_protocol_version": (
+                        rq1_pair_experiment.TRAINING_PROTOCOL_VERSION_V3
+                    ),
+                }
+            }
+            parent_overrides = rq1_pair_experiment._variant_overrides(
+                rq1_pair_experiment.PARENT_VARIANT,
+                fold_config=fold_config,
+                output_root=Path(tmpdir) / "parent",
+                seed=42,
+                parent_checkpoint=None,
+            )
+            continued = rq1_pair_experiment._variant_overrides(
+                rq1_pair_experiment.CONTINUATION_VARIANT,
+                fold_config=fold_config,
+                output_root=Path(tmpdir) / "continued",
+                seed=42,
+                parent_checkpoint=parent,
+            )
+            matched = rq1_pair_experiment._variant_overrides(
+                rq1_pair_experiment.TEXT_RESIDUAL_VARIANT,
+                fold_config=fold_config,
+                output_root=Path(tmpdir) / "matched",
+                seed=42,
+                parent_checkpoint=parent,
+                continuation_anchor_epoch=37,
+            )
+            self.assertEqual(parent_overrides["num_epochs"], 60)
+            self.assertEqual(parent_overrides["scheduler_horizon_epochs"], 60)
+            self.assertEqual(continued["num_epochs"], 100)
+            self.assertEqual(continued["early_stopping_patience"], 15)
+            self.assertEqual(continued["scheduler_horizon_epochs"], 100)
+            self.assertEqual(matched["num_epochs"], 37)
+            self.assertFalse(matched["use_early_stopping"])
+            self.assertEqual(matched["scheduler_horizon_epochs"], 100)
+
+    def test_v3_paired_stage_audit_requires_common_scheduler_trace_and_checkpoint_roles(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            transform = root / "transform.npz"
+            alignment = root / "text_alignment_plan.csv"
+            negatives = root / "transition_matching_negative_source_plan.csv"
+            transform.write_bytes(b"transform")
+            alignment.write_bytes(b"alignment")
+            negatives.write_bytes(b"negatives")
+            alignment_sha = rq1_pair_experiment.sha256_file(alignment)
+            negative_sha = rq1_pair_experiment.sha256_file(negatives)
+            parent = root / "parent.pt"
+            parent.write_bytes(b"parent")
+            base_training = {
+                "training_protocol_version": (
+                    rq1_pair_experiment.TRAINING_PROTOCOL_VERSION_V3
+                ),
+                "critic_conditioning_mode": "transition_matching",
+                "text_transform_path": str(transform),
+                "text_alignment_plan_path": str(alignment),
+                "matching_negative_source_plan_path": str(negatives),
+                "lambda_critic_matching": 0.1,
+                "lambda_generator_matching": 0.01,
+            }
+            fold_config = {"training": base_training}
+            selected_rows = [
+                {
+                    "fold": "2023Q1",
+                    "seed": 42,
+                    "variant": rq1_pair_experiment.PARENT_VARIANT,
+                    "checkpoint_path": str(parent),
+                    "checkpoint_sha256": rq1_pair_experiment.sha256_file(parent),
+                }
+            ]
+            resolved = {
+                ("2023Q1", 42, rq1_pair_experiment.PARENT_VARIANT): {
+                    "training": {"text_transform_path": str(transform)}
+                }
+            }
+            comparison_epoch = 20
+            common_trace = pd.DataFrame(
+                {
+                    "epoch": np.arange(1, comparison_epoch + 1),
+                    "lr_generator": np.linspace(9.9e-5, 8.0e-5, comparison_epoch),
+                    "lr_critic": np.linspace(1.98e-4, 1.6e-4, comparison_epoch),
+                }
+            )
+            for variant in rq1_pair_experiment.PAIRED_STAGE_B_VARIANTS:
+                output_root = root / variant
+                run_dir = output_root / "run_001"
+                checkpoints = run_dir / "checkpoints"
+                metrics = run_dir / "metrics"
+                checkpoints.mkdir(parents=True)
+                metrics.mkdir(parents=True)
+                overrides = rq1_pair_experiment._variant_overrides(
+                    variant,
+                    fold_config=fold_config,
+                    output_root=output_root,
+                    seed=42,
+                    parent_checkpoint=parent,
+                    continuation_anchor_epoch=(
+                        comparison_epoch
+                        if variant != rq1_pair_experiment.CONTINUATION_VARIANT
+                        else None
+                    ),
+                )
+                resolved[("2023Q1", 42, variant)] = {
+                    "training": {**base_training, **overrides}
+                }
+                checkpoint_payload = {
+                    "checkpoint_schema_version": 6,
+                    "training_protocol_version": (
+                        rq1_pair_experiment.TRAINING_PROTOCOL_VERSION_V3
+                    ),
+                    "critic_architecture_version": "transition_matching_v2",
+                    "run_fingerprint_sha256": "a" * 64,
+                    "epoch": comparison_epoch,
+                    "initial_generator_state_sha256": "g" * 64,
+                    "initial_critic_state_sha256": "c" * 64,
+                    "text_alignment_plan_sha256": alignment_sha,
+                    "matching_negative_source_plan_sha256": negative_sha,
+                    "scheduler_horizon_epochs": 100,
+                }
+                torch.save(checkpoint_payload, checkpoints / "film_wgan_best.pt")
+                torch.save(checkpoint_payload, checkpoints / "film_wgan_final.pt")
+                (metrics / "best_checkpoint.json").write_text(
+                    json.dumps(
+                        {
+                            "best_epoch": comparison_epoch,
+                            "checkpoint_metric": "val_mae",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                common_trace.to_csv(metrics / "training_metrics.csv", index=False)
+                selected_checkpoint = checkpoints / (
+                    "film_wgan_best.pt"
+                    if variant == rq1_pair_experiment.CONTINUATION_VARIANT
+                    else "film_wgan_final.pt"
+                )
+                selected_rows.append(
+                    {
+                        "fold": "2023Q1",
+                        "seed": 42,
+                        "variant": variant,
+                        "checkpoint_path": str(selected_checkpoint),
+                        "checkpoint_sha256": rq1_pair_experiment.sha256_file(
+                            selected_checkpoint
+                        ),
+                        "text_alignment_plan_sha256": alignment_sha,
+                        "matching_negative_source_plan_sha256": negative_sha,
+                        "selected_epoch": comparison_epoch,
+                        "run_dir": str(run_dir),
+                    }
+                )
+
+            selected = pd.DataFrame(selected_rows)
+            audit, failures = rq1_pair_experiment._paired_stage_audit(
+                selected,
+                resolved,
+                seeds=(42,),
+                folds=("2023Q1",),
+            )
+            self.assertFalse(failures)
+            self.assertEqual(set(audit["status"]), {"ok"})
+            self.assertEqual(audit["scheduler_trace_sha256"].nunique(), 1)
+
+            shuffled_metrics = (
+                root
+                / rq1_pair_experiment.SHUFFLED_RESIDUAL_VARIANT
+                / "run_001/metrics/training_metrics.csv"
+            )
+            changed = pd.read_csv(shuffled_metrics)
+            changed.loc[changed.index[-1], "lr_generator"] *= 0.5
+            changed.to_csv(shuffled_metrics, index=False)
+            _audit, failures = rq1_pair_experiment._paired_stage_audit(
+                selected,
+                resolved,
+                seeds=(42,),
+                folds=("2023Q1",),
+            )
+            shuffled_failure = next(
+                failure
+                for failure in failures
+                if failure["variant"]
+                == rq1_pair_experiment.SHUFFLED_RESIDUAL_VARIANT
+            )
+            self.assertIn("scheduler_trace_mismatch", shuffled_failure["errors"])
+
+    def test_v3_collects_and_generates_exact_twelve_validation_runs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "inputs/configs").mkdir(parents=True)
+            (root / "inputs/folds/2023Q1").mkdir(parents=True)
+            (root / "registry").mkdir(parents=True)
+            (root / "checkpoint_selection").mkdir(parents=True)
+            design = {
+                "experiment_design_schema_version": 2,
+                "training_protocol_version": (
+                    rq1_pair_experiment.TRAINING_PROTOCOL_VERSION_V3
+                ),
+                "run_folds": list(rq1_pair_experiment.V3_PILOT_FOLDS),
+                "run_seeds": list(rq1_pair_experiment.V3_PILOT_SEEDS),
+                "run_variants": list(rq1_pair_experiment.V3_PILOT_VARIANTS),
+                "expected_training_runs": 12,
+            }
+            (root / "inputs/experiment_design.json").write_text(
+                json.dumps(design), encoding="utf-8"
+            )
+            transform = root / "inputs/folds/2023Q1/text_transform.npz"
+            alignment = root / "inputs/folds/2023Q1/text_alignment_plan.csv"
+            negatives = (
+                root
+                / "inputs/folds/2023Q1/transition_matching_negative_source_plan.csv"
+            )
+            transform.write_bytes(b"transform")
+            alignment.write_bytes(b"alignment")
+            negatives.write_bytes(b"negatives")
+            alignment_sha = rq1_pair_experiment.sha256_file(alignment)
+            negative_sha = rq1_pair_experiment.sha256_file(negatives)
+            base_training = {
+                "training_protocol_version": (
+                    rq1_pair_experiment.TRAINING_PROTOCOL_VERSION_V3
+                ),
+                "critic_conditioning_mode": "transition_matching",
+                "text_transform_path": str(transform),
+                "text_alignment_plan_path": str(alignment),
+                "matching_negative_source_plan_path": str(negatives),
+                "lambda_critic_matching": 0.1,
+                "lambda_generator_matching": 0.01,
+            }
+            fold_payload = {"training": base_training}
+            fold_config_path = (
+                root / "inputs/folds/2023Q1/train_rq1_pair_textbase.yaml"
+            )
+            fold_config_path.write_text(
+                yaml.safe_dump(fold_payload, sort_keys=False), encoding="utf-8"
+            )
+            frozen_config_path = (
+                root / "inputs/configs/train_rq1_pair_textbase.yaml"
+            )
+            frozen_config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "training": base_training,
+                        "generate_result": {
+                            "evaluation_noise_seed": 20260809,
+                            "mc_samples": 64,
+                            "reweight_beta_mode": "fixed",
+                            "reweight_beta": 0.0,
+                            "quantiles": [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95],
+                            "calibration_levels": [0.5, 0.8, 0.9],
+                            "arbitrage_violation_tolerance": 1.0e-8,
+                            "split": "val",
+                            "output_dir": "validation_pilot_json",
+                            "selection_mode": "all",
+                            "selection_count": 0,
+                            "aggregation_mode": "weighted_mean",
+                            "residual_blend_alpha": 1.0,
+                            "save_json": True,
+                            "save_plots": False,
+                            "save_full_atm_timeseries": False,
+                        },
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_fingerprint(
+                _root,
+                *,
+                fold,
+                seed,
+                variant,
+                training,
+                overrides,
+                parent_checkpoint_sha256,
+            ):
+                del training, overrides, parent_checkpoint_sha256
+                return rq1_pair_experiment.canonical_payload_sha256(
+                    {"fold": fold, "seed": int(seed), "variant": variant}
+                )
+
+            comparison_epoch = 20
+
+            def write_run(variant, seed, parent_checkpoint=None):
+                output_root = (
+                    root
+                    / "training_runs"
+                    / variant
+                    / "2023Q1"
+                    / f"seed_{seed}"
+                )
+                run_dir = output_root / "run_001"
+                checkpoints = run_dir / "checkpoints"
+                metrics_dir = run_dir / "metrics"
+                checkpoints.mkdir(parents=True)
+                metrics_dir.mkdir(parents=True)
+                overrides = rq1_pair_experiment._variant_overrides(
+                    variant,
+                    fold_config=fold_payload,
+                    output_root=output_root,
+                    seed=seed,
+                    parent_checkpoint=parent_checkpoint,
+                    continuation_anchor_epoch=(
+                        comparison_epoch
+                        if variant
+                        in {
+                            rq1_pair_experiment.TEXT_RESIDUAL_VARIANT,
+                            rq1_pair_experiment.SHUFFLED_RESIDUAL_VARIANT,
+                        }
+                        else None
+                    ),
+                )
+                fingerprint = fake_fingerprint(
+                    root,
+                    fold="2023Q1",
+                    seed=seed,
+                    variant=variant,
+                    training=base_training,
+                    overrides=overrides,
+                    parent_checkpoint_sha256="",
+                )
+                overrides["run_fingerprint_sha256"] = fingerprint
+                resolved_training = {**base_training, **overrides}
+                (metrics_dir / "training_resolved_config.yaml").write_text(
+                    yaml.safe_dump(
+                        {"training": resolved_training}, sort_keys=False
+                    ),
+                    encoding="utf-8",
+                )
+                is_stage_b = variant in rq1_pair_experiment.PAIRED_STAGE_B_VARIANTS
+                checkpoint_payload = {
+                    "checkpoint_schema_version": 6,
+                    "training_protocol_version": (
+                        rq1_pair_experiment.TRAINING_PROTOCOL_VERSION_V3
+                    ),
+                    "critic_architecture_version": "transition_matching_v2",
+                    "run_fingerprint_sha256": fingerprint,
+                    "epoch": comparison_epoch,
+                    "initial_generator_state_sha256": (
+                        f"{seed:064x}" if is_stage_b else ""
+                    ),
+                    "initial_critic_state_sha256": (
+                        f"{seed + 1:064x}" if is_stage_b else ""
+                    ),
+                    "text_alignment_plan_sha256": alignment_sha,
+                    "matching_negative_source_plan_sha256": negative_sha,
+                    "scheduler_horizon_epochs": 100 if is_stage_b else 60,
+                }
+                torch.save(
+                    checkpoint_payload, checkpoints / "film_wgan_best.pt"
+                )
+                torch.save(
+                    checkpoint_payload, checkpoints / "film_wgan_final.pt"
+                )
+                (metrics_dir / "best_checkpoint.json").write_text(
+                    json.dumps(
+                        {
+                            "best_epoch": comparison_epoch,
+                            "checkpoint_metric": "val_mae",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                pd.DataFrame(
+                    {
+                        "epoch": np.arange(1, comparison_epoch + 1),
+                        "lr_generator": np.linspace(
+                            9.9e-5, 8.0e-5, comparison_epoch
+                        ),
+                        "lr_critic": np.linspace(
+                            1.98e-4, 1.6e-4, comparison_epoch
+                        ),
+                        "val_mae": np.linspace(
+                            0.03, 0.01, comparison_epoch
+                        ),
+                    }
+                ).to_csv(metrics_dir / "training_metrics.csv", index=False)
+                return run_dir
+
+            for seed in rq1_pair_experiment.V3_PILOT_SEEDS:
+                parent_run = write_run(
+                    rq1_pair_experiment.PARENT_VARIANT, seed
+                )
+                parent_checkpoint = (
+                    parent_run / "checkpoints/film_wgan_best.pt"
+                )
+                for variant in rq1_pair_experiment.PAIRED_STAGE_B_VARIANTS:
+                    write_run(variant, seed, parent_checkpoint)
+
+            with (
+                patch.object(rq1_pair_experiment, "verify_existing"),
+                patch.object(
+                    rq1_pair_experiment,
+                    "_run_fingerprint",
+                    side_effect=fake_fingerprint,
+                ),
+            ):
+                rq1_pair_experiment.collect_checkpoints(
+                    argparse.Namespace(experiment_root=str(root))
+                )
+            selected = pd.read_csv(
+                root / "checkpoint_selection/selected_checkpoints.csv"
+            )
+            self.assertEqual(len(selected), 12)
+            self.assertEqual(
+                set(zip(selected["fold"], selected["seed"], selected["variant"])),
+                {
+                    (fold, seed, variant)
+                    for fold in rq1_pair_experiment.V3_PILOT_FOLDS
+                    for seed in rq1_pair_experiment.V3_PILOT_SEEDS
+                    for variant in rq1_pair_experiment.V3_PILOT_VARIANTS
+                },
+            )
+            for row in selected.itertuples(index=False):
+                expected_name = (
+                    "film_wgan_final.pt"
+                    if row.variant
+                    in {
+                        rq1_pair_experiment.TEXT_RESIDUAL_VARIANT,
+                        rq1_pair_experiment.SHUFFLED_RESIDUAL_VARIANT,
+                    }
+                    else "film_wgan_best.pt"
+                )
+                self.assertEqual(Path(row.checkpoint_path).name, expected_name)
+                self.assertEqual(int(row.comparison_epoch), comparison_epoch)
+
+            generated_commands = []
+            parsed_sample_configs = []
+
+            def parsed_sample_config(command):
+                config_path = Path(command[command.index("--config") + 1])
+                set_items = [
+                    command[index + 1]
+                    for index, value in enumerate(command[:-1])
+                    if value == "--set"
+                ]
+                overrides = parse_sample_overrides(set_items)
+                for flag, field in (
+                    ("--output-dir", "output_dir"),
+                    ("--split", "split"),
+                    ("--selection-mode", "selection_mode"),
+                ):
+                    if flag in command:
+                        overrides[field] = command[command.index(flag) + 1]
+                if "--selection-count" in command:
+                    overrides["selection_count"] = int(
+                        command[command.index("--selection-count") + 1]
+                    )
+                if "--no-plot" in command:
+                    overrides["save_plots"] = False
+                if "--no-json" in command:
+                    overrides["save_json"] = False
+                checkpoint = command[command.index("--checkpoint") + 1]
+                return load_sample_config(
+                    config_path,
+                    overrides=overrides,
+                    checkpoint_path=checkpoint,
+                )
+
+            def fake_generate(command, *, log_path):
+                del log_path
+                generated_commands.append(command)
+                config_path = Path(command[command.index("--config") + 1])
+                run_dir = config_path.parents[1]
+                sample_config = parsed_sample_config(command)
+                parsed_sample_configs.append(sample_config)
+                output_dir = run_dir / sample_config.output_dir
+                output_dir.mkdir(parents=True)
+                pd.DataFrame({"surface_pair_id": ["p0", "p1"]}).to_csv(
+                    output_dir / "summary.csv", index=False
+                )
+                samples_dir = output_dir / "samples"
+                samples_dir.mkdir(parents=True, exist_ok=True)
+                for pair_id in ("p0", "p1"):
+                    (samples_dir / f"{pair_id}.json").write_text(
+                        json.dumps(
+                            {
+                                "surface_pair_id": pair_id,
+                                "generated_surface": [[0.21]],
+                                "current_surface": [[0.20]],
+                                "evaluation_support_mask": [[1]],
+                                "effective_beta": float(sample_config.reweight_beta),
+                                "metadata": {
+                                    "mc_samples": int(sample_config.mc_samples),
+                                    "split": sample_config.split,
+                                    "aggregation_mode": sample_config.aggregation_mode,
+                                    "residual_blend_alpha": float(
+                                        sample_config.residual_blend_alpha
+                                    ),
+                                    "text_alignment_mode": (
+                                        sample_config.text_alignment_mode
+                                    )
+                                },
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+
+            with (
+                patch.object(rq1_pair_experiment, "_assert_py312"),
+                patch.object(rq1_pair_experiment, "verify_existing"),
+                patch.object(
+                    rq1_pair_experiment, "_fold_counts", return_value=(4, 2, 3)
+                ),
+                patch.object(
+                    rq1_pair_experiment, "_run", side_effect=fake_generate
+                ),
+            ):
+                rq1_pair_experiment.generate_matrix(
+                    argparse.Namespace(experiment_root=str(root))
+                )
+            self.assertEqual(len(generated_commands), 12)
+            generate_registry = pd.read_csv(
+                root / "registry/generate_registry.csv"
+            )
+            self.assertEqual(len(generate_registry), 12)
+            self.assertEqual(set(generate_registry["split"]), {"val"})
+            self.assertEqual(
+                set(generate_registry["output_dir"]), {"validation_pilot_json"}
+            )
+            self.assertTrue(
+                generate_registry["summary_path"]
+                .astype(str)
+                .str.contains("validation_pilot_json/summary.csv", regex=False)
+                .all()
+            )
+            self.assertEqual(len(parsed_sample_configs), 12)
+            for command, sample_config in zip(
+                generated_commands, parsed_sample_configs
+            ):
+                self.assertEqual(
+                    Path(command[command.index("--config") + 1]).name,
+                    "validation_pilot_generate_config.yaml",
+                )
+                self.assertEqual(sample_config.reweight_beta_mode, "fixed")
+                self.assertEqual(float(sample_config.reweight_beta), 0.0)
+                self.assertEqual(int(sample_config.mc_samples), 64)
+                self.assertEqual(sample_config.split, "val")
+                self.assertEqual(sample_config.aggregation_mode, "weighted_mean")
+                self.assertEqual(
+                    list(sample_config.quantiles),
+                    [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95],
+                )
+                self.assertEqual(
+                    list(sample_config.calibration_levels), [0.5, 0.8, 0.9]
+                )
+
+            with (
+                patch.object(
+                    rq1_pair_experiment, "_fold_counts", return_value=(4, 2, 3)
+                ),
+                patch.object(
+                    rq1_pair_experiment, "_run", side_effect=fake_generate
+                ),
+            ):
+                text_swap = rq1_pair_experiment._collect_text_swap_sensitivity(
+                    root=root,
+                    selected=selected,
+                    registry=generate_registry,
+                )
+            self.assertEqual(len(text_swap), 12)
+            self.assertEqual(len(generated_commands), 18)
+            for command, sample_config in zip(
+                generated_commands[-6:], parsed_sample_configs[-6:]
+            ):
+                self.assertEqual(
+                    Path(command[command.index("--config") + 1]).name,
+                    "validation_pilot_generate_config.yaml",
+                )
+                self.assertEqual(float(sample_config.reweight_beta), 0.0)
+                self.assertEqual(int(sample_config.mc_samples), 64)
+                self.assertEqual(sample_config.split, "val")
+                self.assertEqual(sample_config.aggregation_mode, "weighted_mean")
+                self.assertIn(
+                    sample_config.text_alignment_mode, {"matched", "permuted"}
+                )
+            with self.assertRaisesRegex(RuntimeError, "Validation-only pilot"):
+                rq1_pair_experiment.build_comparison(
+                    argparse.Namespace(
+                        experiment_root=str(root),
+                        bootstrap_iterations=10,
+                        bootstrap_seed=123,
+                    )
+                )
+            with (
+                patch.object(rq1_pair_experiment, "_assert_py312"),
+                self.assertRaisesRegex(RuntimeError, "validation-only pilot"),
+            ):
+                rq1_pair_experiment.run_results_pipeline(
+                    argparse.Namespace(
+                        experiment_root=str(root),
+                        bootstrap_iterations=10,
+                        bootstrap_seed=123,
+                    )
+                )
+
+            frozen = yaml.safe_load(frozen_config_path.read_text(encoding="utf-8"))
+            frozen["generate_result"]["split"] = "test"
+            frozen_config_path.write_text(
+                yaml.safe_dump(frozen, sort_keys=False), encoding="utf-8"
+            )
+            with (
+                patch.object(rq1_pair_experiment, "_assert_py312"),
+                patch.object(rq1_pair_experiment, "verify_existing"),
+                self.assertRaisesRegex(RuntimeError, "locked to split=val"),
+            ):
+                rq1_pair_experiment.generate_matrix(
+                    argparse.Namespace(experiment_root=str(root))
+                )
+
+    def test_v3_checkpoint_reuse_requires_schema6_and_exact_fingerprint(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            checkpoint = run_dir / "checkpoints/film_wgan_best.pt"
+            checkpoint.parent.mkdir(parents=True)
+            torch.save(
+                {
+                    "checkpoint_schema_version": 6,
+                    "training_protocol_version": (
+                        rq1_pair_experiment.TRAINING_PROTOCOL_VERSION_V3
+                    ),
+                    "critic_architecture_version": "transition_matching_v2",
+                    "run_fingerprint_sha256": "a" * 64,
+                    "epoch": 31,
+                },
+                checkpoint,
+            )
+            rq1_pair_experiment._validate_run_protocol(
+                run_dir,
+                critic_mode="transition_matching",
+                require_v3=True,
+                expected_fingerprint="a" * 64,
+            )
+            with self.assertRaisesRegex(ValueError, "run_fingerprint_sha256"):
+                rq1_pair_experiment._validate_run_protocol(
+                    run_dir,
+                    critic_mode="transition_matching",
+                    require_v3=True,
+                    expected_fingerprint="b" * 64,
+                )
+
+    def test_validation_admission_gates_apply_all_thresholds_fail_closed(self):
+        diagnostic_rows = []
+        for variant in (
+            rq1_pair_experiment.TEXT_RESIDUAL_VARIANT,
+            rq1_pair_experiment.SHUFFLED_RESIDUAL_VARIANT,
+        ):
+            for seed in rq1_pair_experiment.V3_PILOT_SEEDS:
+                for epoch in range(16, 21):
+                    matched = variant == rq1_pair_experiment.TEXT_RESIDUAL_VARIANT
+                    diagnostic_rows.append(
+                        {
+                            "fold": "2023Q1",
+                            "seed": seed,
+                            "variant": variant,
+                            "epoch": epoch,
+                            "comparison_epoch": 20,
+                            "is_comparison_epoch": int(epoch == 20),
+                            "val_matching_real_pairwise_accuracy": 0.65 if matched else 0.50,
+                            "val_matching_real_accuracy_ci95_low": 0.53 if matched else 0.44,
+                            "val_matching_real_accuracy_ci95_high": 0.75 if matched else 0.56,
+                            "val_matching_real_margin_mean": 0.1 if matched else 0.0,
+                            "gp_raw_norm_mean": 1.0,
+                            "gp_unscaled_penalty": 0.01,
+                            "gp_raw_norm_outside_0p5_1p5_rate": 0.02,
+                            "gp_unsupported_max_abs_gradient": 0.0,
+                            "diag_g_probe_active": 1.0,
+                            "diag_g_matching_output_grad_ratio_median": 0.10,
+                            "diag_g_matching_output_grad_ratio_p95": 0.30,
+                            "g_transition_unclipped_raw_log_max_abs_error": 1.0e-8,
+                            "g_transition_unclipped_normalized_max_abs_error": 1.0e-5,
+                            "g_transition_clipped_fraction": 1.0e-4,
+                        }
+                    )
+        seed_rows = []
+        for contrast in ("matched_vs_continuation", "matched_vs_shuffled"):
+            for seed in rq1_pair_experiment.V3_PILOT_SEEDS:
+                seed_rows.append(
+                    {
+                        "contrast": contrast,
+                        "metric": "surface_mae",
+                        "fold": "2023Q1",
+                        "seed": seed,
+                        "mean_baseline_minus_focal": 0.01,
+                    }
+                )
+        duplicate = pd.DataFrame(
+            [
+                {
+                    "contrast": contrast,
+                    "metric": "surface_mae",
+                    "policy": "exclude_any_exact_or_near_duplicate_seen_in_train",
+                    "unique_pairs": 100,
+                    "seed_mean_baseline_minus_focal": 0.01,
+                    "positive_seed_count": 3,
+                }
+                for contrast in ("matched_vs_continuation", "matched_vs_shuffled")
+            ]
+        )
+        samples = pd.DataFrame(
+            [
+                {
+                    "fold": "2023Q1",
+                    "seed": seed,
+                    "variant": rq1_pair_experiment.TEXT_RESIDUAL_VARIANT,
+                    "surface_mae": 0.10,
+                    "current_mae": 0.20,
+                }
+                for seed in rq1_pair_experiment.V3_PILOT_SEEDS
+            ]
+        )
+        gates = rq1_pair_experiment._validation_admission_gates(
+            diagnostics=pd.DataFrame(diagnostic_rows),
+            seed_summary=pd.DataFrame(seed_rows),
+            duplicate_sensitivity=duplicate,
+            samples=samples,
+        )
+        self.assertTrue(gates["passed"])
+        self.assertEqual(
+            set(gates["gates"]),
+            {
+                "matched_heldout_matcher",
+                "matched_vs_shuffled_matcher_accuracy",
+                "shuffled_matcher_at_chance",
+                "support_aware_gradient_penalty",
+                "unsupported_gradient_zero",
+                "generator_matching_output_gradient_ratio",
+                "transition_roundtrip",
+                "transition_clipping",
+                "matched_surface_mae",
+                "duplicate_free_direction",
+            },
+        )
+        missing = pd.DataFrame(diagnostic_rows).drop(
+            columns=["gp_unsupported_max_abs_gradient"]
+        )
+        failed = rq1_pair_experiment._validation_admission_gates(
+            diagnostics=missing,
+            seed_summary=pd.DataFrame(seed_rows),
+            duplicate_sensitivity=duplicate,
+            samples=samples,
+        )
+        self.assertFalse(failed["passed"])
+        self.assertFalse(failed["gates"]["unsupported_gradient_zero"]["passed"])
+        self.assertIn(
+            "missing required fields",
+            failed["gates"]["unsupported_gradient_zero"]["reason"],
+        )
+
+        partial_nan = pd.DataFrame(diagnostic_rows)
+        partial_nan.loc[
+            partial_nan.index[0],
+            "g_transition_unclipped_raw_log_max_abs_error",
+        ] = np.nan
+        partial_nan.loc[
+            partial_nan.index[1], "g_transition_clipped_fraction"
+        ] = np.nan
+        failed_nan = rq1_pair_experiment._validation_admission_gates(
+            diagnostics=partial_nan,
+            seed_summary=pd.DataFrame(seed_rows),
+            duplicate_sensitivity=duplicate,
+            samples=samples,
+        )
+        self.assertFalse(failed_nan["passed"])
+        self.assertFalse(
+            failed_nan["gates"]["transition_roundtrip"]["passed"]
+        )
+        self.assertFalse(
+            failed_nan["gates"]["transition_clipping"]["passed"]
+        )
 
 
 if __name__ == "__main__":

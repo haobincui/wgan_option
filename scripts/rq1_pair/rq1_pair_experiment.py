@@ -27,23 +27,48 @@ for path in (ROOT, SRC):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from film_wgan.config import load_train_config  # noqa: E402
+from film_wgan.config import (  # noqa: E402
+    build_sample_config,
+    config_to_dict,
+    load_train_config,
+)
 from film_wgan.data import (  # noqa: E402
     apply_text_alignment,
     build_split_manifest_frame,
     create_train_val_bundle,
     load_film_wgan_samples,
 )
+from film_wgan.matching import (  # noqa: E402
+    TextAlignmentPlan,
+    TransitionMatchingNegativePlan,
+    build_text_alignment_plan,
+    build_transition_matching_negative_source_plan,
+)
 from film_wgan.support import parse_raw_surface_params  # noqa: E402
+from film_wgan.protocol import (  # noqa: E402
+    CHECKPOINT_SCHEMA_VERSION_V3,
+    CRITIC_ARCHITECTURE_VERSION_TRANSITION_MATCHING,
+    DIAGNOSTICS_SCHEMA_VERSION,
+    EPOCH_POLICY_CONTINUATION_ANCHOR,
+    EXPERIMENT_DESIGN_SCHEMA_VERSION,
+    MATCHING_NEGATIVE_SOURCE_PLAN_VERSION,
+    TEXT_ALIGNMENT_PLAN_VERSION,
+    TRAINING_PROTOCOL_VERSION_V3,
+    canonical_payload_sha256,
+)
 from film_wgan.text_transform import sha256_file  # noqa: E402
 from film_wgan.text_lineage import write_text_lineage_artifacts  # noqa: E402
 
-DEFAULT_CONFIG = ROOT / "configs/film_wgan/train_rq1_pair_textbase.yaml"
+DEFAULT_CONFIG = ROOT / "configs/film_wgan/train_rq1_pair_textbase_v3_pilot.yaml"
 DEFAULT_WORKBOOK = (
     ROOT
-    / "data/processed/raw-excel/rq_raw_vol_selected/merged_vol_rq2_text.xlsx"
+    / "data/processed/raw-excel-session/rq123_cme_session_20260729-131219/merged_vol_rq2_text.xlsx"
 )
 DEFAULT_NEWS_WORKBOOK = ROOT / "data/raw/text_embedding/news_with_openai_embeddings_large.xlsx"
+V3_CANONICAL_WORKBOOK_SHA256 = (
+    "8d8dbd2d3187bd52c5c1d4e651116348fb34143322e2fbe3735eec1d0cb03c71"
+)
+PREPARATION_RUN_FINGERPRINT_SHA256 = "0" * 64
 SUMMARY_DOCUMENT = ROOT / "docs/summary/rq_research_logic_and_methodology_review_20260722.md"
 EXPERIMENT_PREFIX = "rq1_pair_text_raw_vol_continuation_"
 EXPECTED_SURFACE_MODEL = "raw"
@@ -89,6 +114,18 @@ PARENT_VARIANT = "pair_pca_no_text_residual"
 CONTINUATION_VARIANT = "pair_pca_no_text_continued"
 TEXT_RESIDUAL_VARIANT = "pair_pca_text_residual_pretrained"
 SHUFFLED_RESIDUAL_VARIANT = "pair_pca_shuffled_residual_pretrained"
+V3_PILOT_FOLDS = ("2023Q1",)
+V3_PILOT_SEEDS = (42, 202, 404)
+V3_PILOT_Q1_SPLIT_COUNTS = (339, 133, 103)
+V3_PILOT_Q1_MATCHING_ELIGIBLE = {"train": 187, "val": 74}
+V2_DIAGNOSTIC_ARCHIVE = "rq1_film_wgan_v2_pilot"
+V2_DIAGNOSTIC_CLAIM_SCOPE = "diagnostic_only"
+V3_PILOT_VARIANTS = (
+    PARENT_VARIANT,
+    CONTINUATION_VARIANT,
+    TEXT_RESIDUAL_VARIANT,
+    SHUFFLED_RESIDUAL_VARIANT,
+)
 PAIRED_STAGE_B_VARIANTS = (
     CONTINUATION_VARIANT,
     TEXT_RESIDUAL_VARIANT,
@@ -418,6 +455,75 @@ def _experiment_seeds(root: Path) -> tuple[int, ...]:
     return _normalize_seeds(SEEDS)
 
 
+def _experiment_design(root: Path) -> dict[str, Any]:
+    path = root / "inputs/experiment_design.json"
+    if not path.is_file():
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected experiment design mapping in {path}.")
+    return payload
+
+
+def _experiment_scope(
+    root: Path,
+) -> tuple[tuple[str, ...], tuple[int, ...], tuple[str, ...]]:
+    """Return the frozen run matrix, with legacy archive fallbacks."""
+
+    design = _experiment_design(root)
+    folds = tuple(str(value) for value in design.get("run_folds") or FOLDS)
+    seeds = _normalize_seeds(design.get("run_seeds") or design.get("seeds") or _experiment_seeds(root))
+    variants = tuple(str(value) for value in design.get("run_variants") or VARIANTS)
+    unknown_folds = sorted(set(folds) - set(FOLDS))
+    unknown_variants = sorted(set(variants) - set(VARIANTS))
+    if unknown_folds:
+        raise ValueError(f"Unknown folds in experiment scope: {unknown_folds}")
+    if unknown_variants:
+        raise ValueError(f"Unknown variants in experiment scope: {unknown_variants}")
+    if not folds or not variants:
+        raise ValueError("Experiment run_folds and run_variants must be non-empty.")
+    expected = len(folds) * len(seeds) * len(variants)
+    configured_expected = design.get("expected_training_runs")
+    if configured_expected is not None and int(configured_expected) != expected:
+        raise ValueError(
+            "Experiment-design run count mismatch: "
+            f"configured={configured_expected} derived={expected}."
+        )
+    return folds, seeds, variants
+
+
+def _is_v3_design(root: Path) -> bool:
+    design = _experiment_design(root)
+    return (
+        int(design.get("experiment_design_schema_version", 0))
+        == EXPERIMENT_DESIGN_SCHEMA_VERSION
+        and str(design.get("training_protocol_version", ""))
+        == TRAINING_PROTOCOL_VERSION_V3
+    )
+
+
+def _v3_preparation_overrides(*, validate_frozen_plans: bool) -> dict[str, Any]:
+    """Return non-training overrides used while freezing a v3 fold.
+
+    A run fingerprint is variant-specific, so it cannot be written into the
+    shared fold YAML.  The all-zero value is used only to exercise the strict
+    config/data loader after the frozen plans exist; it is never passed to a
+    training command.
+    """
+
+    if validate_frozen_plans:
+        return {"run_fingerprint_sha256": PREPARATION_RUN_FINGERPRINT_SHA256}
+    return {
+        "training_protocol_version": "",
+        "run_fingerprint_sha256": "",
+        "text_alignment_plan_path": "",
+        "matching_negative_source_plan_path": "",
+        "lambda_mismatch": 0.0,
+        "lambda_critic_matching": 0.0,
+        "lambda_generator_matching": 0.0,
+    }
+
+
 def _assert_py312() -> None:
     if Path(sys.prefix).name != "py312":
         raise RuntimeError(f"Run RQ1 pair workflow in conda env 'py312'; current prefix={sys.prefix}.")
@@ -497,12 +603,17 @@ def _variant_overrides(
     output_root: Path,
     seed: int,
     parent_checkpoint: Path | None,
+    continuation_anchor_epoch: int | None = None,
 ) -> dict[str, Any]:
     training = dict(fold_config["training"])
     residual_critic_mode = str(
         training.get("critic_conditioning_mode", "projection")
     ).strip().lower()
     transition_matching = residual_critic_mode == "transition_matching"
+    v3_protocol = (
+        str(training.get("training_protocol_version", ""))
+        == TRAINING_PROTOCOL_VERSION_V3
+    )
     overrides: dict[str, Any] = {
         "seed": int(seed),
         "output_root": str(output_root),
@@ -531,6 +642,22 @@ def _variant_overrides(
         "initial_generator_checkpoint_path": "",
         "freeze_backbone_epochs": 0,
     }
+    if v3_protocol:
+        overrides.update(
+            training_protocol_version=TRAINING_PROTOCOL_VERSION_V3,
+            scheduler_horizon_epochs=60,
+            num_epochs=60,
+            use_early_stopping=True,
+            early_stopping_patience=10,
+        )
+    continuation_values: dict[str, Any] = {}
+    if v3_protocol:
+        continuation_values.update(
+            scheduler_horizon_epochs=100,
+            num_epochs=100,
+            use_early_stopping=True,
+            early_stopping_patience=15,
+        )
     if variant == PARENT_VARIANT:
         overrides.update(
             text_embedding_mode="zero_lp",
@@ -550,21 +677,54 @@ def _variant_overrides(
             lambda_generator_matching=0.0,
             initial_generator_checkpoint_path=str(parent_checkpoint),
             freeze_backbone_epochs=5,
+            **continuation_values,
         )
     elif variant == TEXT_RESIDUAL_VARIANT:
         if parent_checkpoint is None:
             raise FileNotFoundError("Residual text training requires its paired no-text checkpoint.")
+        if v3_protocol and (
+            continuation_anchor_epoch is None
+            or not 11 <= int(continuation_anchor_epoch) <= 100
+        ):
+            raise ValueError(
+                "Residual text training requires a continuation anchor epoch in [11, 100]."
+            )
+        anchor_values: dict[str, Any] = {}
+        if v3_protocol:
+            anchor_values.update(
+                scheduler_horizon_epochs=100,
+                num_epochs=int(continuation_anchor_epoch),
+                use_early_stopping=False,
+                early_stopping_patience=15,
+            )
         overrides.update(
             initial_generator_checkpoint_path=str(parent_checkpoint),
             freeze_backbone_epochs=5,
+            **anchor_values,
         )
     elif variant == SHUFFLED_RESIDUAL_VARIANT:
         if parent_checkpoint is None:
             raise FileNotFoundError("Shuffled residual training requires its paired no-text checkpoint.")
+        if v3_protocol and (
+            continuation_anchor_epoch is None
+            or not 11 <= int(continuation_anchor_epoch) <= 100
+        ):
+            raise ValueError(
+                "Shuffled residual training requires a continuation anchor epoch in [11, 100]."
+            )
+        anchor_values = {}
+        if v3_protocol:
+            anchor_values.update(
+                scheduler_horizon_epochs=100,
+                num_epochs=int(continuation_anchor_epoch),
+                use_early_stopping=False,
+                early_stopping_patience=15,
+            )
         overrides.update(
             text_alignment_mode="permuted",
             initial_generator_checkpoint_path=str(parent_checkpoint),
             freeze_backbone_epochs=5,
+            **anchor_values,
         )
     elif variant == "pair_pca_text_full_film":
         overrides.update(
@@ -704,31 +864,137 @@ def _completed_run(output_root: Path) -> Path | None:
     return candidates[-1] if candidates else None
 
 
+def _best_epoch(run_dir: Path) -> int:
+    path = run_dir / "metrics/best_checkpoint.json"
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return int(payload.get("best_epoch", 0))
+
+
+def _continuation_anchor(root: Path, fold: str, seed: int) -> tuple[Path, int]:
+    run_dir = _completed_run(
+        root
+        / "training_runs"
+        / CONTINUATION_VARIANT
+        / fold
+        / f"seed_{seed}"
+    )
+    if run_dir is None:
+        raise FileNotFoundError(
+            "Matched and shuffled Stage-B runs require the completed paired "
+            f"continuation anchor: fold={fold}, seed={seed}."
+        )
+    epoch = _best_epoch(run_dir)
+    if not 11 <= epoch <= 100:
+        raise ValueError(
+            f"Continuation anchor epoch must be in [11, 100], found {epoch}: {run_dir}"
+        )
+    return run_dir, epoch
+
+
+def _comparison_checkpoint(
+    run_dir: Path,
+    *,
+    variant: str,
+    continuation_anchor_epoch: int | None,
+    v3_protocol: bool = True,
+) -> tuple[Path, int]:
+    if v3_protocol and variant in {
+        TEXT_RESIDUAL_VARIANT,
+        SHUFFLED_RESIDUAL_VARIANT,
+    }:
+        if continuation_anchor_epoch is None:
+            raise ValueError(f"{variant} requires a continuation anchor epoch.")
+        checkpoint = run_dir / "checkpoints/film_wgan_final.pt"
+        fields = _checkpoint_protocol_fields(checkpoint)
+        epoch = int(fields["epoch"])
+        if epoch != int(continuation_anchor_epoch):
+            raise ValueError(
+                f"Anchored comparison checkpoint epoch mismatch for {variant}: "
+                f"found={epoch} expected={continuation_anchor_epoch}."
+            )
+        return checkpoint, epoch
+    checkpoint = run_dir / "checkpoints/film_wgan_best.pt"
+    epoch = _best_epoch(run_dir)
+    if (
+        v3_protocol
+        and variant == CONTINUATION_VARIANT
+        and not 11 <= epoch <= 100
+    ):
+        raise ValueError(
+            f"Continuation comparison epoch must be in [11, 100], found {epoch}."
+        )
+    return checkpoint, epoch
+
+
 def _validate_run_protocol(
     run_dir: Path,
     *,
     critic_mode: str,
+    require_v3: bool = False,
     require_schema5: bool = False,
+    expected_fingerprint: str = "",
+    checkpoint_path: Path | None = None,
 ) -> None:
-    """Reject completed v1 runs before they can be reused in a v2 matrix."""
+    """Validate v3 exactly while retaining schema-5 archive readability."""
 
     transition_mode = (
         str(critic_mode).strip().lower() == "transition_matching"
     )
-    if not (transition_mode or require_schema5):
+    if not (transition_mode or require_v3 or require_schema5):
         return
-    checkpoint_path = run_dir / "checkpoints/film_wgan_best.pt"
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    schema = int(checkpoint.get("checkpoint_schema_version", 0))
-    protocol = str(checkpoint.get("training_protocol_version", ""))
-    critic = str(checkpoint.get("critic_architecture_version", ""))
+    selected_checkpoint = checkpoint_path or (
+        run_dir / "checkpoints/film_wgan_best.pt"
+    )
+    fields = _checkpoint_protocol_fields(selected_checkpoint)
+    schema = int(fields["checkpoint_schema_version"])
+    protocol = str(fields["training_protocol_version"])
+    critic = str(fields["critic_architecture_version"])
+    fingerprint = str(fields["run_fingerprint_sha256"])
+    if require_v3:
+        errors = []
+        if schema != CHECKPOINT_SCHEMA_VERSION_V3:
+            errors.append(
+                f"schema={schema} expected={CHECKPOINT_SCHEMA_VERSION_V3}"
+            )
+        if protocol != TRAINING_PROTOCOL_VERSION_V3:
+            errors.append(
+                f"protocol={protocol!r} expected={TRAINING_PROTOCOL_VERSION_V3!r}"
+            )
+        if critic != CRITIC_ARCHITECTURE_VERSION_TRANSITION_MATCHING:
+            errors.append(
+                "critic="
+                f"{critic!r} expected={CRITIC_ARCHITECTURE_VERSION_TRANSITION_MATCHING!r}"
+            )
+        if (
+            len(fingerprint) != 64
+            or any(character not in "0123456789abcdef" for character in fingerprint)
+        ):
+            errors.append(f"invalid run_fingerprint_sha256={fingerprint!r}")
+        if expected_fingerprint and fingerprint != expected_fingerprint:
+            errors.append(
+                "run_fingerprint_sha256="
+                f"{fingerprint!r} expected={expected_fingerprint!r}"
+            )
+        if not errors:
+            return
+        raise ValueError(
+            "Refusing to reuse an incompatible completed run in the v3 "
+            f"transition-matching experiment: run={run_dir}; "
+            + "; ".join(errors)
+            + ". Use a new experiment root and retrain Stage A."
+        )
+
     expected_protocol = (
         "film_wgan_transition_matching_v2"
         if transition_mode
         else "film_wgan_v1_compatible"
     )
     expected_critic = (
-        "transition_matching_v2" if transition_mode else "legacy_v1"
+        CRITIC_ARCHITECTURE_VERSION_TRANSITION_MATCHING
+        if transition_mode
+        else "legacy_v1"
     )
     if schema != 5 or protocol != expected_protocol or critic != expected_critic:
         raise ValueError(
@@ -857,6 +1123,396 @@ def _assert_frozen_v2_worktree(root: Path) -> None:
         )
 
 
+def _verify_input_manifest(root: Path) -> None:
+    manifest_path = root / "inputs/input_manifest.csv"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(manifest_path)
+    manifest = pd.read_csv(manifest_path)
+    required = {"relative_path", "size_bytes", "sha256"}
+    if not required.issubset(manifest.columns):
+        raise ValueError(
+            f"Frozen input manifest is missing columns: {sorted(required - set(manifest.columns))}"
+        )
+    failures: list[str] = []
+    for row in manifest.itertuples(index=False):
+        path = root / str(row.relative_path)
+        if not path.is_file():
+            failures.append(f"missing:{row.relative_path}")
+            continue
+        if path.stat().st_size != int(row.size_bytes):
+            failures.append(f"size:{row.relative_path}")
+            continue
+        if sha256_file(path) != str(row.sha256):
+            failures.append(f"sha256:{row.relative_path}")
+    if failures:
+        raise ValueError(
+            "Frozen input manifest verification failed: " + ", ".join(failures)
+        )
+
+
+def _verify_v3_plan_contents(root: Path) -> None:
+    validation_path = root / "validation_summary.json"
+    if not validation_path.is_file():
+        raise FileNotFoundError(validation_path)
+    validation = json.loads(validation_path.read_text(encoding="utf-8"))
+    q1 = dict((validation.get("folds") or {}).get("2023Q1") or {})
+    observed_counts = (
+        int(q1.get("train_pairs", -1)),
+        int(q1.get("validation_pairs", -1)),
+        int(q1.get("test_pairs", -1)),
+    )
+    lineage_path = _fold_dir(root, "2023Q1") / "pair_lineage_audit.csv"
+    manifest = pd.read_csv(root / "inputs/input_manifest.csv")
+    lineage_relative_path = str(lineage_path.relative_to(root))
+    if lineage_relative_path not in set(manifest["relative_path"].astype(str)):
+        raise ValueError(
+            "Q1 pair-lineage audit is not protected by the frozen input manifest."
+        )
+    lineage = pd.read_csv(lineage_path)
+    required_lineage_columns = {"surface_pair_id", "split"}
+    if not required_lineage_columns.issubset(lineage.columns):
+        raise ValueError(
+            "Q1 pair-lineage audit omits split identity columns: "
+            f"{sorted(required_lineage_columns - set(lineage.columns))}."
+        )
+    lineage_identity = lineage.loc[:, ["surface_pair_id", "split"]].copy()
+    lineage_identity["surface_pair_id"] = lineage_identity[
+        "surface_pair_id"
+    ].astype(str)
+    lineage_identity["split"] = lineage_identity["split"].astype(str).str.lower()
+    if lineage_identity["surface_pair_id"].duplicated().any():
+        raise ValueError("Q1 pair-lineage audit contains duplicate surface_pair_id rows.")
+    derived_counts = tuple(
+        int((lineage_identity["split"] == split).sum())
+        for split in ("train", "val", "test")
+    )
+    if set(lineage_identity["split"]) != {"train", "val", "test"}:
+        raise ValueError("Q1 pair-lineage audit contains an unexpected split label.")
+    if (
+        derived_counts != V3_PILOT_Q1_SPLIT_COUNTS
+        or observed_counts != derived_counts
+    ):
+        raise ValueError(
+            "Canonical Q1 split counts changed: "
+            f"lineage={derived_counts} summary={observed_counts} "
+            f"expected={V3_PILOT_Q1_SPLIT_COUNTS}."
+        )
+
+    for fold in FOLDS:
+        training = dict(
+            (_read_yaml(_fold_config(root, fold)).get("training") or {})
+        )
+        alignment_path = _config_artifact_path(
+            training.get("text_alignment_plan_path")
+        )
+        negative_path = _config_artifact_path(
+            training.get("matching_negative_source_plan_path")
+        )
+        if alignment_path is None or negative_path is None:
+            raise ValueError(f"Frozen v3 plan paths are empty for {fold}.")
+        if negative_path.name != "transition_matching_negative_source_plan.csv":
+            raise ValueError(f"Unexpected v3 negative-plan filename: {negative_path}")
+        summary_path = (
+            negative_path.parent
+            / "transition_matching_negative_source_summary.json"
+        )
+        if not summary_path.is_file():
+            raise FileNotFoundError(summary_path)
+        alignment_frame = pd.read_csv(alignment_path)
+        negative_frame = pd.read_csv(negative_path)
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        if summary.get("text_alignment_plan_sha256") != sha256_file(
+            alignment_path
+        ) or summary.get(
+            "matching_negative_source_plan_sha256"
+        ) != sha256_file(negative_path):
+            raise ValueError(f"Frozen plan file SHA summary mismatch for {fold}.")
+        for split in ("train", "val"):
+            alignment = TextAlignmentPlan.from_frame(
+                alignment_frame,
+                split=split,
+            )
+            negative = TransitionMatchingNegativePlan.from_frame(
+                negative_frame,
+                split=split,
+            )
+            if negative.positive_alignment_sha256 != alignment.sha256:
+                raise ValueError(
+                    f"Positive/negative canonical plan SHA mismatch: {fold}/{split}"
+                )
+            split_rows = negative_frame[
+                negative_frame["split"].astype(str).str.lower() == split
+            ].copy()
+            eligible_rows = split_rows[
+                pd.to_numeric(split_rows["target_eligible"], errors="coerce")
+                == 1
+            ]
+            if fold == "2023Q1":
+                eligible_count = int(
+                    eligible_rows["target_dataset_index"].nunique()
+                )
+                expected_eligible = V3_PILOT_Q1_MATCHING_ELIGIBLE[split]
+                if eligible_count != expected_eligible:
+                    raise ValueError(
+                        f"Canonical Q1 {split} matching eligibility changed: "
+                        f"{eligible_count} != {expected_eligible}."
+                    )
+            if not eligible_rows.empty:
+                native_hits = int(
+                    (
+                        eligible_rows["negative_source_index"].astype(int)
+                        == eligible_rows["native_positive_source_index"].astype(int)
+                    ).sum()
+                )
+                placebo_hits = int(
+                    (
+                        eligible_rows["negative_source_index"].astype(int)
+                        == eligible_rows["placebo_positive_source_index"].astype(int)
+                    ).sum()
+                )
+                fallback_count = int(
+                    pd.to_numeric(
+                        eligible_rows.get(
+                            "round_reuse_fallback",
+                            pd.Series(np.zeros(len(eligible_rows))),
+                        ),
+                        errors="coerce",
+                    )
+                    .fillna(0)
+                    .sum()
+                )
+                per_target_reuse = bool(
+                    eligible_rows.duplicated(
+                        ["target_dataset_index", "negative_source_index"]
+                    ).any()
+                )
+                rank_reuse = bool(
+                    eligible_rows.duplicated(
+                        ["negative_rank", "negative_source_index"]
+                    ).any()
+                )
+                if (
+                    native_hits
+                    or placebo_hits
+                    or fallback_count
+                    or per_target_reuse
+                    or rank_reuse
+                ):
+                    raise ValueError(
+                        "Unsafe symmetric-negative plan audit for "
+                        f"{fold}/{split}: native={native_hits}, "
+                        f"placebo={placebo_hits}, fallback={fallback_count}, "
+                        f"target_reuse={per_target_reuse}, rank_reuse={rank_reuse}."
+                    )
+
+
+def verify_existing(args: argparse.Namespace) -> Path:
+    """Read-only verification for an immutable prepared v3 experiment root."""
+
+    root = _resolve_root(args.experiment_root)
+    if not _is_v3_design(root):
+        raise ValueError(
+            "verify-existing requires an experiment-design schema-2 v3 root."
+        )
+    design = _experiment_design(root)
+    expected_fields = {
+        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION_V3,
+        "critic_architecture_version": (
+            CRITIC_ARCHITECTURE_VERSION_TRANSITION_MATCHING
+        ),
+        "matching_negative_source_plan_version": (
+            MATCHING_NEGATIVE_SOURCE_PLAN_VERSION
+        ),
+        "text_alignment_plan_version": TEXT_ALIGNMENT_PLAN_VERSION,
+        "epoch_policy": EPOCH_POLICY_CONTINUATION_ANCHOR,
+        "diagnostics_schema_version": DIAGNOSTICS_SCHEMA_VERSION,
+    }
+    mismatches = {
+        key: {"found": design.get(key), "expected": expected}
+        for key, expected in expected_fields.items()
+        if design.get(key) != expected
+    }
+    if mismatches:
+        raise ValueError(f"V3 experiment-design protocol mismatch: {mismatches}")
+    if tuple(str(value) for value in design.get("prepared_folds", ())) != tuple(
+        FOLDS
+    ) or int(design.get("prepared_fold_count", 0)) != len(FOLDS):
+        raise ValueError("The v3 root must freeze all four rolling folds.")
+    folds, seeds, variants = _experiment_scope(root)
+    if (
+        folds != V3_PILOT_FOLDS
+        or seeds != V3_PILOT_SEEDS
+        or variants != V3_PILOT_VARIANTS
+    ):
+        raise ValueError(
+            "The v3 validation pilot scope must be exactly "
+            f"folds={V3_PILOT_FOLDS}, seeds={V3_PILOT_SEEDS}, "
+            f"variants={V3_PILOT_VARIANTS}; found {(folds, seeds, variants)}."
+        )
+    if int(design.get("run_fold_count", 0)) != len(V3_PILOT_FOLDS):
+        raise ValueError("The v3 validation pilot run_fold_count must be one.")
+    superseded = dict(design.get("superseded_experiment") or {})
+    if superseded != {
+        "experiment_name": V2_DIAGNOSTIC_ARCHIVE,
+        "claim_scope": V2_DIAGNOSTIC_CLAIM_SCOPE,
+        "checkpoint_reuse_allowed": False,
+    }:
+        raise ValueError(
+            "The v3 design must retain the v2 pilot as a read-only, "
+            "diagnostic-only archive."
+        )
+    _assert_frozen_v2_worktree(root)
+    _verify_input_manifest(root)
+    frozen_workbook = root / "inputs/data/merged_vol_rq2_text.xlsx"
+    if sha256_file(frozen_workbook) != V3_CANONICAL_WORKBOOK_SHA256:
+        raise ValueError("Frozen v3 workbook is not the canonical CME-session input.")
+    _verify_v3_plan_contents(root)
+    for fold in FOLDS:
+        payload = _read_yaml(_fold_config(root, fold))
+        training = dict(payload.get("training") or payload)
+        if str(training.get("training_protocol_version", "")) != TRAINING_PROTOCOL_VERSION_V3:
+            raise ValueError(f"Fold {fold} does not freeze the v3 training protocol.")
+        for field in (
+            "text_alignment_plan_path",
+            "matching_negative_source_plan_path",
+        ):
+            path = _config_artifact_path(training.get(field))
+            if path is None or not path.is_file():
+                raise FileNotFoundError(
+                    f"Fold {fold} is missing frozen {field}: {training.get(field)!r}"
+                )
+    print(root)
+    return root
+
+
+def _freeze_fold_matching_plans(
+    *,
+    fold: str,
+    fold_root: Path,
+    preparation_bundle: Any,
+    preparation_config: Any,
+) -> tuple[Path, Path, dict[str, Any]]:
+    """Freeze train/validation positive alignments and common negatives."""
+
+    native_partitions = {
+        "train": preparation_bundle.native_train_items,
+        "val": preparation_bundle.native_val_items,
+    }
+    alignment_plans = {}
+    negative_plans = {}
+    for split, native_items in native_partitions.items():
+        if not native_items:
+            raise ValueError(f"Cannot freeze an empty v3 {split} plan for {fold}.")
+        alignment_plan = build_text_alignment_plan(
+            native_items,
+            split=split,
+            seed=int(preparation_config.text_permutation_seed),
+        )
+        negative_plan = build_transition_matching_negative_source_plan(
+            native_items,
+            text_alignment_plan=alignment_plan,
+            split=split,
+            negative_count=int(preparation_config.matching_negative_count),
+            minimum_supported_cells=int(
+                preparation_config.matching_min_supported_cells
+            ),
+            seed=int(preparation_config.matching_negative_seed),
+            duplicate_cosine_threshold=float(
+                preparation_config.matching_duplicate_cosine_threshold
+            ),
+        )
+        alignment_plans[split] = alignment_plan
+        negative_plans[split] = negative_plan
+
+    alignment_path = fold_root / "text_alignment_plan.csv"
+    negative_path = fold_root / "transition_matching_negative_source_plan.csv"
+    pd.concat(
+        [alignment_plans[split].to_frame() for split in ("train", "val")],
+        ignore_index=True,
+    ).to_csv(alignment_path, index=False)
+    pd.concat(
+        [negative_plans[split].to_frame() for split in ("train", "val")],
+        ignore_index=True,
+    ).to_csv(negative_path, index=False)
+
+    audit_payload = {
+        "fold": fold,
+        "training_protocol_version": TRAINING_PROTOCOL_VERSION_V3,
+        "text_alignment_plan_version": TEXT_ALIGNMENT_PLAN_VERSION,
+        "matching_negative_source_plan_version": (
+            MATCHING_NEGATIVE_SOURCE_PLAN_VERSION
+        ),
+        "text_alignment_plan_path": str(alignment_path),
+        "text_alignment_plan_sha256": sha256_file(alignment_path),
+        "matching_negative_source_plan_path": str(negative_path),
+        "matching_negative_source_plan_sha256": sha256_file(negative_path),
+        "splits": {
+            split: {
+                "pair_count": len(alignment_plans[split].target_sample_ids),
+                "text_alignment_canonical_sha256": alignment_plans[split].sha256,
+                "matching_negative_canonical_sha256": negative_plans[split].sha256,
+                "matching_eligible_targets": int(
+                    negative_plans[split].eligible_mask.sum()
+                ),
+                "matching_negative_count": int(
+                    negative_plans[split].negative_count
+                ),
+                "matching_summary": dict(negative_plans[split].summary),
+            }
+            for split in ("train", "val")
+        },
+        "outer_test_plan_frozen": False,
+        "outer_test_use_forbidden": True,
+    }
+    _write_json(
+        fold_root / "transition_matching_negative_source_summary.json",
+        audit_payload,
+    )
+    _write_json(fold_root / "matching_plan_audit.json", audit_payload)
+    return alignment_path, negative_path, audit_payload
+
+
+def _verify_fold_matching_plans(
+    *,
+    fold: str,
+    bundle: Any,
+    alignment_path: Path,
+    negative_path: Path,
+) -> None:
+    alignment_frame = pd.read_csv(alignment_path)
+    negative_frame = pd.read_csv(negative_path)
+    native_partitions = {
+        "train": bundle.native_train_items,
+        "val": bundle.native_val_items,
+    }
+    for split, native_items in native_partitions.items():
+        alignment_plan = bundle.text_alignment_plans.get(split)
+        if alignment_plan is None:
+            raise ValueError(f"Strict v3 bundle omitted {fold}/{split} alignment plan.")
+        disk_alignment = type(alignment_plan).from_frame(
+            alignment_frame,
+            split=split,
+        )
+        negative_plan = TransitionMatchingNegativePlan.from_frame(
+            negative_frame,
+            split=split,
+        )
+        expected_ids = tuple(item.sample_id for item in native_items)
+        expected_pairs = tuple(item.surface_pair_id for item in native_items)
+        if (
+            alignment_plan.sha256 != disk_alignment.sha256
+            or alignment_plan.target_sample_ids != expected_ids
+            or alignment_plan.target_surface_pair_ids != expected_pairs
+        ):
+            raise ValueError(f"Frozen alignment identities changed for {fold}/{split}.")
+        if (
+            negative_plan.target_sample_ids != expected_ids
+            or negative_plan.target_surface_pair_ids != expected_pairs
+            or negative_plan.positive_alignment_sha256 != alignment_plan.sha256
+        ):
+            raise ValueError(f"Frozen negative identities changed for {fold}/{split}.")
+
+
 def prepare_experiment(args: argparse.Namespace) -> Path:
     _assert_py312()
     source_config = Path(args.config).resolve()
@@ -868,6 +1524,18 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
     base_payload = _read_yaml(source_config)
     training = dict(base_payload.get("training") or base_payload)
     generate = dict(base_payload.get("generate_result") or {})
+    if str(training.get("training_protocol_version", "")) != TRAINING_PROTOCOL_VERSION_V3:
+        raise ValueError(
+            "RQ1 v3 prepare requires the explicit frozen training protocol "
+            f"{TRAINING_PROTOCOL_VERSION_V3!r}."
+        )
+    source_workbook_sha256 = sha256_file(source_workbook)
+    if source_workbook_sha256 != V3_CANONICAL_WORKBOOK_SHA256:
+        raise ValueError(
+            "RQ1 v3 requires the canonical CME-session workbook: "
+            f"found sha256={source_workbook_sha256}, "
+            f"expected={V3_CANONICAL_WORKBOOK_SHA256}."
+        )
     git_state = subprocess.run(
         ["git", "status", "--short", "--branch"],
         cwd=ROOT,
@@ -892,15 +1560,44 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
     ):
         raise RuntimeError(
             "transition_matching experiments require a clean committed worktree; "
-            "commit the v2 implementation before prepare."
+            "commit the v3 implementation before prepare."
         )
 
-    root = _resolve_root(args.experiment_root, create=True)
     experiment_seeds = _normalize_seeds(
-        getattr(args, "seeds", None) or SEEDS
+        getattr(args, "seeds", None) or V3_PILOT_SEEDS
     )
-    if root.exists() and any(root.iterdir()) and not args.reuse:
-        raise FileExistsError(f"Experiment directory is not empty: {root}")
+    run_folds = tuple(
+        str(value) for value in (getattr(args, "run_folds", None) or FOLDS)
+    )
+    run_variants = tuple(
+        str(value) for value in (getattr(args, "run_variants", None) or VARIANTS)
+    )
+    unknown_folds = sorted(set(run_folds) - set(FOLDS))
+    unknown_variants = sorted(set(run_variants) - set(VARIANTS))
+    if unknown_folds:
+        raise ValueError(f"Unknown requested run folds: {unknown_folds}")
+    if unknown_variants:
+        raise ValueError(f"Unknown requested run variants: {unknown_variants}")
+    matrix_profile = str(
+        getattr(args, "matrix_profile", "validation_pilot")
+    )
+    if (
+        matrix_profile != "validation_pilot"
+        or experiment_seeds != V3_PILOT_SEEDS
+        or run_folds != V3_PILOT_FOLDS
+        or run_variants != V3_PILOT_VARIANTS
+    ):
+        raise ValueError(
+            "RQ1 v3 prepare is fixed to the validation pilot scope: "
+            f"matrix_profile=validation_pilot, folds={V3_PILOT_FOLDS}, "
+            f"seeds={V3_PILOT_SEEDS}, variants={V3_PILOT_VARIANTS}."
+        )
+    root = _resolve_root(args.experiment_root, create=True)
+    if root.exists() and any(root.iterdir()):
+        raise FileExistsError(
+            "Experiment directory is not empty; frozen v3 roots are immutable: "
+            f"{root}. Use verify-existing for read-only verification or choose a new root."
+        )
     for relative in (
         "inputs/configs",
         "inputs/data",
@@ -942,6 +1639,19 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
     _write_json(
         root / "inputs/experiment_design.json",
         {
+            "experiment_design_schema_version": EXPERIMENT_DESIGN_SCHEMA_VERSION,
+            "matrix_profile": matrix_profile,
+            "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION_V3,
+            "training_protocol_version": TRAINING_PROTOCOL_VERSION_V3,
+            "critic_architecture_version": (
+                CRITIC_ARCHITECTURE_VERSION_TRANSITION_MATCHING
+            ),
+            "matching_negative_source_plan_version": (
+                MATCHING_NEGATIVE_SOURCE_PLAN_VERSION
+            ),
+            "text_alignment_plan_version": TEXT_ALIGNMENT_PLAN_VERSION,
+            "epoch_policy": EPOCH_POLICY_CONTINUATION_ANCHOR,
+            "diagnostics_schema_version": DIAGNOSTICS_SCHEMA_VERSION,
             "seed_set_version": (
                 SEED_SET_VERSION
                 if experiment_seeds == tuple(SEEDS)
@@ -950,24 +1660,39 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             "seed_generation_master_seed": SEED_GENERATION_MASTER_SEED,
             "seeds": list(experiment_seeds),
             "seed_count": len(experiment_seeds),
-            "fold_count": len(FOLDS),
-            "variant_count": len(VARIANTS),
+            "prepared_folds": list(FOLDS),
+            "prepared_fold_count": len(FOLDS),
+            "run_folds": list(run_folds),
+            "run_fold_count": len(run_folds),
+            "run_seeds": list(experiment_seeds),
+            "run_variants": list(run_variants),
+            "fold_count": len(run_folds),
+            "variant_count": len(run_variants),
             "expected_training_runs": (
-                len(FOLDS) * len(experiment_seeds) * len(VARIANTS)
+                len(run_folds) * len(experiment_seeds) * len(run_variants)
             ),
+            "superseded_experiment": {
+                "experiment_name": V2_DIAGNOSTIC_ARCHIVE,
+                "claim_scope": V2_DIAGNOSTIC_CLAIM_SCOPE,
+                "checkpoint_reuse_allowed": False,
+            },
         },
     )
 
     training.update(
         data_path=str(copied_workbook),
         news_workbook_path=str(copied_news),
+        training_protocol_version=TRAINING_PROTOCOL_VERSION_V3,
         output_root="",
         checkpoints_path="",
         metrics_path="",
     )
     base_frozen = root / "inputs/configs/train_rq1_pair_textbase.yaml"
     _write_yaml(base_frozen, {"training": training, "generate_result": generate})
-    row_config = load_train_config(base_frozen)
+    row_config = load_train_config(
+        base_frozen,
+        overrides=_v3_preparation_overrides(validate_frozen_plans=False),
+    )
     row_samples = load_film_wgan_samples(row_config)
     base_manifest = build_split_manifest_frame(row_config, row_samples)
     pair_quarters = {
@@ -999,11 +1724,17 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
         manifest.to_csv(manifest_path, index=False)
         transform_path = fold_root / "text_transform.npz"
         surface_support_path = fold_root / "raw_surface_support.json"
+        alignment_plan_path = fold_root / "text_alignment_plan.csv"
+        negative_plan_path = (
+            fold_root / "transition_matching_negative_source_plan.csv"
+        )
         fold_training = dict(training)
         fold_training.update(
             split_manifest_path=str(manifest_path),
             text_transform_path=str(transform_path),
             surface_support_path=str(surface_support_path),
+            text_alignment_plan_path=str(alignment_plan_path),
+            matching_negative_source_plan_path=str(negative_plan_path),
             text_embedding_mode="lp",
             sample_unit="surface_pair",
             text_preprocessing_mode="pca",
@@ -1014,8 +1745,32 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             fold_config_path,
             {"training": fold_training, "generate_result": generate},
         )
-        fold_config = load_train_config(fold_config_path)
+        preparation_config = load_train_config(
+            fold_config_path,
+            overrides=_v3_preparation_overrides(validate_frozen_plans=False),
+        )
+        preparation_bundle = create_train_val_bundle(preparation_config)
+        (
+            alignment_plan_path,
+            negative_plan_path,
+            matching_plan_audit,
+        ) = _freeze_fold_matching_plans(
+            fold=fold,
+            fold_root=fold_root,
+            preparation_bundle=preparation_bundle,
+            preparation_config=preparation_config,
+        )
+        fold_config = load_train_config(
+            fold_config_path,
+            overrides=_v3_preparation_overrides(validate_frozen_plans=True),
+        )
         bundle = create_train_val_bundle(fold_config)
+        _verify_fold_matching_plans(
+            fold=fold,
+            bundle=bundle,
+            alignment_path=alignment_plan_path,
+            negative_path=negative_plan_path,
+        )
         actual_counts = (bundle.train_samples, bundle.val_samples, bundle.test_samples)
         if min(actual_counts) <= 0:
             raise ValueError(
@@ -1046,10 +1801,10 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
         )
         pair_rows = []
         permutation_rows = []
-        for split, items in (
-            ("train", bundle.train_items),
-            ("val", bundle.val_items),
-            ("test", bundle.test_items),
+        for split, items, native_items in (
+            ("train", bundle.train_items, bundle.native_train_items),
+            ("val", bundle.val_items, bundle.native_val_items),
+            ("test", bundle.test_items, bundle.native_test_items),
         ):
             for sample in items:
                 pair_rows.append(
@@ -1078,12 +1833,22 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
                         "article_ids": json.dumps(sample.metadata["article_ids"]),
                     }
                 )
+            if split == "test":
+                continue
             shuffled_config = load_train_config(
                 fold_config_path,
-                overrides={"text_alignment_mode": "permuted"},
+                overrides={
+                    **_v3_preparation_overrides(validate_frozen_plans=True),
+                    "text_alignment_mode": "permuted",
+                },
             )
-            permuted_items = apply_text_alignment(shuffled_config, items, split=split)
-            for target, donor_view in zip(items, permuted_items):
+            permuted_items = apply_text_alignment(
+                shuffled_config,
+                native_items,
+                split=split,
+                alignment_plan=bundle.text_alignment_plans[split],
+            )
+            for target, donor_view in zip(native_items, permuted_items):
                 permutation_rows.append(
                     {
                         "fold": fold,
@@ -1115,6 +1880,13 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             "text_transform_sha256": sha256_file(transform_path),
             "surface_support_sha256": sha256_file(surface_support_path),
             "surface_support_path": str(surface_support_path),
+            "text_alignment_plan_path": str(alignment_plan_path),
+            "text_alignment_plan_sha256": sha256_file(alignment_plan_path),
+            "matching_negative_source_plan_path": str(negative_plan_path),
+            "matching_negative_source_plan_sha256": sha256_file(
+                negative_plan_path
+            ),
+            "matching_plan_audit": matching_plan_audit,
             "short_atm_range": float(fold_config.atm_short_range),
             "short_maturity_max_business_days": float(
                 fold_config.atm_short_max_days
@@ -1190,7 +1962,7 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "surface_model": surface_model,
             "source_workbook": str(source_workbook),
-            "source_workbook_sha256": sha256_file(source_workbook),
+            "source_workbook_sha256": source_workbook_sha256,
             "news_source_timezone": EXPECTED_NEWS_SOURCE_TIMEZONE,
             "text_lineage_manifest": str(text_audit_paths["manifest"]),
             "text_lineage_manifest_sha256": sha256_file(
@@ -1200,12 +1972,19 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             "short_atm_selection_sha256": sha256_file(
                 short_atm_selection_path
             ),
-            "models": list(VARIANTS),
+            "models": list(run_variants),
             "seeds": list(experiment_seeds),
+            "run_folds": list(run_folds),
+            "run_variants": list(run_variants),
             "folds": fold_validation,
             "expected_training_runs": (
-                len(FOLDS) * len(experiment_seeds) * len(VARIANTS)
+                len(run_folds) * len(experiment_seeds) * len(run_variants)
             ),
+            "superseded_experiment": {
+                "experiment_name": V2_DIAGNOSTIC_ARCHIVE,
+                "claim_scope": V2_DIAGNOSTIC_CLAIM_SCOPE,
+                "checkpoint_reuse_allowed": False,
+            },
         },
     )
     print(root)
@@ -1215,9 +1994,17 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
 def train_matrix(args: argparse.Namespace) -> Path:
     _assert_py312()
     root = _resolve_root(args.experiment_root)
-    _assert_frozen_v2_worktree(root)
-    experiment_seeds = _experiment_seeds(root)
-    selected_folds = [args.fold] if getattr(args, "fold", "") else list(FOLDS)
+    v3_design = _is_v3_design(root)
+    if v3_design:
+        verify_existing(argparse.Namespace(experiment_root=str(root)))
+    else:
+        _assert_frozen_v2_worktree(root)
+    run_folds, experiment_seeds, run_variants = _experiment_scope(root)
+    selected_folds = [args.fold] if getattr(args, "fold", "") else list(run_folds)
+    if any(fold not in run_folds for fold in selected_folds):
+        raise ValueError(
+            f"Requested folds {selected_folds} are outside frozen run_folds={run_folds}."
+        )
     requested_seed = getattr(args, "seed", None)
     if requested_seed is not None and int(requested_seed) not in experiment_seeds:
         raise ValueError(
@@ -1230,8 +2017,13 @@ def train_matrix(args: argparse.Namespace) -> Path:
         else list(experiment_seeds)
     )
     selected_variants = (
-        [args.variant] if getattr(args, "variant", "") else list(VARIANTS)
+        [args.variant] if getattr(args, "variant", "") else list(run_variants)
     )
+    if any(variant not in run_variants for variant in selected_variants):
+        raise ValueError(
+            "Requested variants are outside the frozen run scope: "
+            f"requested={selected_variants}, frozen={run_variants}."
+        )
     registry_rows: list[dict[str, Any]] = []
     for fold in selected_folds:
         fold_payload = _read_yaml(_fold_config(root, fold))
@@ -1239,7 +2031,27 @@ def train_matrix(args: argparse.Namespace) -> Path:
         expected_critic_mode = str(
             fold_training.get("critic_conditioning_mode", "projection")
         )
-        v2_matrix = expected_critic_mode.strip().lower() == "transition_matching"
+        v3_matrix = (
+            v3_design
+            and str(fold_training.get("training_protocol_version", ""))
+            == TRAINING_PROTOCOL_VERSION_V3
+        )
+        negative_plan_path = _config_artifact_path(
+            fold_training.get("matching_negative_source_plan_path")
+        )
+        alignment_plan_path = _config_artifact_path(
+            fold_training.get("text_alignment_plan_path")
+        )
+        negative_plan_sha256 = (
+            sha256_file(negative_plan_path)
+            if negative_plan_path is not None and negative_plan_path.is_file()
+            else ""
+        )
+        alignment_plan_sha256 = (
+            sha256_file(alignment_plan_path)
+            if alignment_plan_path is not None and alignment_plan_path.is_file()
+            else ""
+        )
         for seed in selected_seeds:
             parent_run = _completed_run(
                 root
@@ -1254,10 +2066,40 @@ def train_matrix(args: argparse.Namespace) -> Path:
                 else None
             )
             if parent_run is not None:
+                parent_fingerprint = ""
+                if v3_matrix:
+                    parent_overrides = _variant_overrides(
+                        PARENT_VARIANT,
+                        fold_config=fold_payload,
+                        output_root=(
+                            root
+                            / "training_runs"
+                            / PARENT_VARIANT
+                            / fold
+                            / f"seed_{seed}"
+                        ),
+                        seed=seed,
+                        parent_checkpoint=None,
+                    )
+                    parent_fingerprint = _run_fingerprint(
+                        root,
+                        fold=fold,
+                        seed=seed,
+                        variant=PARENT_VARIANT,
+                        training=fold_training,
+                        overrides=parent_overrides,
+                        parent_checkpoint_sha256="",
+                    )
                 _validate_run_protocol(
                     parent_run,
                     critic_mode=expected_critic_mode,
-                    require_schema5=v2_matrix,
+                    require_v3=v3_matrix,
+                    require_schema5=(
+                        not v3_matrix
+                        and expected_critic_mode.strip().lower()
+                        == "transition_matching"
+                    ),
+                    expected_fingerprint=parent_fingerprint,
                 )
             parent_checkpoint_sha256 = (
                 sha256_file(parent_checkpoint)
@@ -1266,15 +2108,85 @@ def train_matrix(args: argparse.Namespace) -> Path:
             )
             for variant in selected_variants:
                 output_root = root / "training_runs" / variant / fold / f"seed_{seed}"
+                continuation_anchor_epoch: int | None = None
+                if v3_matrix and variant in {
+                    TEXT_RESIDUAL_VARIANT,
+                    SHUFFLED_RESIDUAL_VARIANT,
+                }:
+                    continuation_run, continuation_anchor_epoch = _continuation_anchor(
+                        root,
+                        fold,
+                        seed,
+                    )
+                    continuation_overrides = _variant_overrides(
+                        CONTINUATION_VARIANT,
+                        fold_config=fold_payload,
+                        output_root=(
+                            root
+                            / "training_runs"
+                            / CONTINUATION_VARIANT
+                            / fold
+                            / f"seed_{seed}"
+                        ),
+                        seed=seed,
+                        parent_checkpoint=parent_checkpoint,
+                    )
+                    continuation_fingerprint = _run_fingerprint(
+                        root,
+                        fold=fold,
+                        seed=seed,
+                        variant=CONTINUATION_VARIANT,
+                        training=fold_training,
+                        overrides=continuation_overrides,
+                        parent_checkpoint_sha256=parent_checkpoint_sha256,
+                    )
+                    _validate_run_protocol(
+                        continuation_run,
+                        critic_mode=expected_critic_mode,
+                        require_v3=v3_matrix,
+                        expected_fingerprint=continuation_fingerprint,
+                    )
+                overrides = _variant_overrides(
+                    variant,
+                    fold_config=fold_payload,
+                    output_root=output_root,
+                    seed=seed,
+                    parent_checkpoint=parent_checkpoint,
+                    continuation_anchor_epoch=continuation_anchor_epoch,
+                )
+                run_fingerprint_sha256 = ""
+                if v3_matrix:
+                    run_fingerprint_sha256 = _run_fingerprint(
+                        root,
+                        fold=fold,
+                        seed=seed,
+                        variant=variant,
+                        training=fold_training,
+                        overrides=overrides,
+                        parent_checkpoint_sha256=(
+                            parent_checkpoint_sha256
+                            if variant in PAIRED_STAGE_B_VARIANTS
+                            else ""
+                        ),
+                    )
+                    overrides["run_fingerprint_sha256"] = run_fingerprint_sha256
                 completed = _completed_run(output_root)
                 if completed is not None:
+                    comparison_checkpoint, comparison_epoch = _comparison_checkpoint(
+                        completed,
+                        variant=variant,
+                        continuation_anchor_epoch=continuation_anchor_epoch,
+                        v3_protocol=v3_matrix,
+                    )
                     _validate_run_protocol(
                         completed,
                         critic_mode=_variant_critic_mode(
                             variant,
                             residual_critic_mode=expected_critic_mode,
                         ),
-                        require_schema5=v2_matrix,
+                        require_v3=v3_matrix,
+                        expected_fingerprint=run_fingerprint_sha256,
+                        checkpoint_path=comparison_checkpoint,
                     )
                     if variant == PARENT_VARIANT:
                         parent_checkpoint = completed / "checkpoints/film_wgan_best.pt"
@@ -1286,7 +2198,29 @@ def train_matrix(args: argparse.Namespace) -> Path:
                             "variant": variant,
                             "status": "reused",
                             "run_dir": str(completed),
-                            "checkpoint": str(completed / "checkpoints/film_wgan_best.pt"),
+                            "checkpoint": str(comparison_checkpoint),
+                            "epoch_policy": (
+                                EPOCH_POLICY_CONTINUATION_ANCHOR
+                                if v3_matrix
+                                else "legacy_best_checkpoint"
+                            ),
+                            "comparison_epoch": int(comparison_epoch),
+                            "comparison_checkpoint": str(comparison_checkpoint),
+                            "comparison_checkpoint_sha256": sha256_file(
+                                comparison_checkpoint
+                            ),
+                            "anchor_variant": (
+                                CONTINUATION_VARIANT
+                                if variant
+                                in {TEXT_RESIDUAL_VARIANT, SHUFFLED_RESIDUAL_VARIANT}
+                                and v3_matrix
+                                else ""
+                            ),
+                            "run_fingerprint_sha256": run_fingerprint_sha256,
+                            "matching_negative_source_plan_sha256": (
+                                negative_plan_sha256
+                            ),
+                            "text_alignment_plan_sha256": alignment_plan_sha256,
                             **_stage_registry_fields(
                                 variant,
                                 parent_checkpoint=parent_checkpoint,
@@ -1299,13 +2233,6 @@ def train_matrix(args: argparse.Namespace) -> Path:
                     raise RuntimeError(
                         f"Incomplete run exists under {output_root}; rerun with --resume to preserve it and restart."
                     )
-                overrides = _variant_overrides(
-                    variant,
-                    fold_config=fold_payload,
-                    output_root=output_root,
-                    seed=seed,
-                    parent_checkpoint=parent_checkpoint,
-                )
                 command = [
                     sys.executable,
                     "scripts/film_wgan/main.py",
@@ -1321,6 +2248,22 @@ def train_matrix(args: argparse.Namespace) -> Path:
                 completed = _completed_run(output_root)
                 if completed is None:
                     raise RuntimeError(f"Training finished without a best checkpoint: {output_root}")
+                comparison_checkpoint, comparison_epoch = _comparison_checkpoint(
+                    completed,
+                    variant=variant,
+                    continuation_anchor_epoch=continuation_anchor_epoch,
+                    v3_protocol=v3_matrix,
+                )
+                _validate_run_protocol(
+                    completed,
+                    critic_mode=_variant_critic_mode(
+                        variant,
+                        residual_critic_mode=expected_critic_mode,
+                    ),
+                    require_v3=v3_matrix,
+                    expected_fingerprint=run_fingerprint_sha256,
+                    checkpoint_path=comparison_checkpoint,
+                )
                 if variant == PARENT_VARIANT:
                     parent_checkpoint = completed / "checkpoints/film_wgan_best.pt"
                     parent_checkpoint_sha256 = sha256_file(parent_checkpoint)
@@ -1331,7 +2274,29 @@ def train_matrix(args: argparse.Namespace) -> Path:
                         "variant": variant,
                         "status": "completed",
                         "run_dir": str(completed),
-                        "checkpoint": str(completed / "checkpoints/film_wgan_best.pt"),
+                        "checkpoint": str(comparison_checkpoint),
+                        "epoch_policy": (
+                            EPOCH_POLICY_CONTINUATION_ANCHOR
+                            if v3_matrix
+                            else "legacy_best_checkpoint"
+                        ),
+                        "comparison_epoch": int(comparison_epoch),
+                        "comparison_checkpoint": str(comparison_checkpoint),
+                        "comparison_checkpoint_sha256": sha256_file(
+                            comparison_checkpoint
+                        ),
+                        "anchor_variant": (
+                            CONTINUATION_VARIANT
+                            if variant
+                            in {TEXT_RESIDUAL_VARIANT, SHUFFLED_RESIDUAL_VARIANT}
+                            and v3_matrix
+                            else ""
+                        ),
+                        "run_fingerprint_sha256": run_fingerprint_sha256,
+                        "matching_negative_source_plan_sha256": (
+                            negative_plan_sha256
+                        ),
+                        "text_alignment_plan_sha256": alignment_plan_sha256,
                         **_stage_registry_fields(
                             variant,
                             parent_checkpoint=parent_checkpoint,
@@ -1348,11 +2313,11 @@ def train_matrix(args: argparse.Namespace) -> Path:
 
 def monitor(args: argparse.Namespace) -> Path:
     root = _resolve_root(args.experiment_root)
-    experiment_seeds = _experiment_seeds(root)
+    run_folds, experiment_seeds, run_variants = _experiment_scope(root)
     rows = []
-    for fold in FOLDS:
+    for fold in run_folds:
         for seed in experiment_seeds:
-            for variant in VARIANTS:
+            for variant in run_variants:
                 output_root = root / "training_runs" / variant / fold / f"seed_{seed}"
                 runs = _run_dirs(output_root)
                 latest = runs[-1] if runs else None
@@ -1403,18 +2368,196 @@ def _cached_sha256(path: Path | None, cache: dict[Path, str]) -> str:
     return cache[path]
 
 
+_RUN_FINGERPRINT_EXCLUDED_CONFIG_FIELDS = {
+    "checkpoints_path",
+    "metrics_path",
+    "output_root",
+    "run_fingerprint_sha256",
+}
+
+
+def _frozen_commit(root: Path) -> str:
+    path = root / "inputs/git_state.txt"
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    first_line = path.read_text(encoding="utf-8").splitlines()[0]
+    if not first_line.startswith("commit=") or not first_line.removeprefix("commit=").strip():
+        raise ValueError(f"Invalid frozen git state: {path}")
+    return first_line.removeprefix("commit=").strip()
+
+
+def _run_fingerprint(
+    root: Path,
+    *,
+    fold: str,
+    seed: int,
+    variant: str,
+    training: dict[str, Any],
+    overrides: dict[str, Any],
+    parent_checkpoint_sha256: str,
+) -> str:
+    """Hash the complete scientific identity of an RQ1 training run."""
+
+    resolved = {**training, **overrides}
+    semantic_config = {
+        key: value
+        for key, value in resolved.items()
+        if key not in _RUN_FINGERPRINT_EXCLUDED_CONFIG_FIELDS
+    }
+    artifact_fields = (
+        "data_path",
+        "news_workbook_path",
+        "split_manifest_path",
+        "text_transform_path",
+        "surface_support_path",
+        "text_alignment_plan_path",
+        "matching_negative_source_plan_path",
+    )
+    artifact_hashes: dict[str, str] = {}
+    for field in artifact_fields:
+        path = _config_artifact_path(resolved.get(field))
+        artifact_hashes[field] = "" if path is None else sha256_file(path)
+    design = _experiment_design(root)
+    payload = {
+        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION_V3,
+        "training_protocol_version": TRAINING_PROTOCOL_VERSION_V3,
+        "critic_architecture_version": CRITIC_ARCHITECTURE_VERSION_TRANSITION_MATCHING,
+        "matching_negative_source_plan_version": MATCHING_NEGATIVE_SOURCE_PLAN_VERSION,
+        "text_alignment_plan_version": TEXT_ALIGNMENT_PLAN_VERSION,
+        "epoch_policy": EPOCH_POLICY_CONTINUATION_ANCHOR,
+        "experiment_design_schema_version": int(
+            design.get("experiment_design_schema_version", 0)
+        ),
+        "frozen_commit": _frozen_commit(root),
+        "fold": str(fold),
+        "seed": int(seed),
+        "variant": str(variant),
+        "training_stage": VARIANT_STAGES[variant],
+        "parent_checkpoint_sha256": str(parent_checkpoint_sha256),
+        "epoch_anchor": {
+            "policy": EPOCH_POLICY_CONTINUATION_ANCHOR,
+            "anchor_variant": (
+                CONTINUATION_VARIANT
+                if variant in {TEXT_RESIDUAL_VARIANT, SHUFFLED_RESIDUAL_VARIANT}
+                else ""
+            ),
+            "comparison_epoch": (
+                int(overrides["num_epochs"])
+                if variant in {TEXT_RESIDUAL_VARIANT, SHUFFLED_RESIDUAL_VARIANT}
+                else None
+            ),
+        },
+        "semantic_config": semantic_config,
+        "artifact_sha256": artifact_hashes,
+    }
+    return canonical_payload_sha256(payload)
+
+
+def _checkpoint_protocol_fields(checkpoint_path: Path) -> dict[str, Any]:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    return {
+        "checkpoint_schema_version": int(
+            checkpoint.get("checkpoint_schema_version", 0)
+        ),
+        "training_protocol_version": str(
+            checkpoint.get("training_protocol_version", "")
+        ),
+        "critic_architecture_version": str(
+            checkpoint.get("critic_architecture_version", "")
+        ),
+        "run_fingerprint_sha256": str(
+            checkpoint.get("run_fingerprint_sha256", "")
+        ),
+        "epoch": int(checkpoint.get("epoch", 0)),
+        "initial_generator_state_sha256": str(
+            checkpoint.get("initial_generator_state_sha256", "")
+        ),
+        "initial_critic_state_sha256": str(
+            checkpoint.get("initial_critic_state_sha256", "")
+        ),
+        "text_alignment_plan_sha256": str(
+            checkpoint.get("text_alignment_plan_sha256", "")
+        ),
+        "matching_negative_source_plan_sha256": str(
+            checkpoint.get("matching_negative_source_plan_sha256", "")
+        ),
+        "scheduler_horizon_epochs": int(
+            checkpoint.get("scheduler_horizon_epochs", 0)
+        ),
+    }
+
+
+def _scheduler_trace_through_epoch(
+    run_dir: Path,
+    *,
+    comparison_epoch: int,
+    require_exact_end: bool,
+) -> tuple[pd.DataFrame, str]:
+    """Load the frozen learning-rate trace used for a paired Stage-B comparison."""
+
+    metrics_path = run_dir / "metrics/training_metrics.csv"
+    if not metrics_path.is_file():
+        raise FileNotFoundError(metrics_path)
+    metrics = pd.read_csv(metrics_path)
+    required = {"epoch", "lr_generator", "lr_critic"}
+    missing = sorted(required - set(metrics.columns))
+    if missing:
+        raise ValueError(
+            f"Training metrics omit scheduler trace columns {missing}: {metrics_path}"
+        )
+    numeric = metrics.loc[:, ["epoch", "lr_generator", "lr_critic"]].copy()
+    for column in numeric.columns:
+        numeric[column] = pd.to_numeric(numeric[column], errors="coerce")
+    if numeric.isna().any().any() or not np.isfinite(
+        numeric[["lr_generator", "lr_critic"]].to_numpy(dtype=np.float64)
+    ).all():
+        raise ValueError(f"Scheduler trace contains non-finite values: {metrics_path}")
+    epochs = numeric["epoch"].to_numpy(dtype=np.float64)
+    if not np.equal(epochs, np.floor(epochs)).all():
+        raise ValueError(f"Scheduler trace contains non-integer epochs: {metrics_path}")
+    numeric["epoch"] = epochs.astype(np.int64)
+    if numeric["epoch"].duplicated().any():
+        raise ValueError(f"Scheduler trace contains duplicate epochs: {metrics_path}")
+    comparison_epoch = int(comparison_epoch)
+    expected_epochs = list(range(1, comparison_epoch + 1))
+    trace = numeric.loc[numeric["epoch"] <= comparison_epoch].sort_values(
+        "epoch"
+    )
+    if trace["epoch"].tolist() != expected_epochs:
+        raise ValueError(
+            "Scheduler trace must contain every epoch 1..E exactly once: "
+            f"E={comparison_epoch} path={metrics_path}"
+        )
+    if require_exact_end and numeric["epoch"].tolist() != expected_epochs:
+        raise ValueError(
+            "Exact-E Stage-B arm contains epochs outside 1..E: "
+            f"E={comparison_epoch} path={metrics_path}"
+        )
+    trace_payload = [
+        {
+            "epoch": int(row.epoch),
+            "lr_generator": float(row.lr_generator),
+            "lr_critic": float(row.lr_critic),
+        }
+        for row in trace.itertuples(index=False)
+    ]
+    return trace, canonical_payload_sha256(trace_payload)
+
+
 def _paired_stage_audit(
     selected: pd.DataFrame,
     resolved_configs: dict[tuple[str, int, str], dict[str, Any]],
     *,
     seeds: Sequence[int] | None = None,
+    folds: Sequence[str] | None = None,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     selected_seeds = _normalize_seeds(seeds or SEEDS)
+    selected_folds = tuple(str(value) for value in (folds or FOLDS))
     selected_by_run = selected.set_index(["fold", "seed", "variant"], verify_integrity=True)
     sha_cache: dict[Path, str] = {}
     audit_rows: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
-    for fold in FOLDS:
+    for fold in selected_folds:
         for seed in selected_seeds:
             parent_key = (fold, seed, PARENT_VARIANT)
             parent_row = selected_by_run.loc[parent_key]
@@ -1471,6 +2614,145 @@ def _paired_stage_audit(
                     ),
                 },
             }
+            v3_protocol = (
+                str(matched_training.get("training_protocol_version", ""))
+                == TRAINING_PROTOCOL_VERSION_V3
+            )
+            stage_checkpoint_fields: dict[str, dict[str, Any]] = {}
+            expected_initial_generator_sha = ""
+            expected_initial_critic_sha = ""
+            expected_alignment_plan_sha = ""
+            expected_negative_plan_sha = ""
+            continuation_epoch = 0
+            scheduler_trace_hashes: dict[str, str] = {}
+            scheduler_trace_errors: dict[str, list[str]] = {
+                variant: [] for variant in PAIRED_STAGE_B_VARIANTS
+            }
+            if v3_protocol:
+                missing_stage_rows = [
+                    variant
+                    for variant in PAIRED_STAGE_B_VARIANTS
+                    if (fold, seed, variant) not in selected_by_run.index
+                ]
+                if missing_stage_rows:
+                    failures.append(
+                        {
+                            "fold": fold,
+                            "seed": int(seed),
+                            "variant": "stage_b_set",
+                            "errors": [
+                                f"missing_selected_variant:{variant}"
+                                for variant in missing_stage_rows
+                            ],
+                        }
+                    )
+                    continue
+                stage_checkpoint_fields = {
+                    variant: _checkpoint_protocol_fields(
+                        Path(
+                            str(
+                                selected_by_run.loc[
+                                    (fold, seed, variant), "checkpoint_path"
+                                ]
+                            )
+                        )
+                    )
+                    for variant in PAIRED_STAGE_B_VARIANTS
+                }
+                expected_initial_generator_sha = stage_checkpoint_fields[
+                    CONTINUATION_VARIANT
+                ]["initial_generator_state_sha256"]
+                expected_initial_critic_sha = stage_checkpoint_fields[
+                    CONTINUATION_VARIANT
+                ]["initial_critic_state_sha256"]
+                if "text_alignment_plan_sha256" in selected_by_run.columns:
+                    expected_alignment_plan_sha = str(
+                        selected_by_run.loc[
+                            (fold, seed, CONTINUATION_VARIANT),
+                            "text_alignment_plan_sha256",
+                        ]
+                    )
+                if (
+                    "matching_negative_source_plan_sha256"
+                    in selected_by_run.columns
+                ):
+                    expected_negative_plan_sha = str(
+                        selected_by_run.loc[
+                            (fold, seed, CONTINUATION_VARIANT),
+                            "matching_negative_source_plan_sha256",
+                        ]
+                    )
+                continuation_epoch = int(
+                    selected_by_run.loc[
+                        (fold, seed, CONTINUATION_VARIANT), "selected_epoch"
+                    ]
+                )
+                scheduler_traces: dict[str, pd.DataFrame] = {}
+                for variant in PAIRED_STAGE_B_VARIANTS:
+                    selected_row = selected_by_run.loc[(fold, seed, variant)]
+                    run_dir = Path(str(selected_row["run_dir"])).resolve()
+                    expected_checkpoint_name = (
+                        "film_wgan_best.pt"
+                        if variant == CONTINUATION_VARIANT
+                        else "film_wgan_final.pt"
+                    )
+                    expected_checkpoint_path = (
+                        run_dir / "checkpoints" / expected_checkpoint_name
+                    ).resolve()
+                    selected_checkpoint_path = Path(
+                        str(selected_row["checkpoint_path"])
+                    ).resolve()
+                    if selected_checkpoint_path != expected_checkpoint_path:
+                        scheduler_trace_errors[variant].append(
+                            "comparison_checkpoint_role_mismatch"
+                        )
+                    if int(selected_row["selected_epoch"]) != continuation_epoch:
+                        scheduler_trace_errors[variant].append(
+                            "comparison_epoch_mismatch"
+                        )
+                    if variant == CONTINUATION_VARIANT:
+                        try:
+                            if _best_epoch(run_dir) != continuation_epoch:
+                                scheduler_trace_errors[variant].append(
+                                    "continuation_best_epoch_mismatch"
+                                )
+                        except (FileNotFoundError, KeyError, TypeError, ValueError) as exc:
+                            scheduler_trace_errors[variant].append(
+                                "continuation_best_epoch_unreadable:"
+                                f"{type(exc).__name__}"
+                            )
+                    try:
+                        trace, trace_sha = _scheduler_trace_through_epoch(
+                            run_dir,
+                            comparison_epoch=continuation_epoch,
+                            require_exact_end=(variant != CONTINUATION_VARIANT),
+                        )
+                    except (FileNotFoundError, KeyError, TypeError, ValueError) as exc:
+                        scheduler_trace_errors[variant].append(
+                            f"scheduler_trace_unreadable:{type(exc).__name__}"
+                        )
+                    else:
+                        scheduler_traces[variant] = trace
+                        scheduler_trace_hashes[variant] = trace_sha
+                reference_trace = scheduler_traces.get(CONTINUATION_VARIANT)
+                if reference_trace is not None:
+                    reference_values = reference_trace[
+                        ["epoch", "lr_generator", "lr_critic"]
+                    ].to_numpy(dtype=np.float64)
+                    for variant in (
+                        TEXT_RESIDUAL_VARIANT,
+                        SHUFFLED_RESIDUAL_VARIANT,
+                    ):
+                        candidate_trace = scheduler_traces.get(variant)
+                        if candidate_trace is None:
+                            continue
+                        candidate_values = candidate_trace[
+                            ["epoch", "lr_generator", "lr_critic"]
+                        ].to_numpy(dtype=np.float64)
+                        if not np.array_equal(candidate_values, reference_values):
+                            scheduler_trace_errors[variant].append(
+                                "scheduler_trace_mismatch"
+                            )
 
             for variant in PAIRED_STAGE_B_VARIANTS:
                 key = (fold, seed, variant)
@@ -1483,6 +2765,8 @@ def _paired_stage_audit(
                 transform_path = _config_artifact_path(training.get("text_transform_path"))
                 transform_sha = _cached_sha256(transform_path, sha_cache)
                 errors: list[str] = []
+                checkpoint_fields = stage_checkpoint_fields.get(variant, {})
+                errors.extend(scheduler_trace_errors.get(variant, []))
 
                 if configured_parent_path != expected_parent_path:
                     errors.append("parent_checkpoint_path_mismatch")
@@ -1508,6 +2792,68 @@ def _paired_stage_audit(
                     != expected
                 )
                 errors.extend(f"config_mismatch:{field}" for field in mismatched_fields)
+                if v3_protocol:
+                    if (
+                        not expected_initial_generator_sha
+                        or checkpoint_fields["initial_generator_state_sha256"]
+                        != expected_initial_generator_sha
+                    ):
+                        errors.append("initial_generator_state_sha256_mismatch")
+                    if (
+                        not expected_initial_critic_sha
+                        or checkpoint_fields["initial_critic_state_sha256"]
+                        != expected_initial_critic_sha
+                    ):
+                        errors.append("initial_critic_state_sha256_mismatch")
+                    selected_row = selected_by_run.loc[(fold, seed, variant)]
+                    if (
+                        not expected_alignment_plan_sha
+                        or str(selected_row["text_alignment_plan_sha256"])
+                        != expected_alignment_plan_sha
+                        or checkpoint_fields["text_alignment_plan_sha256"]
+                        != expected_alignment_plan_sha
+                    ):
+                        errors.append("text_alignment_plan_sha256_mismatch")
+                    if (
+                        not expected_negative_plan_sha
+                        or str(
+                            selected_row[
+                                "matching_negative_source_plan_sha256"
+                            ]
+                        )
+                        != expected_negative_plan_sha
+                        or checkpoint_fields[
+                            "matching_negative_source_plan_sha256"
+                        ]
+                        != expected_negative_plan_sha
+                    ):
+                        errors.append(
+                            "matching_negative_source_plan_sha256_mismatch"
+                        )
+                    expected_schedule = {
+                        "scheduler_horizon_epochs": 100,
+                        "early_stopping_patience": 15,
+                        "num_epochs": (
+                            100
+                            if variant == CONTINUATION_VARIANT
+                            else continuation_epoch
+                        ),
+                        "use_early_stopping": (
+                            variant == CONTINUATION_VARIANT
+                        ),
+                    }
+                    for field, expected in expected_schedule.items():
+                        if training.get(field) != expected:
+                            errors.append(f"schedule_mismatch:{field}")
+                    if checkpoint_fields["scheduler_horizon_epochs"] != 100:
+                        errors.append("checkpoint_scheduler_horizon_mismatch")
+                    if (
+                        variant
+                        in {TEXT_RESIDUAL_VARIANT, SHUFFLED_RESIDUAL_VARIANT}
+                        and int(selected_row["selected_epoch"])
+                        != continuation_epoch
+                    ):
+                        errors.append("comparison_epoch_mismatch")
                 audit_rows.append(
                     {
                         "fold": fold,
@@ -1529,6 +2875,31 @@ def _paired_stage_audit(
                         ),
                         "expected_text_transform_sha256": expected_transform_sha,
                         "configured_text_transform_sha256": transform_sha,
+                        "initial_generator_state_sha256": checkpoint_fields.get(
+                            "initial_generator_state_sha256", ""
+                        ),
+                        "initial_critic_state_sha256": checkpoint_fields.get(
+                            "initial_critic_state_sha256", ""
+                        ),
+                        "text_alignment_plan_sha256": checkpoint_fields.get(
+                            "text_alignment_plan_sha256", ""
+                        ),
+                        "matching_negative_source_plan_sha256": (
+                            checkpoint_fields.get(
+                                "matching_negative_source_plan_sha256", ""
+                            )
+                        ),
+                        "comparison_epoch": int(
+                            selected_by_run.loc[
+                                (fold, seed, variant), "selected_epoch"
+                            ]
+                            if (fold, seed, variant) in selected_by_run.index
+                            and "selected_epoch" in selected_by_run.columns
+                            else 0
+                        ),
+                        "scheduler_trace_sha256": scheduler_trace_hashes.get(
+                            variant, ""
+                        ),
                         "status": "ok" if not errors else "failed",
                         "errors": json.dumps(errors),
                     }
@@ -1545,57 +2916,162 @@ def _paired_stage_audit(
     return pd.DataFrame(audit_rows), failures
 
 
+def _validation_metric_at_epoch(
+    run_dir: Path,
+    *,
+    epoch: int,
+    metric: str = "val_mae",
+) -> float:
+    metrics_path = run_dir / "metrics/training_metrics.csv"
+    if not metrics_path.is_file():
+        raise FileNotFoundError(metrics_path)
+    metrics = pd.read_csv(metrics_path)
+    if "epoch" not in metrics.columns or metric not in metrics.columns:
+        raise ValueError(f"Training metrics omit epoch/{metric}: {metrics_path}")
+    selected = metrics[
+        pd.to_numeric(metrics["epoch"], errors="coerce") == int(epoch)
+    ]
+    if len(selected) != 1:
+        raise ValueError(
+            f"Expected one {metric} row at epoch={epoch}: {metrics_path}"
+        )
+    return float(selected.iloc[0][metric])
+
+
 def collect_checkpoints(args: argparse.Namespace) -> Path:
     root = _resolve_root(args.experiment_root)
-    experiment_seeds = _experiment_seeds(root)
+    v3_design = _is_v3_design(root)
+    if v3_design:
+        verify_existing(argparse.Namespace(experiment_root=str(root)))
+    else:
+        _assert_frozen_v2_worktree(root)
+    run_folds, experiment_seeds, run_variants = _experiment_scope(root)
     rows = []
     resolved_configs: dict[tuple[str, int, str], dict[str, Any]] = {}
     artifact_sha_cache: dict[Path, str] = {}
-    for fold in FOLDS:
+    for fold in run_folds:
+        fold_payload = _read_yaml(_fold_config(root, fold))
+        fold_training = dict(fold_payload.get("training") or fold_payload)
+        residual_critic_mode = str(
+            fold_training.get("critic_conditioning_mode", "projection")
+        )
         for seed in experiment_seeds:
-            for variant in VARIANTS:
+            parent_run = _completed_run(
+                root
+                / "training_runs"
+                / PARENT_VARIANT
+                / fold
+                / f"seed_{seed}"
+            )
+            if parent_run is None:
+                raise FileNotFoundError(
+                    f"Missing completed parent run: {fold}/seed_{seed}"
+                )
+            parent_checkpoint = parent_run / "checkpoints/film_wgan_best.pt"
+            parent_checkpoint_sha256 = sha256_file(parent_checkpoint)
+            continuation_anchor_epoch: int | None = None
+            if v3_design:
+                _continuation_run, continuation_anchor_epoch = _continuation_anchor(
+                    root,
+                    fold,
+                    seed,
+                )
+            for variant in run_variants:
                 run_root = root / "training_runs" / variant / fold / f"seed_{seed}"
                 run_dir = _completed_run(run_root)
                 if run_dir is None:
                     raise FileNotFoundError(f"Missing completed run: {variant}/{fold}/seed_{seed}")
-                resolved_fold = _read_yaml(_fold_config(root, fold))
-                resolved_fold_training = dict(
-                    resolved_fold.get("training") or resolved_fold
+                variant_anchor_epoch = (
+                    continuation_anchor_epoch
+                    if variant
+                    in {TEXT_RESIDUAL_VARIANT, SHUFFLED_RESIDUAL_VARIANT}
+                    else None
                 )
+                overrides = _variant_overrides(
+                    variant,
+                    fold_config=fold_payload,
+                    output_root=run_root,
+                    seed=seed,
+                    parent_checkpoint=(
+                        parent_checkpoint
+                        if variant in PAIRED_STAGE_B_VARIANTS
+                        else None
+                    ),
+                    continuation_anchor_epoch=variant_anchor_epoch,
+                )
+                run_fingerprint_sha256 = ""
+                if v3_design:
+                    run_fingerprint_sha256 = _run_fingerprint(
+                        root,
+                        fold=fold,
+                        seed=seed,
+                        variant=variant,
+                        training=fold_training,
+                        overrides=overrides,
+                        parent_checkpoint_sha256=(
+                            parent_checkpoint_sha256
+                            if variant in PAIRED_STAGE_B_VARIANTS
+                            else ""
+                        ),
+                    )
+                checkpoint, epoch = _comparison_checkpoint(
+                    run_dir,
+                    variant=variant,
+                    continuation_anchor_epoch=variant_anchor_epoch,
+                    v3_protocol=v3_design,
+                )
+                if epoch <= 10:
+                    raise ValueError(
+                        f"Selected checkpoint must be after epoch 10: {run_dir} epoch={epoch}"
+                    )
                 _validate_run_protocol(
                     run_dir,
                     critic_mode=_variant_critic_mode(
                         variant,
-                        residual_critic_mode=str(
-                            resolved_fold_training.get(
-                                "critic_conditioning_mode",
-                                "projection",
-                            )
-                        ),
+                        residual_critic_mode=residual_critic_mode,
                     ),
+                    require_v3=v3_design,
                     require_schema5=(
-                        str(
-                            resolved_fold_training.get(
-                                "critic_conditioning_mode",
-                                "projection",
-                            )
-                        ).strip().lower()
+                        not v3_design
+                        and residual_critic_mode.strip().lower()
                         == "transition_matching"
                     ),
+                    expected_fingerprint=run_fingerprint_sha256,
+                    checkpoint_path=checkpoint,
                 )
                 best = json.loads((run_dir / "metrics/best_checkpoint.json").read_text(encoding="utf-8"))
-                epoch = int(best["best_epoch"])
-                if epoch <= 10:
-                    raise ValueError(f"Selected checkpoint must be after epoch 10: {run_dir} epoch={epoch}")
-                checkpoint = run_dir / "checkpoints/film_wgan_best.pt"
                 resolved_config_path = run_dir / "metrics/training_resolved_config.yaml"
                 resolved_payload = _read_yaml(resolved_config_path)
                 resolved_configs[(fold, seed, variant)] = resolved_payload
                 resolved_training = dict(resolved_payload.get("training") or resolved_payload)
+                if v3_design:
+                    if (
+                        str(resolved_training.get("run_fingerprint_sha256", ""))
+                        != run_fingerprint_sha256
+                    ):
+                        raise ValueError(
+                            f"Resolved run fingerprint mismatch: {variant}/{fold}/seed_{seed}"
+                        )
+                    mismatched_overrides = sorted(
+                        key
+                        for key, expected in overrides.items()
+                        if resolved_training.get(key) != expected
+                    )
+                    if mismatched_overrides:
+                        raise ValueError(
+                            "Resolved config differs from frozen v3 orchestration for "
+                            f"{variant}/{fold}/seed_{seed}: {mismatched_overrides}"
+                        )
                 configured_parent_path = _config_artifact_path(
                     resolved_training.get("initial_generator_checkpoint_path")
                 )
                 transform_path = _config_artifact_path(resolved_training.get("text_transform_path"))
+                alignment_path = _config_artifact_path(
+                    resolved_training.get("text_alignment_plan_path")
+                )
+                negative_path = _config_artifact_path(
+                    resolved_training.get("matching_negative_source_plan_path")
+                )
                 rows.append(
                     {
                         "fold": fold,
@@ -1615,8 +3091,35 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
                             transform_path,
                             artifact_sha_cache,
                         ),
+                        "epoch_policy": (
+                            EPOCH_POLICY_CONTINUATION_ANCHOR
+                            if v3_design
+                            else "legacy_best_checkpoint"
+                        ),
+                        "anchor_variant": (
+                            CONTINUATION_VARIANT
+                            if v3_design
+                            and variant
+                            in {TEXT_RESIDUAL_VARIANT, SHUFFLED_RESIDUAL_VARIANT}
+                            else ""
+                        ),
+                        "comparison_epoch": epoch,
+                        "comparison_checkpoint": str(checkpoint),
+                        "comparison_checkpoint_sha256": sha256_file(checkpoint),
+                        "run_fingerprint_sha256": run_fingerprint_sha256,
+                        "text_alignment_plan_sha256": _cached_sha256(
+                            alignment_path,
+                            artifact_sha_cache,
+                        ),
+                        "matching_negative_source_plan_sha256": _cached_sha256(
+                            negative_path,
+                            artifact_sha_cache,
+                        ),
                         "selected_epoch": epoch,
-                        "validation_surface_mae": float(best["best_metric"]),
+                        "validation_surface_mae": _validation_metric_at_epoch(
+                            run_dir,
+                            epoch=epoch,
+                        ),
                         "checkpoint_metric": str(best["checkpoint_metric"]),
                         "checkpoint_path": str(checkpoint),
                         "checkpoint_sha256": sha256_file(checkpoint),
@@ -1642,16 +3145,21 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
         "output_root",
         "checkpoints_path",
         "metrics_path",
+        "num_epochs",
+        "scheduler_horizon_epochs",
+        "use_early_stopping",
+        "early_stopping_patience",
+        "run_fingerprint_sha256",
     }
     audit_rows = []
     failures = []
-    for fold in FOLDS:
+    for fold in run_folds:
         reference = resolved_configs[
             (fold, experiment_seeds[0], "pair_pca_no_text_residual")
         ]
         reference = dict(reference.get("training") or reference)
         for seed in experiment_seeds:
-            for variant in VARIANTS:
+            for variant in run_variants:
                 candidate_raw = resolved_configs[(fold, seed, variant)]
                 candidate = dict(candidate_raw.get("training") or candidate_raw)
                 differing = sorted(
@@ -1686,6 +3194,7 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
         frame,
         resolved_configs,
         seeds=experiment_seeds,
+        folds=run_folds,
     )
     paired_stage_audit.to_csv(
         root / "checkpoint_selection/paired_stage_validation.csv",
@@ -1710,9 +3219,76 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
     return root
 
 
+_V3_FROZEN_GENERATE_FIELDS = (
+    "evaluation_noise_seed",
+    "mc_samples",
+    "reweight_beta_mode",
+    "reweight_beta",
+    "quantiles",
+    "calibration_levels",
+    "arbitrage_violation_tolerance",
+    "aggregation_mode",
+    "residual_blend_alpha",
+    "save_json",
+    "save_plots",
+    "save_full_atm_timeseries",
+)
+
+
+def _materialize_generation_config(
+    run_dir: Path,
+    *,
+    frozen_generate: dict[str, Any],
+    require_explicit_v3_fields: bool,
+) -> tuple[Path, dict[str, Any]]:
+    """Merge one run's flat training snapshot with the frozen sample protocol.
+
+    Training writes only the resolved ``training`` section.  Passing that file
+    directly to ``generate-result`` silently falls back to sample defaults for
+    fields such as ``reweight_beta``.  Persist a merged config so list-valued
+    fields and every other frozen generation value reach the actual CLI.
+    """
+
+    if require_explicit_v3_fields:
+        missing = sorted(
+            field for field in _V3_FROZEN_GENERATE_FIELDS if field not in frozen_generate
+        )
+        if missing:
+            raise ValueError(
+                "The frozen v3 generate_result protocol omits required fields: "
+                f"{missing}."
+            )
+    resolved_path = run_dir / "metrics/training_resolved_config.yaml"
+    resolved_payload = _read_yaml(resolved_path)
+    resolved_training = (
+        dict(resolved_payload["training"])
+        if "training" in resolved_payload
+        else dict(resolved_payload)
+    )
+    resolved_sample = config_to_dict(
+        build_sample_config(
+            training_values=resolved_training,
+            generate_values=frozen_generate,
+        )
+    )
+    target = run_dir / "metrics/validation_pilot_generate_config.yaml"
+    _write_yaml(
+        target,
+        {
+            "training": resolved_training,
+            "generate_result": resolved_sample,
+        },
+    )
+    return target, resolved_sample
+
+
 def generate_matrix(args: argparse.Namespace) -> Path:
     _assert_py312()
     root = _resolve_root(args.experiment_root)
+    v3_design = _is_v3_design(root)
+    if v3_design:
+        verify_existing(argparse.Namespace(experiment_root=str(root)))
+    run_folds, experiment_seeds, run_variants = _experiment_scope(root)
     frozen_config = _read_yaml(
         root / "inputs/configs/train_rq1_pair_textbase.yaml"
     )
@@ -1721,6 +3297,11 @@ def generate_matrix(args: argparse.Namespace) -> Path:
     if generation_split not in {"val", "test"}:
         raise ValueError(
             "RQ1 matrix generation supports only an explicit val or test split."
+        )
+    if v3_design and generation_split != "val":
+        raise RuntimeError(
+            "The v3 validation pilot is locked to split=val; outer-test "
+            "generation is forbidden in this experiment root."
         )
     generation_output_dir = str(
         generate_config.get(
@@ -1749,14 +3330,98 @@ def generate_matrix(args: argparse.Namespace) -> Path:
     if not selected_path.is_file():
         collect_checkpoints(argparse.Namespace(experiment_root=str(root)))
     selected = pd.read_csv(selected_path)
+    if v3_design:
+        expected_keys = {
+            (fold, int(seed), variant)
+            for fold in run_folds
+            for seed in experiment_seeds
+            for variant in run_variants
+        }
+        observed_keys = {
+            (str(row.fold), int(row.seed), str(row.variant))
+            for row in selected.itertuples(index=False)
+        }
+        if observed_keys != expected_keys or len(selected) != len(expected_keys):
+            raise ValueError(
+                "Selected v3 checkpoints do not exactly match the frozen run scope."
+            )
     registry_rows = []
     for row in selected.itertuples(index=False):
         run_dir = Path(row.run_dir)
+        checkpoint_path = Path(row.checkpoint_path)
+        checkpoint_sha256 = sha256_file(checkpoint_path)
+        generation_config_path, resolved_generate_config = (
+            _materialize_generation_config(
+                run_dir,
+                frozen_generate=generate_config,
+                require_explicit_v3_fields=v3_design,
+            )
+        )
+        resolved_payload = _read_yaml(
+            run_dir / "metrics/training_resolved_config.yaml"
+        )
+        resolved_training = dict(
+            resolved_payload.get("training") or resolved_payload
+        )
+        effective_generate_config = {
+            **resolved_generate_config,
+            "checkpoint_path": str(checkpoint_path),
+        }
+        generation_config_sha256 = sha256_file(generation_config_path)
+        if v3_design:
+            if checkpoint_sha256 != str(row.checkpoint_sha256):
+                raise ValueError(
+                    f"Selected checkpoint SHA changed before generation: {checkpoint_path}"
+                )
+            expected_fingerprint = str(row.run_fingerprint_sha256)
+            if (
+                str(resolved_training.get("run_fingerprint_sha256", ""))
+                != expected_fingerprint
+            ):
+                raise ValueError(
+                    f"Resolved fingerprint changed before generation: {run_dir}"
+                )
+            _validate_run_protocol(
+                run_dir,
+                critic_mode=str(
+                    resolved_training.get(
+                        "critic_conditioning_mode",
+                        "transition_matching",
+                    )
+                ),
+                require_v3=True,
+                expected_fingerprint=expected_fingerprint,
+                checkpoint_path=checkpoint_path,
+            )
         output_dir = run_dir / generation_output_dir
         summary_path = output_dir / "summary.csv"
+        generation_fingerprint_sha256 = ""
+        generation_fingerprint_path = output_dir / "generation_fingerprint.json"
+        generation_fingerprint_valid = not v3_design
+        if v3_design:
+            generation_fingerprint_sha256 = canonical_payload_sha256(
+                {
+                    "run_fingerprint_sha256": str(row.run_fingerprint_sha256),
+                    "checkpoint_sha256": checkpoint_sha256,
+                    "generation_config_sha256": generation_config_sha256,
+                    "effective_generate_config": effective_generate_config,
+                }
+            )
+            if generation_fingerprint_path.is_file():
+                recorded_generation = json.loads(
+                    generation_fingerprint_path.read_text(encoding="utf-8")
+                )
+                generation_fingerprint_valid = (
+                    str(recorded_generation.get("generation_fingerprint_sha256", ""))
+                    == generation_fingerprint_sha256
+                )
         split_index = 1 if generation_split == "val" else 2
         expected = _fold_counts(root, str(row.fold))[split_index]
-        if summary_path.is_file() and len(pd.read_csv(summary_path)) == expected:
+        if (
+            summary_path.is_file()
+            and len(pd.read_csv(summary_path)) == expected
+            and generation_fingerprint_valid
+        ):
             status = "reused"
         else:
             command = [
@@ -1764,20 +3429,9 @@ def generate_matrix(args: argparse.Namespace) -> Path:
                 "scripts/film_wgan/main.py",
                 "generate-result",
                 "--config",
-                str(run_dir / "metrics/training_resolved_config.yaml"),
+                str(generation_config_path),
                 "--checkpoint",
-                str(row.checkpoint_path),
-                "--output-dir",
-                generation_output_dir,
-                "--split",
-                generation_split,
-                "--selection-mode",
-                "all",
-                "--selection-count",
-                "0",
-                "--no-plot",
-                "--set",
-                "save_full_atm_timeseries=false",
+                str(checkpoint_path),
             ]
             _run(
                 command,
@@ -1788,6 +3442,26 @@ def generate_matrix(args: argparse.Namespace) -> Path:
                     f"Generate-result row count mismatch for {row.variant}/{row.fold}/seed_{row.seed}."
                 )
             status = "completed"
+        if v3_design:
+            _verify_generated_sample_protocol(
+                output_dir,
+                expected_count=expected,
+                effective_generate_config=effective_generate_config,
+            )
+            if status == "completed":
+                _write_json(
+                    generation_fingerprint_path,
+                    {
+                        "generation_fingerprint_sha256": generation_fingerprint_sha256,
+                        "run_fingerprint_sha256": str(row.run_fingerprint_sha256),
+                        "checkpoint_sha256": checkpoint_sha256,
+                        "split": generation_split,
+                        "generation_config_sha256": generation_config_sha256,
+                        "effective_generate_config_sha256": canonical_payload_sha256(
+                            effective_generate_config
+                        ),
+                    },
+                )
         registry_rows.append(
             {
                 "fold": row.fold,
@@ -1798,12 +3472,1219 @@ def generate_matrix(args: argparse.Namespace) -> Path:
                 "output_dir": generation_output_dir,
                 "summary_path": str(summary_path),
                 "sample_count": expected,
+                "checkpoint_path": str(checkpoint_path),
+                "checkpoint_sha256": checkpoint_sha256,
+                "run_fingerprint_sha256": (
+                    str(row.run_fingerprint_sha256) if v3_design else ""
+                ),
+                "generation_fingerprint_sha256": (
+                    generation_fingerprint_sha256 if v3_design else ""
+                ),
+                "generation_config_path": str(generation_config_path),
+                "generation_config_sha256": generation_config_sha256,
             }
         )
         pd.DataFrame(registry_rows).to_csv(
             root / "registry/generate_registry.csv",
             index=False,
         )
+    return root
+
+
+VALIDATION_PILOT_CONTRASTS = (
+    (
+        TEXT_RESIDUAL_VARIANT,
+        CONTINUATION_VARIANT,
+        "matched_vs_continuation",
+    ),
+    (
+        TEXT_RESIDUAL_VARIANT,
+        SHUFFLED_RESIDUAL_VARIANT,
+        "matched_vs_shuffled",
+    ),
+    (
+        CONTINUATION_VARIANT,
+        PARENT_VARIANT,
+        "continuation_vs_parent",
+    ),
+)
+
+
+def _validation_duplicate_masks(frame: pd.DataFrame) -> dict[str, np.ndarray]:
+    exact_embedding = (
+        frame["exact_embedding_duplicate_with_train"].to_numpy(dtype=int) > 0
+    )
+    exact_text = frame["exact_text_duplicate_with_train"].to_numpy(dtype=int) > 0
+    near_text = (
+        frame["near_text_candidate_duplicate_with_train"].to_numpy(dtype=int)
+        > 0
+    )
+    return {
+        "all_pairs": np.ones(len(frame), dtype=bool),
+        "exclude_exact_embedding_seen_in_train": ~exact_embedding,
+        "exclude_exact_text_seen_in_train": ~exact_text,
+        "exclude_any_exact_duplicate_seen_in_train": ~(
+            exact_embedding | exact_text
+        ),
+        "exclude_near_text_seen_in_train": ~near_text,
+        "exclude_any_exact_or_near_duplicate_seen_in_train": ~(
+            exact_embedding | exact_text | near_text
+        ),
+    }
+
+
+def _json_payloads_by_pair(output_dir: Path) -> dict[str, dict[str, Any]]:
+    payloads: dict[str, dict[str, Any]] = {}
+    for path in sorted((output_dir / "samples").glob("*.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        pair_id = str(payload.get("surface_pair_id", ""))
+        if not pair_id or pair_id in payloads:
+            raise ValueError(f"Invalid/duplicate generated surface_pair_id: {path}")
+        payloads[pair_id] = payload
+    return payloads
+
+
+def _verify_generated_sample_protocol(
+    output_dir: Path,
+    *,
+    expected_count: int,
+    effective_generate_config: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Close the loop between the frozen request and emitted sample metadata."""
+
+    payloads = _json_payloads_by_pair(output_dir)
+    if len(payloads) != int(expected_count):
+        raise ValueError(
+            "Generated JSON count does not match the frozen split: "
+            f"{len(payloads)} != {expected_count} in {output_dir}."
+        )
+    expected_mc_samples = int(effective_generate_config["mc_samples"])
+    expected_split = str(effective_generate_config["split"])
+    expected_aggregation = str(effective_generate_config["aggregation_mode"])
+    expected_alignment = str(effective_generate_config["text_alignment_mode"])
+    expected_blend = float(effective_generate_config["residual_blend_alpha"])
+    beta_mode = str(effective_generate_config["reweight_beta_mode"]).strip().lower()
+    expected_fixed_beta = float(effective_generate_config["reweight_beta"])
+    errors: list[str] = []
+    for pair_id, payload in payloads.items():
+        metadata = dict(payload.get("metadata") or {})
+        observed = {
+            "mc_samples": metadata.get("mc_samples"),
+            "split": metadata.get("split"),
+            "aggregation_mode": metadata.get("aggregation_mode"),
+            "text_alignment_mode": metadata.get("text_alignment_mode"),
+            "residual_blend_alpha": metadata.get("residual_blend_alpha"),
+        }
+        if (
+            int(observed["mc_samples"] or -1) != expected_mc_samples
+            or str(observed["split"]) != expected_split
+            or str(observed["aggregation_mode"]) != expected_aggregation
+            or str(observed["text_alignment_mode"]) != expected_alignment
+            or not np.isclose(
+                float(observed["residual_blend_alpha"]),
+                expected_blend,
+                rtol=0.0,
+                atol=1.0e-12,
+            )
+        ):
+            errors.append(f"{pair_id}:metadata={observed}")
+            continue
+        if beta_mode == "fixed" and not np.isclose(
+            float(payload.get("effective_beta", float("nan"))),
+            expected_fixed_beta,
+            rtol=0.0,
+            atol=1.0e-12,
+        ):
+            errors.append(
+                f"{pair_id}:effective_beta={payload.get('effective_beta')!r} "
+                f"expected={expected_fixed_beta}"
+            )
+    if errors:
+        raise ValueError(
+            "Generated samples do not match the effective frozen protocol: "
+            + "; ".join(errors[:5])
+        )
+    return payloads
+
+
+def _collect_text_swap_sensitivity(
+    *,
+    root: Path,
+    selected: pd.DataFrame,
+    registry: pd.DataFrame,
+) -> pd.DataFrame:
+    """Regenerate matched/shuffled arms with their frozen positive texts swapped."""
+
+    frozen_payload = _read_yaml(
+        root / "inputs/configs/train_rq1_pair_textbase.yaml"
+    )
+    frozen_generate = dict(frozen_payload.get("generate_result") or {})
+    evaluation_noise_seed = int(
+        frozen_generate.get("evaluation_noise_seed", -1)
+    )
+    if evaluation_noise_seed < 0:
+        raise ValueError("Text-swap sensitivity requires a fixed evaluation noise seed.")
+    registry_by_key = registry.set_index(
+        ["fold", "seed", "variant"], verify_integrity=True
+    )
+    rows: list[dict[str, Any]] = []
+    for record in selected.itertuples(index=False):
+        variant = str(record.variant)
+        if variant not in {TEXT_RESIDUAL_VARIANT, SHUFFLED_RESIDUAL_VARIANT}:
+            continue
+        key = (str(record.fold), int(record.seed), variant)
+        registry_record = registry_by_key.loc[key]
+        checkpoint_path = Path(str(record.checkpoint_path)).resolve()
+        if (
+            Path(str(registry_record["checkpoint_path"])).resolve()
+            != checkpoint_path
+            or str(registry_record["checkpoint_sha256"])
+            != str(record.checkpoint_sha256)
+            or sha256_file(checkpoint_path) != str(record.checkpoint_sha256)
+        ):
+            raise ValueError(
+                f"Text-swap checkpoint identity changed after selection: {key}"
+            )
+        resolved_payload = _read_yaml(
+            Path(record.run_dir) / "metrics/training_resolved_config.yaml"
+        )
+        resolved_training = dict(
+            resolved_payload.get("training") or resolved_payload
+        )
+        generation_config_path, resolved_generate_config = (
+            _materialize_generation_config(
+                Path(record.run_dir),
+                frozen_generate=frozen_generate,
+                require_explicit_v3_fields=True,
+            )
+        )
+        _validate_run_protocol(
+            Path(record.run_dir),
+            critic_mode=str(
+                resolved_training.get(
+                    "critic_conditioning_mode", "transition_matching"
+                )
+            ),
+            require_v3=True,
+            expected_fingerprint=str(record.run_fingerprint_sha256),
+            checkpoint_path=checkpoint_path,
+        )
+        base_output_dir = Path(str(registry_record["summary_path"])).parent
+        run_dir = Path(record.run_dir)
+        swap_output_name = "validation_pilot_text_swap_json"
+        swap_output_dir = run_dir / swap_output_name
+        swapped_alignment = (
+            "permuted" if variant == TEXT_RESIDUAL_VARIANT else "matched"
+        )
+        effective_swap_generate_config = {
+            **resolved_generate_config,
+            "checkpoint_path": str(checkpoint_path),
+            "output_dir": swap_output_name,
+            "text_alignment_mode": swapped_alignment,
+            "evaluation_noise_seed": evaluation_noise_seed,
+        }
+        generation_config_sha256 = sha256_file(generation_config_path)
+        swap_fingerprint_sha256 = canonical_payload_sha256(
+            {
+                "run_fingerprint_sha256": str(record.run_fingerprint_sha256),
+                "checkpoint_sha256": str(record.checkpoint_sha256),
+                "generation_config_sha256": generation_config_sha256,
+                "effective_generate_config": effective_swap_generate_config,
+            }
+        )
+        swap_fingerprint_path = swap_output_dir / "generation_fingerprint.json"
+        swap_fingerprint_valid = False
+        if swap_fingerprint_path.is_file():
+            recorded_swap = json.loads(
+                swap_fingerprint_path.read_text(encoding="utf-8")
+            )
+            swap_fingerprint_valid = (
+                str(recorded_swap.get("generation_fingerprint_sha256", ""))
+                == swap_fingerprint_sha256
+            )
+        expected = _fold_counts(root, str(record.fold))[1]
+        effective_base_generate_config = {
+            **resolved_generate_config,
+            "checkpoint_path": str(checkpoint_path),
+            "output_dir": str(registry_record["output_dir"]),
+        }
+        base_payloads = _verify_generated_sample_protocol(
+            base_output_dir,
+            expected_count=expected,
+            effective_generate_config=effective_base_generate_config,
+        )
+        swapped_payloads = _json_payloads_by_pair(swap_output_dir)
+        generated_swap = len(swapped_payloads) != expected or not swap_fingerprint_valid
+        if generated_swap:
+            command = [
+                sys.executable,
+                "scripts/film_wgan/main.py",
+                "generate-result",
+                "--config",
+                str(generation_config_path),
+                "--checkpoint",
+                str(checkpoint_path),
+                "--output-dir",
+                swap_output_name,
+                "--set",
+                f"text_alignment_mode={swapped_alignment}",
+                "--set",
+                f"evaluation_noise_seed={evaluation_noise_seed}",
+            ]
+            _run(
+                command,
+                log_path=(
+                    root
+                    / "logs/generate_text_swap"
+                    / variant
+                    / str(record.fold)
+                    / f"seed_{record.seed}.log"
+                ),
+            )
+        swapped_payloads = _verify_generated_sample_protocol(
+            swap_output_dir,
+            expected_count=expected,
+            effective_generate_config=effective_swap_generate_config,
+        )
+        if generated_swap:
+            _write_json(
+                swap_fingerprint_path,
+                {
+                    "generation_fingerprint_sha256": swap_fingerprint_sha256,
+                    "run_fingerprint_sha256": str(record.run_fingerprint_sha256),
+                    "checkpoint_sha256": str(record.checkpoint_sha256),
+                    "split": "val",
+                    "text_alignment_mode": swapped_alignment,
+                    "evaluation_noise_seed": evaluation_noise_seed,
+                    "generation_config_sha256": generation_config_sha256,
+                    "effective_generate_config_sha256": canonical_payload_sha256(
+                        effective_swap_generate_config
+                    ),
+                },
+            )
+        if set(swapped_payloads) != set(base_payloads) or len(swapped_payloads) != expected:
+            raise ValueError(f"Text-swap validation JSON identities mismatch: {key}")
+
+        for pair_id, native in base_payloads.items():
+            swapped = swapped_payloads[pair_id]
+            expected_native_alignment = (
+                "matched" if variant == TEXT_RESIDUAL_VARIANT else "permuted"
+            )
+            native_alignment = str(
+                native.get("metadata", {}).get("text_alignment_mode", "")
+            )
+            swapped_alignment_value = str(
+                swapped.get("metadata", {}).get("text_alignment_mode", "")
+            )
+            if (
+                native_alignment != expected_native_alignment
+                or swapped_alignment_value != swapped_alignment
+            ):
+                raise ValueError(
+                    f"Text-swap alignment binding mismatch: {key}/{pair_id}"
+                )
+            native_surface = np.asarray(native["generated_surface"], dtype=np.float64)
+            swapped_surface = np.asarray(
+                swapped["generated_surface"], dtype=np.float64
+            )
+            current_surface = np.asarray(native["current_surface"], dtype=np.float64)
+            support = np.asarray(
+                native["evaluation_support_mask"], dtype=bool
+            )
+            if (
+                native_surface.shape != swapped_surface.shape
+                or native_surface.shape != current_surface.shape
+                or native_surface.shape != support.shape
+                or not bool(support.any())
+            ):
+                raise ValueError(f"Invalid text-swap surface/support shapes: {key}/{pair_id}")
+            surface_gap = swapped_surface - native_surface
+            native_delta = np.log(np.clip(native_surface, 1.0e-8, None)) - np.log(
+                np.clip(current_surface, 1.0e-8, None)
+            )
+            swapped_delta = np.log(
+                np.clip(swapped_surface, 1.0e-8, None)
+            ) - np.log(np.clip(current_surface, 1.0e-8, None))
+            delta_gap = swapped_delta - native_delta
+            rows.append(
+                {
+                    "fold": str(record.fold),
+                    "seed": int(record.seed),
+                    "variant": variant,
+                    "surface_pair_id": pair_id,
+                    "swap_direction": (
+                        "matched_native_to_placebo"
+                        if variant == TEXT_RESIDUAL_VARIANT
+                        else "shuffled_placebo_to_native"
+                    ),
+                    "native_alignment_mode": native_alignment,
+                    "swapped_alignment_mode": swapped_alignment_value,
+                    "supported_cell_count": int(support.sum()),
+                    "supported_surface_mae_native_vs_swapped": float(
+                        np.mean(np.abs(surface_gap[support]))
+                    ),
+                    "supported_log_delta_rms_native_vs_swapped": float(
+                        np.sqrt(np.mean(np.square(delta_gap[support])))
+                    ),
+                    "evaluation_noise_seed": int(
+                        evaluation_noise_seed
+                    ),
+                    "run_fingerprint_sha256": str(
+                        record.run_fingerprint_sha256
+                    ),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _validation_admission_gates(
+    *,
+    diagnostics: pd.DataFrame,
+    seed_summary: pd.DataFrame,
+    duplicate_sensitivity: pd.DataFrame,
+    samples: pd.DataFrame,
+) -> dict[str, Any]:
+    """Evaluate every preregistered pilot admission threshold fail-closed."""
+
+    gates: dict[str, Any] = {}
+
+    def record(
+        name: str,
+        *,
+        passed: bool,
+        threshold: Any,
+        observed: Any,
+        reason: str,
+        missing_fields: Sequence[str] = (),
+    ) -> None:
+        gates[name] = {
+            "passed": bool(passed) and not missing_fields,
+            "threshold": threshold,
+            "observed": observed,
+            "reason": (
+                f"missing required fields: {list(missing_fields)}"
+                if missing_fields
+                else reason
+            ),
+        }
+
+    comparison = diagnostics[diagnostics["is_comparison_epoch"] == 1].copy()
+    matched = comparison[comparison["variant"] == TEXT_RESIDUAL_VARIANT]
+    shuffled = comparison[comparison["variant"] == SHUFFLED_RESIDUAL_VARIANT]
+    matcher_fields = (
+        "val_matching_real_pairwise_accuracy",
+        "val_matching_real_accuracy_ci95_low",
+        "val_matching_real_margin_mean",
+    )
+    missing = [field for field in matcher_fields if field not in matched]
+    matched_values = []
+    matched_pass = False
+    if not missing and len(matched) == len(V3_PILOT_SEEDS):
+        for row in matched.itertuples(index=False):
+            values = {
+                "seed": int(row.seed),
+                "accuracy": float(getattr(row, matcher_fields[0])),
+                "ci95_low": float(getattr(row, matcher_fields[1])),
+                "margin": float(getattr(row, matcher_fields[2])),
+            }
+            matched_values.append(values)
+        matched_pass = all(
+            value["accuracy"] >= 0.60
+            and value["ci95_low"] > 0.50
+            and value["margin"] > 0.0
+            for value in matched_values
+        )
+    record(
+        "matched_heldout_matcher",
+        passed=matched_pass,
+        threshold={"accuracy_min": 0.60, "ci95_low_strict_min": 0.50, "margin_min": 0.0},
+        observed=matched_values,
+        reason="all matched seeds satisfy accuracy, confidence, and margin",
+        missing_fields=missing,
+    )
+
+    accuracy_field = "val_matching_real_pairwise_accuracy"
+    accuracy_difference_values = []
+    accuracy_difference_pass = False
+    missing = [
+        field
+        for field in (accuracy_field,)
+        if field not in matched or field not in shuffled
+    ]
+    if not missing and len(matched) == len(shuffled) == len(V3_PILOT_SEEDS):
+        merged_accuracy = matched[["fold", "seed", accuracy_field]].merge(
+            shuffled[["fold", "seed", accuracy_field]],
+            on=["fold", "seed"],
+            suffixes=("_matched", "_shuffled"),
+            validate="one_to_one",
+        )
+        differences = (
+            pd.to_numeric(
+                merged_accuracy[f"{accuracy_field}_matched"], errors="coerce"
+            )
+            - pd.to_numeric(
+                merged_accuracy[f"{accuracy_field}_shuffled"], errors="coerce"
+            )
+        )
+        accuracy_difference_values = [
+            {"seed": int(seed), "matched_minus_shuffled": float(value)}
+            for seed, value in zip(merged_accuracy["seed"], differences)
+        ]
+        accuracy_difference_pass = bool(
+            float(differences.mean()) >= 0.05
+            and int(np.sum(differences.to_numpy() > 0.0)) >= 2
+        )
+    record(
+        "matched_vs_shuffled_matcher_accuracy",
+        passed=accuracy_difference_pass,
+        threshold={"mean_difference_min": 0.05, "positive_seed_count_min": 2},
+        observed=accuracy_difference_values,
+        reason="matched matcher accuracy exceeds shuffled in magnitude and seed direction",
+        missing_fields=missing,
+    )
+
+    shuffled_fields = (
+        "val_matching_real_pairwise_accuracy",
+        "val_matching_real_accuracy_ci95_low",
+        "val_matching_real_accuracy_ci95_high",
+    )
+    missing = [field for field in shuffled_fields if field not in shuffled]
+    shuffled_values = []
+    shuffled_pass = False
+    if not missing and len(shuffled) == len(V3_PILOT_SEEDS):
+        for row in shuffled.itertuples(index=False):
+            value = {
+                "seed": int(row.seed),
+                "accuracy": float(getattr(row, shuffled_fields[0])),
+                "ci95_low": float(getattr(row, shuffled_fields[1])),
+                "ci95_high": float(getattr(row, shuffled_fields[2])),
+            }
+            shuffled_values.append(value)
+        shuffled_pass = all(
+            0.45 <= value["accuracy"] <= 0.55
+            and value["ci95_low"] <= 0.50 <= value["ci95_high"]
+            for value in shuffled_values
+        )
+    record(
+        "shuffled_matcher_at_chance",
+        passed=shuffled_pass,
+        threshold={"accuracy_range": [0.45, 0.55], "ci95_must_include": 0.50},
+        observed=shuffled_values,
+        reason="all shuffled seeds remain statistically compatible with chance",
+        missing_fields=missing,
+    )
+
+    diagnostic_arms = comparison[
+        comparison["variant"].isin(
+            [TEXT_RESIDUAL_VARIANT, SHUFFLED_RESIDUAL_VARIANT]
+        )
+    ]
+    gp_fields = (
+        "gp_raw_norm_mean",
+        "gp_unscaled_penalty",
+        "gp_raw_norm_outside_0p5_1p5_rate",
+    )
+    missing = [field for field in gp_fields if field not in diagnostic_arms]
+    gp_values = []
+    gp_pass = False
+    if not missing and len(diagnostic_arms) == 2 * len(V3_PILOT_SEEDS):
+        for row in diagnostic_arms.itertuples(index=False):
+            gp_values.append(
+                {
+                    "seed": int(row.seed),
+                    "variant": str(row.variant),
+                    "raw_norm_mean": float(getattr(row, gp_fields[0])),
+                    "unscaled_penalty": float(getattr(row, gp_fields[1])),
+                    "outside_rate": float(getattr(row, gp_fields[2])),
+                }
+            )
+        gp_pass = all(
+            0.75 <= value["raw_norm_mean"] <= 1.25
+            and value["unscaled_penalty"] <= 0.10
+            and value["outside_rate"] <= 0.10
+            for value in gp_values
+        )
+    record(
+        "support_aware_gradient_penalty",
+        passed=gp_pass,
+        threshold={
+            "raw_norm_mean_range": [0.75, 1.25],
+            "unscaled_penalty_max": 0.10,
+            "outside_0p5_1p5_rate_max": 0.10,
+        },
+        observed=gp_values,
+        reason="all matched/shuffled comparison checkpoints satisfy GP thresholds",
+        missing_fields=missing,
+    )
+
+    unsupported_field = "gp_unsupported_max_abs_gradient"
+    missing = [unsupported_field] if unsupported_field not in diagnostic_arms else []
+    unsupported_values = []
+    unsupported_pass = False
+    if not missing and len(diagnostic_arms) == 2 * len(V3_PILOT_SEEDS):
+        unsupported_values = [
+            {
+                "seed": int(row.seed),
+                "variant": str(row.variant),
+                "max_abs_gradient": float(getattr(row, unsupported_field)),
+            }
+            for row in diagnostic_arms.itertuples(index=False)
+        ]
+        unsupported_pass = all(
+            value["max_abs_gradient"] <= 1.0e-7
+            for value in unsupported_values
+        )
+    record(
+        "unsupported_gradient_zero",
+        passed=unsupported_pass,
+        threshold={"max_abs_gradient_max": 1.0e-7},
+        observed=unsupported_values,
+        reason="unsupported GP gradients remain numerically zero",
+        missing_fields=missing,
+    )
+
+    probe_fields = (
+        "diag_g_probe_active",
+        "diag_g_matching_output_grad_ratio_median",
+        "diag_g_matching_output_grad_ratio_p95",
+    )
+    missing = [field for field in probe_fields if field not in matched]
+    probe_values = []
+    probe_pass = False
+    if not missing and len(matched) == len(V3_PILOT_SEEDS):
+        probe_values = [
+            {
+                "seed": int(row.seed),
+                "active": float(getattr(row, probe_fields[0])),
+                "ratio_median": float(getattr(row, probe_fields[1])),
+                "ratio_p95": float(getattr(row, probe_fields[2])),
+            }
+            for row in matched.itertuples(index=False)
+        ]
+        probe_pass = all(
+            value["active"] == 1.0
+            and 0.05 <= value["ratio_median"] <= 0.20
+            and value["ratio_p95"] < 0.50
+            for value in probe_values
+        )
+    record(
+        "generator_matching_output_gradient_ratio",
+        passed=probe_pass,
+        threshold={"median_range": [0.05, 0.20], "p95_strict_max": 0.50},
+        observed=probe_values,
+        reason="matched generator matching gradients are material but bounded",
+        missing_fields=missing,
+    )
+
+    last_five_arms = diagnostics[
+        diagnostics["variant"].isin(
+            [TEXT_RESIDUAL_VARIANT, SHUFFLED_RESIDUAL_VARIANT]
+        )
+    ]
+    roundtrip_fields = (
+        "g_transition_unclipped_raw_log_max_abs_error",
+        "g_transition_unclipped_normalized_max_abs_error",
+    )
+    missing = [field for field in roundtrip_fields if field not in last_five_arms]
+    roundtrip_observed = {}
+    roundtrip_pass = False
+    if not missing and not last_five_arms.empty:
+        raw_values = pd.to_numeric(
+            last_five_arms[roundtrip_fields[0]], errors="coerce"
+        ).to_numpy(dtype=np.float64)
+        normalized_values = pd.to_numeric(
+            last_five_arms[roundtrip_fields[1]], errors="coerce"
+        ).to_numpy(dtype=np.float64)
+        finite = np.isfinite(raw_values) & np.isfinite(normalized_values)
+        nonfinite_count = int((~finite).sum())
+        raw_max = float(np.max(raw_values)) if nonfinite_count == 0 else None
+        normalized_max = (
+            float(np.max(normalized_values)) if nonfinite_count == 0 else None
+        )
+        roundtrip_observed = {
+            "last_five_raw_log_max": raw_max,
+            "last_five_normalized_max": normalized_max,
+            "nonfinite_count": nonfinite_count,
+        }
+        roundtrip_pass = bool(
+            nonfinite_count == 0
+            and raw_max is not None
+            and normalized_max is not None
+            and raw_max <= 1.0e-6
+            and normalized_max <= 1.0e-3
+        )
+    record(
+        "transition_roundtrip",
+        passed=roundtrip_pass,
+        threshold={"raw_log_error_max": 1.0e-6, "normalized_error_max": 1.0e-3},
+        observed=roundtrip_observed,
+        reason="unclipped transition delivery remains numerically consistent",
+        missing_fields=missing,
+    )
+
+    clipped_field = "g_transition_clipped_fraction"
+    missing = [clipped_field] if clipped_field not in last_five_arms else []
+    clipped_values = []
+    clipped_pass = False
+    if not missing and not last_five_arms.empty:
+        for keys, group in last_five_arms.groupby(
+            ["fold", "seed", "variant"], sort=True
+        ):
+            values = pd.to_numeric(
+                group[clipped_field], errors="coerce"
+            ).to_numpy(dtype=np.float64)
+            comparison_values = pd.to_numeric(
+                group.loc[group["is_comparison_epoch"] == 1, clipped_field],
+                errors="coerce",
+            ).to_numpy(dtype=np.float64)
+            nonfinite_count = int((~np.isfinite(values)).sum())
+            valid_comparison = bool(
+                comparison_values.size == 1
+                and np.isfinite(comparison_values[0])
+            )
+            comparison_value = (
+                float(comparison_values[0]) if valid_comparison else None
+            )
+            median_value = (
+                float(np.median(values)) if nonfinite_count == 0 else None
+            )
+            clipped_values.append(
+                {
+                    "fold": str(keys[0]),
+                    "seed": int(keys[1]),
+                    "variant": str(keys[2]),
+                    "comparison_epoch_fraction": comparison_value,
+                    "last_five_median_fraction": median_value,
+                    "nonfinite_count": nonfinite_count,
+                }
+            )
+        clipped_pass = all(
+            value["nonfinite_count"] == 0
+            and value["comparison_epoch_fraction"] is not None
+            and value["last_five_median_fraction"] is not None
+            and value["comparison_epoch_fraction"] <= 0.001
+            and value["last_five_median_fraction"] <= 0.001
+            for value in clipped_values
+        )
+    record(
+        "transition_clipping",
+        passed=clipped_pass,
+        threshold={"comparison_and_last_five_median_max": 0.001},
+        observed=clipped_values,
+        reason="comparison checkpoint and final-five clipping stay negligible",
+        missing_fields=missing,
+    )
+
+    mae_values = []
+    mae_pass = True
+    for contrast in ("matched_vs_continuation", "matched_vs_shuffled"):
+        rows = seed_summary[
+            (seed_summary["contrast"] == contrast)
+            & (seed_summary["metric"] == "surface_mae")
+        ]
+        values = rows["mean_baseline_minus_focal"].to_numpy(dtype=float)
+        item_pass = bool(
+            len(values) == len(V3_PILOT_SEEDS)
+            and float(np.mean(values)) > 0.0
+            and int(np.sum(values > 0.0)) >= 2
+        )
+        mae_values.append(
+            {
+                "comparison": contrast,
+                "mean_baseline_minus_matched": (
+                    float(np.mean(values)) if len(values) else None
+                ),
+                "positive_seed_count": int(np.sum(values > 0.0)),
+                "passed": item_pass,
+            }
+        )
+        mae_pass = mae_pass and item_pass
+    matched_samples = samples[samples["variant"] == TEXT_RESIDUAL_VARIANT]
+    persistence_by_seed = (
+        matched_samples.assign(
+            persistence_minus_matched=(
+                pd.to_numeric(matched_samples["current_mae"], errors="coerce")
+                - pd.to_numeric(matched_samples["surface_mae"], errors="coerce")
+            )
+        )
+        .groupby(["fold", "seed"], as_index=False)["persistence_minus_matched"]
+        .mean()
+    ) if {"current_mae", "surface_mae"}.issubset(matched_samples.columns) else pd.DataFrame()
+    persistence_values = (
+        persistence_by_seed["persistence_minus_matched"].to_numpy(dtype=float)
+        if not persistence_by_seed.empty
+        else np.asarray([], dtype=float)
+    )
+    persistence_pass = bool(
+        len(persistence_values) == len(V3_PILOT_SEEDS)
+        and float(np.mean(persistence_values)) > 0.0
+        and int(np.sum(persistence_values > 0.0)) >= 2
+    )
+    mae_values.append(
+        {
+            "comparison": "matched_vs_persistence",
+            "mean_baseline_minus_matched": (
+                float(np.mean(persistence_values))
+                if len(persistence_values)
+                else None
+            ),
+            "positive_seed_count": int(np.sum(persistence_values > 0.0)),
+            "passed": persistence_pass,
+        }
+    )
+    mae_pass = mae_pass and persistence_pass
+    record(
+        "matched_surface_mae",
+        passed=mae_pass,
+        threshold={"mean_improvement_strict_min": 0.0, "positive_seed_count_min": 2},
+        observed=mae_values,
+        reason="matched MAE improves on continuation, shuffled, and persistence",
+        missing_fields=(
+            []
+            if {"current_mae", "surface_mae"}.issubset(samples.columns)
+            else ["current_mae", "surface_mae"]
+        ),
+    )
+
+    duplicate_policy = "exclude_any_exact_or_near_duplicate_seen_in_train"
+    duplicate_rows = duplicate_sensitivity[
+        (duplicate_sensitivity["policy"] == duplicate_policy)
+        & (duplicate_sensitivity["metric"] == "surface_mae")
+        & duplicate_sensitivity["contrast"].isin(
+            ["matched_vs_continuation", "matched_vs_shuffled"]
+        )
+    ]
+    duplicate_values = duplicate_rows[
+        [
+            "contrast",
+            "unique_pairs",
+            "seed_mean_baseline_minus_focal",
+            "positive_seed_count",
+        ]
+    ].to_dict(orient="records") if len(duplicate_rows) else []
+    duplicate_pass = bool(
+        len(duplicate_rows) == 2
+        and np.all(
+            pd.to_numeric(
+                duplicate_rows["seed_mean_baseline_minus_focal"], errors="coerce"
+            ).to_numpy()
+            > 0.0
+        )
+    )
+    record(
+        "duplicate_free_direction",
+        passed=duplicate_pass,
+        threshold={"duplicate_free_mean_baseline_minus_matched_strict_min": 0.0},
+        observed=duplicate_values,
+        reason="removing exact/near train duplicates does not reverse matched comparisons",
+        missing_fields=(
+            []
+            if {
+                "policy",
+                "metric",
+                "contrast",
+                "seed_mean_baseline_minus_focal",
+            }.issubset(duplicate_sensitivity.columns)
+            else ["duplicate_sensitivity_fields"]
+        ),
+    )
+
+    return {
+        "passed": bool(gates) and all(item["passed"] for item in gates.values()),
+        "fail_closed": True,
+        "checkpoint_selection_use": False,
+        "gates": gates,
+    }
+
+
+def summarize_validation_pilot(args: argparse.Namespace) -> Path:
+    """Create descriptive validation-only pilot diagnostics, never test claims."""
+
+    _assert_py312()
+    root = _resolve_root(args.experiment_root)
+    verify_existing(argparse.Namespace(experiment_root=str(root)))
+    run_folds, experiment_seeds, run_variants = _experiment_scope(root)
+    registry_path = root / "registry/generate_registry.csv"
+    selected_path = root / "checkpoint_selection/selected_checkpoints.csv"
+    if not registry_path.is_file() or not selected_path.is_file():
+        raise FileNotFoundError(
+            "Run collect-checkpoints and generate before summarize-validation."
+        )
+    registry = pd.read_csv(registry_path)
+    selected = pd.read_csv(selected_path)
+    expected_keys = {
+        (fold, int(seed), variant)
+        for fold in run_folds
+        for seed in experiment_seeds
+        for variant in run_variants
+    }
+    registry_keys = {
+        (str(row.fold), int(row.seed), str(row.variant))
+        for row in registry.itertuples(index=False)
+    }
+    selected_keys = {
+        (str(row.fold), int(row.seed), str(row.variant))
+        for row in selected.itertuples(index=False)
+    }
+    if (
+        registry_keys != expected_keys
+        or selected_keys != expected_keys
+        or len(registry) != len(expected_keys)
+        or len(selected) != len(expected_keys)
+    ):
+        raise ValueError("Validation pilot registries do not exactly match scope.")
+    if set(registry["split"].astype(str).str.lower()) != {"val"}:
+        raise RuntimeError("summarize-validation accepts validation outputs only.")
+
+    required_plan_columns = {
+        "matching_negative_source_plan_sha256",
+        "text_alignment_plan_sha256",
+        "run_fingerprint_sha256",
+        "comparison_epoch",
+    }
+    missing_plan_columns = sorted(required_plan_columns - set(selected.columns))
+    if missing_plan_columns:
+        raise ValueError(
+            f"Selected checkpoint registry lacks v3 fields: {missing_plan_columns}"
+        )
+    for fold, group in selected.groupby("fold", sort=True):
+        if (
+            group["matching_negative_source_plan_sha256"].nunique() != 1
+            or group["text_alignment_plan_sha256"].nunique() != 1
+        ):
+            raise ValueError(f"Plan file hashes diverged across arms for {fold}.")
+    if selected["run_fingerprint_sha256"].nunique() != len(selected):
+        raise ValueError("Every v3 run must have a unique run fingerprint.")
+    selected_index = selected.set_index(["fold", "seed", "variant"])
+    for fold in run_folds:
+        for seed in experiment_seeds:
+            anchor_epoch = int(
+                selected_index.loc[
+                    (fold, seed, CONTINUATION_VARIANT),
+                    "comparison_epoch",
+                ]
+            )
+            for variant in (TEXT_RESIDUAL_VARIANT, SHUFFLED_RESIDUAL_VARIANT):
+                if int(
+                    selected_index.loc[(fold, seed, variant), "comparison_epoch"]
+                ) != anchor_epoch:
+                    raise ValueError(
+                        f"Stage-B comparison epoch drift: {fold}/seed_{seed}/{variant}"
+                    )
+
+    sample_rows = []
+    for record in registry.itertuples(index=False):
+        summary = pd.read_csv(record.summary_path)
+        summary["fold"] = str(record.fold)
+        summary["seed"] = int(record.seed)
+        summary["variant"] = str(record.variant)
+        sample_rows.append(summary)
+    samples = pd.concat(sample_rows, ignore_index=True)
+    expected_sample_rows = (
+        sum(_fold_counts(root, fold)[1] for fold in run_folds)
+        * len(experiment_seeds)
+        * len(run_variants)
+    )
+    if len(samples) != expected_sample_rows:
+        raise ValueError(
+            "Combined validation row count mismatch: "
+            f"{len(samples)} != {expected_sample_rows}."
+        )
+
+    duplicate_columns = [
+        "fold",
+        "surface_pair_id",
+        "exact_embedding_duplicate_with_train",
+        "exact_text_duplicate_with_train",
+        "near_text_candidate_duplicate_with_train",
+    ]
+    lineage_rows = []
+    for fold in run_folds:
+        lineage = pd.read_csv(_fold_dir(root, fold) / "pair_lineage_audit.csv")
+        lineage_rows.append(
+            lineage[lineage["split"].astype(str) == "val"][duplicate_columns]
+        )
+    samples = samples.merge(
+        pd.concat(lineage_rows, ignore_index=True),
+        on=["fold", "surface_pair_id"],
+        how="left",
+        validate="many_to_one",
+    )
+    if samples[duplicate_columns[2:]].isna().any().any():
+        raise ValueError("Validation duplicate-lineage merge left unmatched pairs.")
+
+    available_metrics = [metric for metric in POINT_METRICS if metric in samples]
+    if "surface_mae" not in available_metrics:
+        raise ValueError("Validation summaries must contain surface_mae.")
+    model_summary = (
+        samples.groupby(["fold", "seed", "variant"], as_index=False)
+        .agg(
+            n_pairs=("surface_pair_id", "size"),
+            **{metric: (metric, "mean") for metric in available_metrics},
+        )
+    )
+
+    difference_frames = []
+    pair_keys = ["fold", "seed", "surface_pair_id"]
+    for focal, baseline, contrast in VALIDATION_PILOT_CONTRASTS:
+        left = samples[samples["variant"] == focal]
+        right = samples[samples["variant"] == baseline]
+        merged = left.merge(
+            right,
+            on=pair_keys,
+            suffixes=("_focal", "_baseline"),
+            validate="one_to_one",
+        )
+        if len(merged) != len(left) or len(merged) != len(right):
+            raise ValueError(f"Validation pair matching failed for {contrast}.")
+        for metric in available_metrics:
+            difference_frames.append(
+                pd.DataFrame(
+                    {
+                        "contrast": contrast,
+                        "focal_variant": focal,
+                        "baseline_variant": baseline,
+                        "fold": merged["fold"],
+                        "seed": merged["seed"].astype(int),
+                        "surface_pair_id": merged["surface_pair_id"],
+                        "metric": metric,
+                        "focal_error": pd.to_numeric(
+                            merged[f"{metric}_focal"], errors="coerce"
+                        ),
+                        "baseline_error": pd.to_numeric(
+                            merged[f"{metric}_baseline"], errors="coerce"
+                        ),
+                        "difference": (
+                            pd.to_numeric(
+                                merged[f"{metric}_baseline"], errors="coerce"
+                            )
+                            - pd.to_numeric(
+                                merged[f"{metric}_focal"], errors="coerce"
+                            )
+                        ),
+                        **{
+                            column: merged[f"{column}_focal"].astype(int)
+                            for column in duplicate_columns[2:]
+                        },
+                    }
+                )
+            )
+    differences = pd.concat(difference_frames, ignore_index=True)
+    seed_summary = (
+        differences.groupby(
+            [
+                "contrast",
+                "focal_variant",
+                "baseline_variant",
+                "fold",
+                "seed",
+                "metric",
+            ],
+            as_index=False,
+        )
+        .agg(
+            mean_baseline_minus_focal=("difference", "mean"),
+            pair_count=("difference", "count"),
+        )
+    )
+    contrast_summary = (
+        seed_summary.groupby(
+            ["contrast", "focal_variant", "baseline_variant", "metric"],
+            as_index=False,
+        )
+        .agg(
+            seed_mean_baseline_minus_focal=(
+                "mean_baseline_minus_focal",
+                "mean",
+            ),
+            seed_std_baseline_minus_focal=(
+                "mean_baseline_minus_focal",
+                "std",
+            ),
+            positive_seed_count=(
+                "mean_baseline_minus_focal",
+                lambda values: int(np.sum(np.asarray(values) > 0.0)),
+            ),
+            seed_count=("seed", "nunique"),
+        )
+    )
+    contrast_summary["difference_direction"] = "baseline_minus_focal"
+    contrast_summary["positive_means_focal_better"] = True
+    contrast_summary["inference_status"] = "descriptive_pilot_only"
+
+    sensitivity_rows = []
+    for (contrast, metric), group in differences.groupby(
+        ["contrast", "metric"], sort=True
+    ):
+        finite = group[np.isfinite(group["difference"].to_numpy(dtype=float))]
+        for policy, mask in _validation_duplicate_masks(finite).items():
+            retained = finite.loc[mask]
+            by_seed = retained.groupby(["fold", "seed"], as_index=False).agg(
+                mean_difference=("difference", "mean"),
+                pair_count=("difference", "count"),
+            )
+            sensitivity_rows.append(
+                {
+                    "contrast": contrast,
+                    "metric": metric,
+                    "policy": policy,
+                    "pair_seed_rows": int(len(retained)),
+                    "unique_pairs": int(
+                        retained[["fold", "surface_pair_id"]]
+                        .drop_duplicates()
+                        .shape[0]
+                    ),
+                    "seed_count": int(by_seed["seed"].nunique()),
+                    "seed_mean_baseline_minus_focal": (
+                        float(by_seed["mean_difference"].mean())
+                        if not by_seed.empty
+                        else float("nan")
+                    ),
+                    "positive_seed_count": int(
+                        np.sum(by_seed["mean_difference"].to_numpy() > 0.0)
+                    ),
+                    "inference_status": "descriptive_pilot_only",
+                }
+            )
+
+    diagnostic_rows = []
+    for record in selected.itertuples(index=False):
+        metrics = pd.read_csv(Path(record.run_dir) / "metrics/training_metrics.csv")
+        numeric_epoch = pd.to_numeric(metrics["epoch"], errors="coerce")
+        comparison_rows = metrics[numeric_epoch == int(record.comparison_epoch)]
+        if len(comparison_rows) != 1:
+            raise ValueError(
+                f"Missing comparison-epoch diagnostics: {record.run_dir}"
+            )
+        epoch_rows = metrics[numeric_epoch <= int(record.comparison_epoch)].tail(5)
+        if len(epoch_rows) != min(5, int(record.comparison_epoch)):
+            raise ValueError(f"Incomplete last-five diagnostics: {record.run_dir}")
+        diagnostic_columns = sorted(
+            column
+            for column in metrics.columns
+            if column.startswith(
+                (
+                    "gp_",
+                    "g_transition_",
+                    "diag_g_",
+                    "g_matching_gradient_",
+                    "g_nonmatching_gradient_",
+                    "val_matching_",
+                )
+            )
+        )
+        for window_index, (_index, row) in enumerate(epoch_rows.iterrows(), start=1):
+            diagnostic_rows.append(
+                {
+                    "fold": str(record.fold),
+                    "seed": int(record.seed),
+                    "variant": str(record.variant),
+                    "epoch": int(row["epoch"]),
+                    "comparison_epoch": int(record.comparison_epoch),
+                    "last_five_window_index": window_index,
+                    "is_comparison_epoch": int(
+                        int(row["epoch"]) == int(record.comparison_epoch)
+                    ),
+                    **{column: row[column] for column in diagnostic_columns},
+                }
+            )
+
+    comparisons_dir = root / "comparisons"
+    final_dir = root / "final_tables"
+    comparisons_dir.mkdir(parents=True, exist_ok=True)
+    final_dir.mkdir(parents=True, exist_ok=True)
+    samples.to_csv(
+        comparisons_dir / "validation_pilot_sample_metrics.csv", index=False
+    )
+    differences.to_csv(
+        comparisons_dir / "validation_pilot_pairwise_differences.csv", index=False
+    )
+    model_summary.to_csv(
+        final_dir / "validation_pilot_metrics_by_seed.csv", index=False
+    )
+    seed_summary.to_csv(
+        final_dir / "validation_pilot_contrasts_by_seed.csv", index=False
+    )
+    contrast_summary.to_csv(
+        final_dir / "validation_pilot_contrasts.csv", index=False
+    )
+    duplicate_sensitivity = pd.DataFrame(sensitivity_rows)
+    duplicate_sensitivity.to_csv(
+        final_dir / "validation_pilot_duplicate_sensitivity.csv", index=False
+    )
+    diagnostics = pd.DataFrame(diagnostic_rows)
+    diagnostics.to_csv(
+        final_dir / "validation_pilot_checkpoint_diagnostics.csv", index=False
+    )
+    text_swap = _collect_text_swap_sensitivity(
+        root=root,
+        selected=selected,
+        registry=registry,
+    )
+    text_swap.to_csv(
+        final_dir / "validation_pilot_text_swap_sensitivity.csv", index=False
+    )
+    text_swap_summary = (
+        text_swap.groupby(["variant", "swap_direction", "seed"], as_index=False)
+        .agg(
+            pair_count=("surface_pair_id", "size"),
+            supported_surface_mae_native_vs_swapped=(
+                "supported_surface_mae_native_vs_swapped",
+                "mean",
+            ),
+            supported_log_delta_rms_native_vs_swapped=(
+                "supported_log_delta_rms_native_vs_swapped",
+                "mean",
+            ),
+        )
+    )
+    text_swap_summary.to_csv(
+        final_dir / "validation_pilot_text_swap_sensitivity_by_seed.csv",
+        index=False,
+    )
+
+    primary = contrast_summary[
+        (contrast_summary["metric"] == "surface_mae")
+        & contrast_summary["contrast"].isin(
+            ["matched_vs_continuation", "matched_vs_shuffled"]
+        )
+    ]
+    admission = _validation_admission_gates(
+        diagnostics=diagnostics,
+        seed_summary=seed_summary,
+        duplicate_sensitivity=duplicate_sensitivity,
+        samples=samples,
+    )
+    summary_payload = {
+        "status": "ok",
+        "claim_scope": "validation_pilot_description_only",
+        "formal_test_status": "forbidden",
+        "outer_test_consumed": False,
+        "training_protocol_version": TRAINING_PROTOCOL_VERSION_V3,
+        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION_V3,
+        "epoch_policy": EPOCH_POLICY_CONTINUATION_ANCHOR,
+        "folds": list(run_folds),
+        "seeds": list(experiment_seeds),
+        "variants": list(run_variants),
+        "training_runs": len(expected_keys),
+        "validation_sample_metric_rows": int(len(samples)),
+        "surface_mae_directional_summary": primary.to_dict(orient="records"),
+        "admission": admission,
+        "duplicate_sensitivity": (
+            "final_tables/validation_pilot_duplicate_sensitivity.csv"
+        ),
+        "checkpoint_diagnostics": (
+            "final_tables/validation_pilot_checkpoint_diagnostics.csv"
+        ),
+        "text_swap_sensitivity": (
+            "final_tables/validation_pilot_text_swap_sensitivity.csv"
+        ),
+        "text_swap_sensitivity_by_seed": text_swap_summary.to_dict(
+            orient="records"
+        ),
+    }
+    _write_json(final_dir / "validation_pilot_summary.json", summary_payload)
+    print(final_dir / "validation_pilot_summary.json")
     return root
 
 
@@ -2766,8 +5647,25 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--config", default=str(DEFAULT_CONFIG))
     prepare.add_argument("--workbook", default=str(DEFAULT_WORKBOOK))
     prepare.add_argument("--news-workbook", default=str(DEFAULT_NEWS_WORKBOOK))
-    prepare.add_argument("--seeds", nargs="+", type=int, default=list(SEEDS))
-    prepare.add_argument("--reuse", action="store_true")
+    prepare.add_argument(
+        "--seeds", nargs="+", type=int, default=list(V3_PILOT_SEEDS)
+    )
+    prepare.add_argument(
+        "--run-folds",
+        nargs="+",
+        choices=list(FOLDS),
+        default=list(V3_PILOT_FOLDS),
+    )
+    prepare.add_argument(
+        "--run-variants",
+        nargs="+",
+        choices=list(VARIANTS),
+        default=list(V3_PILOT_VARIANTS),
+    )
+    prepare.add_argument("--matrix-profile", default="validation_pilot")
+
+    verify = subparsers.add_parser("verify-existing")
+    verify.add_argument("--experiment-root", required=True)
 
     train = subparsers.add_parser("train-matrix")
     train.add_argument("--experiment-root", default="")
@@ -2790,6 +5688,13 @@ def build_parser() -> argparse.ArgumentParser:
     generate = subparsers.add_parser("generate")
     generate.add_argument("--experiment-root", default="")
 
+    summarize_validation = subparsers.add_parser("summarize-validation")
+    summarize_validation.add_argument("--experiment-root", required=True)
+    summarize_validation_pilot = subparsers.add_parser(
+        "summarize-validation-pilot"
+    )
+    summarize_validation_pilot.add_argument("--experiment-root", required=True)
+
     compare = subparsers.add_parser("compare")
     compare.add_argument("--experiment-root", default="")
     compare.add_argument("--bootstrap-iterations", type=int, default=10000)
@@ -2810,6 +5715,8 @@ def main(argv: Iterable[str] | None = None) -> Path:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     if args.command == "prepare":
         return prepare_experiment(args)
+    if args.command == "verify-existing":
+        return verify_existing(args)
     if args.command == "train-matrix":
         return train_matrix(args)
     if args.command == "monitor":
@@ -2818,6 +5725,8 @@ def main(argv: Iterable[str] | None = None) -> Path:
         return collect_checkpoints(args)
     if args.command == "generate":
         return generate_matrix(args)
+    if args.command in {"summarize-validation", "summarize-validation-pilot"}:
+        return summarize_validation_pilot(args)
     if args.command == "compare":
         return build_comparison(args)
     if args.command == "results-pipeline":

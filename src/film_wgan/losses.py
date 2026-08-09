@@ -2,10 +2,32 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Iterable
 
 import torch
 from torch import autograd
+
+
+@dataclass(frozen=True)
+class GradientPenaltyTerms:
+    """Gradient-penalty value plus the raw per-example audit quantities.
+
+    ``raw_norms`` deliberately remains a tensor instead of being reduced in
+    the loss helper.  The trainer can therefore aggregate unequal final
+    batches by sample count rather than averaging batch means.
+    """
+
+    penalty: torch.Tensor
+    unscaled_penalty: torch.Tensor
+    raw_norms: torch.Tensor
+    unsupported_max_abs_gradient: torch.Tensor
+
+    @property
+    def raw_gradient_norms(self) -> torch.Tensor:
+        """Explicit alias used by diagnostics/reporting code."""
+
+        return self.raw_norms
 
 
 def critic_wgan_loss(real_scores: torch.Tensor, fake_scores: torch.Tensor) -> torch.Tensor:
@@ -49,7 +71,7 @@ def generator_transition_matching_loss(
     return torch.nn.functional.softplus(-margins).mean()
 
 
-def gradient_penalty(
+def gradient_penalty_terms(
     *,
     critic,
     real_future_surface: torch.Tensor,
@@ -59,7 +81,16 @@ def gradient_penalty(
     lambda_gp: float,
     has_text: torch.Tensor | None = None,
     support_mask: torch.Tensor | None = None,
-) -> torch.Tensor:
+) -> GradientPenaltyTerms:
+    """Return WGAN-GP loss and unreduced gradient diagnostics.
+
+    When ``support_mask`` is supplied the critic receives a masked
+    interpolation while differentiation is still taken with respect to the
+    unmasked leaf.  Consequently unsupported coordinates must have exactly
+    zero input gradient; ``unsupported_max_abs_gradient`` audits that
+    invariant directly.
+    """
+
     batch_size = real_future_surface.size(0)
     alpha = torch.rand(batch_size, 1, 1, 1, device=real_future_surface.device)
     interpolated = alpha * real_future_surface + (1.0 - alpha) * fake_future_surface
@@ -110,8 +141,45 @@ def gradient_penalty(
         retain_graph=True,
         only_inputs=True,
     )[0]
-    gradients = gradients.view(batch_size, -1)
-    return ((gradients.norm(2, dim=1) - 1.0) ** 2).mean() * float(lambda_gp)
+    unsupported_max_abs_gradient = gradients.new_zeros(())
+    if support_mask is not None:
+        unsupported = support <= 0.0
+        if bool(torch.any(unsupported)):
+            unsupported_max_abs_gradient = gradients[unsupported].abs().max()
+
+    raw_norms = gradients.reshape(batch_size, -1).norm(2, dim=1)
+    unscaled_penalty = ((raw_norms - 1.0) ** 2).mean()
+    return GradientPenaltyTerms(
+        penalty=unscaled_penalty * float(lambda_gp),
+        unscaled_penalty=unscaled_penalty,
+        raw_norms=raw_norms,
+        unsupported_max_abs_gradient=unsupported_max_abs_gradient,
+    )
+
+
+def gradient_penalty(
+    *,
+    critic,
+    real_future_surface: torch.Tensor,
+    fake_future_surface: torch.Tensor,
+    current_surface: torch.Tensor,
+    text_embedding: torch.Tensor,
+    lambda_gp: float,
+    has_text: torch.Tensor | None = None,
+    support_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Backward-compatible scalar wrapper around :func:`gradient_penalty_terms`."""
+
+    return gradient_penalty_terms(
+        critic=critic,
+        real_future_surface=real_future_surface,
+        fake_future_surface=fake_future_surface,
+        current_surface=current_surface,
+        text_embedding=text_embedding,
+        lambda_gp=lambda_gp,
+        has_text=has_text,
+        support_mask=support_mask,
+    ).penalty
 
 
 def _difference_weights(values: torch.Tensor) -> torch.Tensor:

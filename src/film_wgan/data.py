@@ -6,7 +6,7 @@ import ast
 import hashlib
 import json
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Sequence
@@ -17,6 +17,10 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from .config import FilmWGANSampleConfig, FilmWGANTrainConfig
+from .matching import (
+    TextAlignmentPlan,
+    build_text_alignment_plan,
+)
 from .support import (
     RawSurfaceSupportArtifact,
     fit_raw_support_artifact,
@@ -174,6 +178,10 @@ class FilmWGANDataBundle:
     text_transform_sha256: str = ""
     surface_support_path: str = ""
     surface_support_sha256: str = ""
+    native_train_items: list[FilmWGANSample] = field(default_factory=list)
+    native_val_items: list[FilmWGANSample] = field(default_factory=list)
+    native_test_items: list[FilmWGANSample] = field(default_factory=list)
+    text_alignment_plans: dict[str, TextAlignmentPlan] = field(default_factory=dict)
 
 
 def _canonical_timestamp(value: Any) -> str:
@@ -1589,7 +1597,13 @@ def _apply_surface_support(
 def _prepare_partitioned_samples(
     config: FilmWGANTrainConfig | FilmWGANSampleConfig,
     samples: Sequence[FilmWGANSample],
-) -> tuple[dict[str, list[FilmWGANSample]], pd.DataFrame, FilmWGANTextTransform | None]:
+) -> tuple[
+    dict[str, list[FilmWGANSample]],
+    pd.DataFrame,
+    FilmWGANTextTransform | None,
+    dict[str, list[FilmWGANSample]],
+    dict[str, TextAlignmentPlan],
+]:
     partitions, manifest = _partition_samples(config, samples)
     if str(config.sample_unit).strip().lower() == "surface_pair":
         news_workbook = None
@@ -1644,26 +1658,147 @@ def _prepare_partitioned_samples(
         )
         for split, split_samples_raw in partitions.items()
     }
-    aligned = {
-        split: apply_text_alignment(config, split_samples_transformed, split=split)
-        if split_samples_transformed
-        else []
-        for split, split_samples_transformed in transformed.items()
-    }
-    return aligned, manifest, transform
+    alignment_mode = str(
+        getattr(config, "text_alignment_mode", "matched")
+    ).strip().lower()
+    # Legacy matched configurations do not need a synthetic placebo plan.
+    # Explicit v3 paths are loaded below for both arms; implicit plans are
+    # needed only to reproduce the historical permuted-text behavior.
+    needs_frozen_alignment = alignment_mode != "matched"
+    alignment_plans: dict[str, TextAlignmentPlan] = {}
+    alignment_plan_path_value = str(
+        getattr(config, "text_alignment_plan_path", "")
+    ).strip()
+    frozen_plan_frame: pd.DataFrame | None = None
+    required_frozen_splits: set[str] = set()
+    if alignment_plan_path_value:
+        alignment_plan_path = _resolved_config_path(alignment_plan_path_value)
+        if not alignment_plan_path.is_file():
+            raise FileNotFoundError(
+                f"text_alignment_plan_path does not exist: {alignment_plan_path}"
+            )
+        frozen_plan_frame = pd.read_csv(alignment_plan_path)
+        if isinstance(config, FilmWGANTrainConfig):
+            # The v3 pilot is validation-only. Deliberately do not prepare or
+            # consume an outer-test alignment plan in the training bundle.
+            required_frozen_splits = {
+                name for name in ("train", "val") if transformed[name]
+            }
+        else:
+            requested = str(getattr(config, "split", "val")).strip().lower()
+            required_frozen_splits = (
+                {"train", "val", "test"} if requested == "all" else {requested}
+            )
+            if requested not in {"train", "val", "test", "all"}:
+                raise ValueError(
+                    "split must be one of ['train', 'val', 'test', 'all'], "
+                    f"got: {requested}"
+                )
+            required_frozen_splits = {
+                name for name in required_frozen_splits if transformed[name]
+            }
+        for required_split in sorted(required_frozen_splits):
+            plan = TextAlignmentPlan.from_frame(
+                frozen_plan_frame,
+                split=required_split,
+            )
+            expected_sample_ids = tuple(
+                sample.sample_id for sample in transformed[required_split]
+            )
+            expected_pair_ids = tuple(
+                sample.surface_pair_id for sample in transformed[required_split]
+            )
+            if (
+                plan.target_sample_ids != expected_sample_ids
+                or plan.target_surface_pair_ids != expected_pair_ids
+            ):
+                raise ValueError(
+                    "Frozen text alignment plan canonical item order/identities "
+                    f"do not match split={required_split!r}."
+                )
+            expected_seed = int(getattr(config, "text_permutation_seed", 20260722))
+            expected_effective_seed = expected_seed + {
+                "train": 11,
+                "val": 23,
+                "test": 37,
+            }.get(required_split, 0)
+            if (
+                int(plan.base_seed) != expected_seed
+                or int(plan.effective_seed) != expected_effective_seed
+            ):
+                raise ValueError(
+                    "Frozen text alignment plan seed mismatch for "
+                    f"split={required_split!r}: expected base/effective "
+                    f"{expected_seed}/{expected_effective_seed}, found "
+                    f"{plan.base_seed}/{plan.effective_seed}."
+                )
+            alignment_plans[required_split] = plan
+    aligned: dict[str, list[FilmWGANSample]] = {}
+    for split, split_samples_transformed in transformed.items():
+        if not split_samples_transformed:
+            aligned[split] = []
+            continue
+        plan = alignment_plans.get(split)
+        if frozen_plan_frame is not None and split not in required_frozen_splits:
+            # In particular, a train bundle keeps the outer-test partition
+            # native and untouched under the validation-pilot protocol.
+            aligned[split] = list(split_samples_transformed)
+            continue
+        if plan is None and needs_frozen_alignment:
+            # Empty path is the explicit legacy mode. It remains deterministic
+            # for old callers, while v3 always loads the frozen CSV above.
+            base_seed = int(
+                getattr(config, "text_permutation_seed", 20260722)
+            )
+            placebo_sources = None
+            if alignment_mode != "matched" and not alignment_plan_path_value:
+                placebo_sources = _permutation_for_pair_ids(
+                    [sample.surface_pair_id for sample in split_samples_transformed],
+                    seed=base_seed
+                    + {"train": 11, "val": 23, "test": 37}.get(split, 0),
+                )
+            plan = build_text_alignment_plan(
+                split_samples_transformed,
+                split=split,
+                seed=base_seed,
+                placebo_source_indices=placebo_sources,
+            )
+            alignment_plans[split] = plan
+        aligned[split] = apply_text_alignment(
+            config,
+            split_samples_transformed,
+            split=split,
+            alignment_plan=plan,
+        )
+    return aligned, manifest, transform, transformed, alignment_plans
 
 
 def _permutation_for_pair_ids(pair_ids: Sequence[str], *, seed: int) -> np.ndarray:
+    """Reproduce the unpublished v1/v2 seeded permutation exactly.
+
+    V3 training never relies on this implicit mapping: it loads a frozen
+    :class:`TextAlignmentPlan`.  Keeping the historical NumPy procedure here
+    preserves diagnostic inference for schema-5 shuffled checkpoints whose
+    resolved configs predate the frozen-plan fields.
+    """
+
     count = len(pair_ids)
     if count < 2 or len(set(pair_ids)) < 2:
-        raise ValueError("Permuted text requires at least two distinct surface pairs in each split.")
+        raise ValueError(
+            "Permuted text requires at least two distinct surface pairs in each split."
+        )
     rng = np.random.default_rng(int(seed))
     base = np.arange(count, dtype=np.int64)
     for _attempt in range(4096):
         donors = rng.permutation(base)
-        if all(pair_ids[index] != pair_ids[int(donor)] for index, donor in enumerate(donors)):
+        if all(
+            pair_ids[index] != pair_ids[int(donor)]
+            for index, donor in enumerate(donors)
+        ):
             return donors
-    raise ValueError("Could not build a same-pair-free text permutation for this split.")
+    raise ValueError(
+        "Could not build a same-pair-free text permutation for this split."
+    )
 
 
 def build_text_permutation_mapping(split_manifest: pd.DataFrame, *, seed: int) -> pd.DataFrame:
@@ -1710,15 +1845,27 @@ def apply_text_alignment(
     samples: Sequence[FilmWGANSample],
     *,
     split: str,
+    alignment_plan: TextAlignmentPlan | None = None,
 ) -> list[FilmWGANSample]:
     items = list(samples)
-    if str(getattr(config, "text_alignment_mode", "matched")).strip().lower() == "matched":
-        return items
-    offsets = {"train": 11, "val": 23, "test": 37}
-    donors = _permutation_for_pair_ids(
-        [sample.surface_pair_id for sample in items],
-        seed=int(getattr(config, "text_permutation_seed", 20260722)) + offsets.get(split, 0),
-    )
+    mode = str(getattr(config, "text_alignment_mode", "matched")).strip().lower()
+    if alignment_plan is None:
+        if mode == "matched":
+            return items
+        base_seed = int(getattr(config, "text_permutation_seed", 20260722))
+        placebo_sources = _permutation_for_pair_ids(
+            [sample.surface_pair_id for sample in items],
+            seed=base_seed + {"train": 11, "val": 23, "test": 37}.get(split, 0),
+        )
+        alignment_plan = build_text_alignment_plan(
+            items,
+            split=split,
+            seed=base_seed,
+            placebo_source_indices=placebo_sources,
+        )
+    if alignment_plan.target_sample_ids != tuple(sample.sample_id for sample in items):
+        raise ValueError("Text alignment plan sample order does not match the supplied split.")
+    donors = alignment_plan.positive_source_indices(mode)
     aligned: list[FilmWGANSample] = []
     for index, donor_index in enumerate(donors):
         sample = items[index]
@@ -1726,7 +1873,14 @@ def apply_text_alignment(
         metadata = dict(sample.metadata)
         metadata.update(
             {
-                "text_alignment_mode": "permuted",
+                "text_alignment_mode": "matched" if mode == "matched" else "permuted",
+                "text_alignment_plan_version": alignment_plan.mapping_version,
+                "text_alignment_plan_sha256": alignment_plan.sha256,
+                "text_native_source_index": index,
+                "text_positive_source_index": int(donor_index),
+                "text_placebo_source_index": int(
+                    alignment_plan.placebo_source_indices[index]
+                ),
                 "text_source_sample_id": donor.sample_id,
                 "text_source_surface_pair_id": donor.surface_pair_id,
                 "text_source_article_ids": list(
@@ -1768,7 +1922,13 @@ def create_train_val_bundle(config: FilmWGANTrainConfig) -> FilmWGANDataBundle:
     samples = load_film_wgan_samples(config)
     if len(samples) < int(config.min_samples_for_training):
         raise ValueError(f"Standalone FiLM WGAN requires at least {config.min_samples_for_training} samples.")
-    partitions, split_manifest, transform = _prepare_partitioned_samples(config, samples)
+    (
+        partitions,
+        split_manifest,
+        transform,
+        native_partitions,
+        alignment_plans,
+    ) = _prepare_partitioned_samples(config, samples)
     train_items = partitions["train"]
     val_items = partitions["val"]
     test_items = partitions["test"]
@@ -1860,6 +2020,10 @@ def create_train_val_bundle(config: FilmWGANTrainConfig) -> FilmWGANDataBundle:
             and _resolved_config_path(str(config.surface_support_path)).is_file()
             else ""
         ),
+        native_train_items=native_partitions["train"],
+        native_val_items=native_partitions["val"],
+        native_test_items=native_partitions["test"],
+        text_alignment_plans=alignment_plans,
     )
 
 
@@ -1877,7 +2041,7 @@ def select_samples(samples: Sequence[FilmWGANSample], *, selection_mode: str, se
 
 
 def split_samples(config: FilmWGANSampleConfig, samples: Sequence[FilmWGANSample]) -> list[FilmWGANSample]:
-    partitions, _manifest, _transform = _prepare_partitioned_samples(config, samples)
+    partitions, _manifest, _transform, _native, _plans = _prepare_partitioned_samples(config, samples)
     normalized_split = str(config.split).strip().lower()
     if normalized_split == "train":
         selected = partitions["train"]

@@ -1,0 +1,144 @@
+training:
+  data_path: data/processed/raw-excel-session/rq123_cme_session_20260729-131219/merged_vol_rq2_text.xlsx
+  sheet_name: gan_input_ready
+  text_embedding_mode: lp
+  text_alignment_mode: matched
+  text_permutation_seed: 20260722
+  text_alignment_plan_path: ""
+  matching_negative_source_plan_path: ""
+  sample_unit: surface_pair
+  news_workbook_path: data/raw/text_embedding/news_with_openai_embeddings_large.xlsx
+  text_lineage_mode: strict
+  text_pooling_mode: mean_l2
+  text_preprocessing_mode: pca
+  text_transform_path: ""
+  text_pca_components: 128
+  text_pca_whiten: false
+  surface_support_mode: raw_observed
+  surface_support_path: outputs/experiments/rq123_corrected/_unresolved_support.json
+  support_grid_quantile_low: 0.05
+  support_grid_quantile_high: 0.95
+  support_strike_bins: 16
+  support_maturity_bins: 16
+  support_min_train_pair_cells: 1
+  report_atm7_metric: false
+
+  split_strategy: grouped_chronological
+  split_manifest_path: ""
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  min_samples_for_training: 2
+
+  normalize_current_surface: true
+  normalize_target_delta: true
+  normalize_text_embedding: false
+
+  forecast_mode: stochastic_wgan
+  conditioning_mode: residual_film
+  critic_conditioning_mode: transition_matching
+  noise_dim: 64
+  gen_base_channels: 64
+  disc_base_channels: 64
+  gen_res_blocks: 2
+  disc_res_blocks: 1
+  text_hidden_dim: 256
+  text_out_dim: 64
+  fusion_hidden_dim: 1024
+  text_dropout: 0.30
+  critic_text_dropout: 0.0
+  text_gate_initial_value: 0.0
+
+  learning_rate: 2.0e-5
+  generator_learning_rate: 2.0e-5
+  discriminator_learning_rate: 1.0e-5
+  backbone_learning_rate: 2.0e-6
+  text_adapter_learning_rate: 2.0e-5
+  beta_1: 0.5
+  beta_2: 0.9
+  critic_iter: 5
+  lambda_gp: 20.0
+  gradient_penalty_mode: support_masked
+  num_epochs: 60
+  scheduler_horizon_epochs: 60
+  batch_size: 32
+
+  lambda_adv: 0.1
+  lambda_film: 1.0e-4
+  lambda_mismatch: 0.0
+  lambda_critic_matching: 0.10
+  lambda_generator_matching: 0.01
+  matching_logit_scale: 4.0
+  matching_negative_count: 2
+  matching_min_supported_cells: 16
+  matching_negative_seed: 20260809
+  matching_duplicate_cosine_threshold: 0.995
+  matching_gradient_probe_size: 64
+  matching_gradient_probe_seed: 20260809
+  diagnostics_schema_version: 1
+  adv_warmup_epochs: 2
+  adv_ramp_epochs: 5
+  lambda_calendar: 0.0
+  lambda_butterfly: 0.0
+  lambda_smooth: 0.0
+  lambda_recon: 20.0
+  recon_weight_mode: short_atm_band
+  recon_atm_range: 0.02
+  recon_atm_short_end_max_days: 21.0
+  recon_atm_multiplier: 8.0
+  use_calendar_constraint: false
+  use_butterfly_constraint: false
+  use_smooth_constraint: false
+  use_recon_constraint: true
+
+  use_atm_short_loss: true
+  lambda_atm_short: 30.0
+  atm_short_range: 0.02
+  atm_short_max_days: 21.0
+
+  eval_mc_samples: 32
+  evaluation_noise_seed: 20260809
+  eval_reweight_beta_mode: fixed
+  eval_reweight_beta: 0.0
+  eval_aggregation_mode: weighted_mean
+  eval_calibration_levels: [0.5, 0.8, 0.9]
+  arbitrage_violation_tolerance: 1.0e-8
+
+  checkpoint_metric: val_mae
+  extra_checkpoint_metrics: []
+  checkpoint_warmup_epochs: 10
+  use_early_stopping: true
+  early_stopping_patience: 10
+  early_stopping_min_delta: 0.0
+
+  initial_generator_checkpoint_path: ""
+  freeze_backbone_epochs: 5
+  seed: 42
+  cuda: true
+  num_workers: 0
+  output_root: ""
+  checkpoints_path: ""
+  metrics_path: ""
+  save_every: 0
+  training_protocol_version: film_wgan_transition_matching_symmetric_negative_v3
+  # Filled uniquely by the orchestrator for every training run.
+  run_fingerprint_sha256: ""
+
+generate_result:
+  evaluation_noise_seed: 20260809
+  mc_samples: 64
+  reweight_beta_mode: fixed
+  reweight_beta: 0.0
+  quantiles: [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95]
+  calibration_levels: [0.5, 0.8, 0.9]
+  arbitrage_violation_tolerance: 1.0e-8
+  # This protocol is validation-only. Outer-test generation is fail-closed.
+  split: val
+  selection_mode: all
+  selection_count: 0
+  aggregation_mode: weighted_mean
+  residual_blend_alpha: 1.0
+  output_dir: validation_pilot_json
+  save_json: true
+  save_plots: false
+  save_full_atm_timeseries: false

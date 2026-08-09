@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 
 import torch
@@ -11,6 +12,21 @@ VOL_FLOOR = 1e-4
 VOL_CEIL = 5.0
 _LOG_VOL_FLOOR = math.log(VOL_FLOOR)
 _LOG_VOL_CEIL = math.log(VOL_CEIL)
+
+
+@dataclass(frozen=True)
+class FutureSurfaceReconstruction:
+    """Delivered future surface and the exact clamp audit used to create it."""
+
+    surface: torch.Tensor
+    clamped_log_surface: torch.Tensor
+    clipped_mask: torch.Tensor
+
+    @property
+    def clamped_log(self) -> torch.Tensor:
+        """Short alias for callers that use log-space terminology."""
+
+        return self.clamped_log_surface
 
 
 def _conv2d_out_size(size: int, kernel_size: int = 3, stride: int = 2, padding: int = 1, dilation: int = 1) -> int:
@@ -555,13 +571,44 @@ class FilmWGANCritic(nn.Module):
         return self.classifier(combined)
 
 
-def reconstruct_future_surface(current_surface_flat: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
-    """Reconstruct future volatility levels from current levels and a log-IV increment.
+def reconstruct_future_surface_terms(
+    current_surface_flat: torch.Tensor,
+    delta: torch.Tensor,
+) -> FutureSurfaceReconstruction:
+    """Reconstruct levels while retaining the exact delivered log transition.
 
     Clamps future_log into [log(VOL_FLOOR), log(VOL_CEIL)] before exp to prevent overflow
     when the generator emits large deltas during early training.
     """
 
     current_log = torch.log(torch.clamp(current_surface_flat, min=VOL_FLOOR))
-    future_log = torch.clamp(current_log + delta, min=_LOG_VOL_FLOOR, max=_LOG_VOL_CEIL)
-    return torch.exp(future_log).clamp(min=VOL_FLOOR, max=VOL_CEIL)
+    proposed_log_surface = current_log + delta
+    clipped_mask = (proposed_log_surface < _LOG_VOL_FLOOR) | (
+        proposed_log_surface > _LOG_VOL_CEIL
+    )
+    clamped_log_surface = torch.clamp(
+        proposed_log_surface,
+        min=_LOG_VOL_FLOOR,
+        max=_LOG_VOL_CEIL,
+    )
+    surface = torch.exp(clamped_log_surface).clamp(min=VOL_FLOOR, max=VOL_CEIL)
+    return FutureSurfaceReconstruction(
+        surface=surface,
+        clamped_log_surface=clamped_log_surface,
+        clipped_mask=clipped_mask,
+    )
+
+
+def reconstruct_future_surface_with_diagnostics(
+    current_surface_flat: torch.Tensor,
+    delta: torch.Tensor,
+) -> FutureSurfaceReconstruction:
+    """Readable alias for the structured reconstruction helper."""
+
+    return reconstruct_future_surface_terms(current_surface_flat, delta)
+
+
+def reconstruct_future_surface(current_surface_flat: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
+    """Backward-compatible level-only reconstruction wrapper."""
+
+    return reconstruct_future_surface_terms(current_surface_flat, delta).surface

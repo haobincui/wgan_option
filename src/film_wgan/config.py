@@ -9,11 +9,16 @@ from typing import Any, Dict, Iterable, Mapping, Type, TypeVar
 import torch
 import yaml
 
+from .protocol import DIAGNOSTICS_SCHEMA_VERSION, TRAINING_PROTOCOL_VERSION_V3
 from utils.output_paths import default_output_root, find_best_checkpoint
 from utils.training_paths import checkpoint_named_dir, generate_result_dir
 from wgan_option.config_parsing import load_yaml_config_values, load_yaml_mapping, parse_typed_overrides
 
 T = TypeVar("T")
+
+_V3_MATCHING_NEGATIVE_COUNT = 2
+_V3_MATCHING_GRADIENT_PROBE_SIZE = 64
+_V3_MATCHING_GRADIENT_PROBE_SEED = 20260809
 
 
 @dataclass
@@ -28,6 +33,8 @@ class FilmWGANTrainConfig:
     test_ratio: float = 0.0
     split_strategy: str = "legacy_row"
     split_manifest_path: str = ""
+    text_alignment_plan_path: str = ""
+    matching_negative_source_plan_path: str = ""
     text_alignment_mode: str = "matched"
     text_permutation_seed: int = 20260722
     sample_unit: str = "article_row"
@@ -99,6 +106,8 @@ class FilmWGANTrainConfig:
     matching_min_supported_cells: int = 16
     matching_negative_seed: int = 20260809
     matching_duplicate_cosine_threshold: float = 0.995
+    matching_gradient_probe_size: int = 64
+    matching_gradient_probe_seed: int = 20260809
     adv_warmup_epochs: int = 0
     adv_ramp_epochs: int = 0
     lambda_calendar: float = 2.0
@@ -129,6 +138,10 @@ class FilmWGANTrainConfig:
     checkpoint_metric: str = "val_mae_gap_vs_current"
     extra_checkpoint_metrics: list[str] = field(default_factory=list)
     checkpoint_warmup_epochs: int = 10
+    # A fixed horizon decouples the LR schedule from an anchored run length.
+    # Zero preserves the legacy behavior of using ``num_epochs``.
+    scheduler_horizon_epochs: int = 0
+    diagnostics_schema_version: int = 1
 
     use_early_stopping: bool = False
     early_stopping_patience: int = 10
@@ -145,6 +158,8 @@ class FilmWGANTrainConfig:
     parent_text_transform_policy: str = "exact"
     freeze_backbone_epochs: int = 0
     save_every: int = 10
+    training_protocol_version: str = ""
+    run_fingerprint_sha256: str = ""
 
 
 @dataclass
@@ -159,6 +174,8 @@ class FilmWGANSampleConfig:
     test_ratio: float = 0.0
     split_strategy: str = "legacy_row"
     split_manifest_path: str = ""
+    text_alignment_plan_path: str = ""
+    matching_negative_source_plan_path: str = ""
     text_alignment_mode: str = "matched"
     text_permutation_seed: int = 20260722
     sample_unit: str = "article_row"
@@ -201,6 +218,7 @@ class FilmWGANSampleConfig:
     save_json: bool = True
     save_plots: bool = True
     save_full_atm_timeseries: bool = True
+    training_protocol_version: str = ""
 
 
 _TRAIN_DEFAULTS = FilmWGANTrainConfig()
@@ -216,6 +234,8 @@ _SHARED_GENERATE_FIELDS = {
     "test_ratio",
     "split_strategy",
     "split_manifest_path",
+    "text_alignment_plan_path",
+    "matching_negative_source_plan_path",
     "text_alignment_mode",
     "text_permutation_seed",
     "sample_unit",
@@ -239,6 +259,7 @@ _SHARED_GENERATE_FIELDS = {
     "seed",
     "evaluation_noise_seed",
     "cuda",
+    "training_protocol_version",
 }
 
 
@@ -262,6 +283,36 @@ def _validate_split_fields(config: FilmWGANTrainConfig | FilmWGANSampleConfig) -
 
 def _validate_common_fields(config: FilmWGANTrainConfig | FilmWGANSampleConfig) -> None:
     _validate_split_fields(config)
+    alignment_plan_path = str(config.text_alignment_plan_path).strip()
+    negative_plan_path = str(config.matching_negative_source_plan_path).strip()
+    if bool(alignment_plan_path) != bool(negative_plan_path):
+        raise ValueError(
+            "text_alignment_plan_path and matching_negative_source_plan_path "
+            "must either both be set or both be empty."
+        )
+    protocol_version = str(config.training_protocol_version).strip()
+    v3_protocol = protocol_version == TRAINING_PROTOCOL_VERSION_V3
+    if protocol_version and not v3_protocol:
+        raise ValueError(
+            "training_protocol_version is unsupported; expected empty legacy mode or "
+            f"{TRAINING_PROTOCOL_VERSION_V3!r}."
+        )
+    if not v3_protocol and (alignment_plan_path or negative_plan_path):
+        raise ValueError(
+            "Frozen plan paths require the explicit v3 training_protocol_version."
+        )
+    if v3_protocol:
+        if not alignment_plan_path:
+            raise ValueError(
+                "The v3 protocol requires text_alignment_plan_path and "
+                "matching_negative_source_plan_path."
+            )
+        for field_name, path_value in (
+            ("text_alignment_plan_path", alignment_plan_path),
+            ("matching_negative_source_plan_path", negative_plan_path),
+        ):
+            if not Path(path_value).expanduser().is_file():
+                raise ValueError(f"{field_name} does not exist: {path_value}")
     if int(config.evaluation_noise_seed) < -1:
         raise ValueError("evaluation_noise_seed must be -1 (inherit seed) or non-negative.")
     alignment = str(config.text_alignment_mode).strip().lower()
@@ -411,6 +462,14 @@ def _validate_train_fields(config: FilmWGANTrainConfig) -> None:
         raise ValueError("matching_min_supported_cells must be positive.")
     if int(config.matching_negative_seed) < 0:
         raise ValueError("matching_negative_seed must be non-negative.")
+    if int(config.matching_gradient_probe_size) < 0:
+        raise ValueError("matching_gradient_probe_size must be non-negative.")
+    if int(config.matching_gradient_probe_seed) < 0:
+        raise ValueError("matching_gradient_probe_seed must be non-negative.")
+    if int(config.scheduler_horizon_epochs) < 0:
+        raise ValueError("scheduler_horizon_epochs must be non-negative.")
+    if int(config.diagnostics_schema_version) < 1:
+        raise ValueError("diagnostics_schema_version must be positive.")
     if not -1.0 < float(config.matching_duplicate_cosine_threshold) < 1.0:
         raise ValueError(
             "matching_duplicate_cosine_threshold must be strictly between -1 and 1."
@@ -420,6 +479,63 @@ def _validate_train_fields(config: FilmWGANTrainConfig) -> None:
     ) > 1e-12:
         raise ValueError(
             "transition_matching uses lambda_critic_matching; lambda_mismatch must be zero."
+        )
+    run_fingerprint = str(config.run_fingerprint_sha256).strip().lower()
+    if run_fingerprint and (
+        len(run_fingerprint) != 64
+        or any(character not in "0123456789abcdef" for character in run_fingerprint)
+    ):
+        raise ValueError("run_fingerprint_sha256 must be empty or a 64-character lowercase hex digest.")
+    protocol_version = str(config.training_protocol_version).strip()
+    v3_protocol = protocol_version == TRAINING_PROTOCOL_VERSION_V3
+    if not v3_protocol and run_fingerprint:
+        raise ValueError(
+            "run_fingerprint_sha256 requires the explicit v3 "
+            "training_protocol_version."
+        )
+    if v3_protocol and critic_conditioning_mode != "transition_matching":
+        raise ValueError(
+            "The v3 symmetric-negative training protocol requires "
+            "critic_conditioning_mode=transition_matching."
+        )
+    if v3_protocol and not run_fingerprint:
+        raise ValueError(
+            "A transition_matching v3 run requires run_fingerprint_sha256."
+        )
+    if v3_protocol and int(config.diagnostics_schema_version) != int(
+        DIAGNOSTICS_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "diagnostics_schema_version does not match the v3 protocol constant."
+        )
+    if v3_protocol and int(config.matching_negative_count) != _V3_MATCHING_NEGATIVE_COUNT:
+        raise ValueError(
+            "The v3 protocol fixes matching_negative_count="
+            f"{_V3_MATCHING_NEGATIVE_COUNT}."
+        )
+    if v3_protocol and int(config.matching_gradient_probe_size) != (
+        _V3_MATCHING_GRADIENT_PROBE_SIZE
+    ):
+        raise ValueError(
+            "The v3 protocol fixes matching_gradient_probe_size="
+            f"{_V3_MATCHING_GRADIENT_PROBE_SIZE}."
+        )
+    if v3_protocol and int(config.matching_gradient_probe_seed) != (
+        _V3_MATCHING_GRADIENT_PROBE_SEED
+    ):
+        raise ValueError(
+            "The v3 protocol fixes matching_gradient_probe_seed="
+            f"{_V3_MATCHING_GRADIENT_PROBE_SEED}."
+        )
+    if v3_protocol and str(config.checkpoint_metric).strip() != "val_mae":
+        raise ValueError(
+            "The v3 protocol fixes checkpoint_metric=val_mae; matcher and "
+            "diagnostic metrics are descriptive only."
+        )
+    if v3_protocol and list(config.extra_checkpoint_metrics):
+        raise ValueError(
+            "The v3 protocol requires extra_checkpoint_metrics=[] so held-out "
+            "matcher diagnostics cannot influence checkpoint selection."
         )
     if critic_conditioning_mode != "transition_matching" and any(
         abs(value) > 1e-12
