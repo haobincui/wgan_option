@@ -1,3 +1,4 @@
+import csv
 import math
 import sys
 import tempfile
@@ -15,6 +16,7 @@ for path in (ROOT, SRC):
         sys.path.insert(0, str(path))
 
 from film_wgan.config import FilmWGANTrainConfig, _validate_train_fields  # noqa: E402
+from film_wgan.io import write_csv  # noqa: E402
 from film_wgan.models import FilmWGANCritic, FilmWGANGenerator  # noqa: E402
 from film_wgan.protocol import (  # noqa: E402
     CHECKPOINT_SCHEMA_VERSION_V3,
@@ -468,6 +470,47 @@ class TestCanonicalMatcherWiringV3(unittest.TestCase):
         metrics = trainer._evaluate_matching_gradient_probe()
         self.assertEqual(metrics["diag_g_probe_active"], 0.0)
         self.assertTrue(math.isnan(metrics["diag_g_all_parameter_ratio"]))
+
+    def test_probe_schema_is_stable_across_warmup_and_active_epochs(self):
+        trainer = self._tiny_diagnostic_trainer()
+        trainer.config = FilmWGANTrainConfig(
+            **{
+                **trainer.config.__dict__,
+                "adv_warmup_epochs": 2,
+            }
+        )
+        rows = []
+        for epoch in (1, 2, 3):
+            trainer._current_epoch = epoch
+            rows.append(
+                {
+                    "epoch": epoch,
+                    **trainer._evaluate_matching_gradient_probe(),
+                }
+            )
+
+        self.assertEqual(rows[0].keys(), rows[1].keys())
+        self.assertEqual(rows[0].keys(), rows[2].keys())
+        self.assertEqual(rows[0]["diag_g_probe_active"], 0.0)
+        self.assertEqual(rows[1]["diag_g_probe_active"], 0.0)
+        self.assertEqual(rows[2]["diag_g_probe_active"], 1.0)
+        self.assertEqual(rows[0]["g_matching_gradient_probe_samples"], 3.0)
+        self.assertEqual(
+            rows[0]["g_matching_gradient_probe_effective_lambda"], 0.0
+        )
+        self.assertTrue(math.isnan(rows[0]["g_matching_gradient_norm_all"]))
+        self.assertTrue(
+            math.isfinite(rows[2]["g_matching_gradient_norm_all"])
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "training_metrics.csv"
+            write_csv(path, rows)
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                written = list(csv.DictReader(handle))
+            self.assertEqual(len(written), 3)
+            self.assertIn("g_nonmatching_gradient_norm_text_adapter", written[0])
+            self.assertIn("g_matching_gradient_ratio_text_adapter", written[0])
 
     def test_heldout_diagnostics_restore_modes_rng_and_parameters(self):
         trainer = self._tiny_diagnostic_trainer()

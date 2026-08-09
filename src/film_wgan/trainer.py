@@ -1201,7 +1201,19 @@ class FilmWGANTrainer(BaseTrainer):
     @staticmethod
     def _inactive_matching_gradient_probe_metrics(
         eligible_targets: int = 0,
+        *,
+        probe_samples: int = 0,
+        effective_lambda: float = 0.0,
     ) -> dict[str, float]:
+        """Return the complete probe schema when the probe is inactive.
+
+        ``training_metrics.csv`` derives its header from the first epoch.  The
+        probe is intentionally inactive during adversarial warmup, so omitting
+        the active-only fields here would make the first active epoch impossible
+        to append to the same metric table.  Keep every active probe field in
+        this payload and use NaN only for measurements that were not made.
+        """
+
         return {
             "diag_g_probe_active": 0.0,
             "diag_g_probe_eligible_targets": float(eligible_targets),
@@ -1213,21 +1225,43 @@ class FilmWGANTrainer(BaseTrainer):
             "diag_g_matching_nonmatching_output_grad_cosine": float("nan"),
             "diag_g_all_parameter_ratio": float("nan"),
             "diag_g_text_adapter_ratio": float("nan"),
+            "g_matching_gradient_probe_samples": float(probe_samples),
+            "g_matching_gradient_norm_all": float("nan"),
+            "g_nonmatching_gradient_norm_all": float("nan"),
+            "g_matching_gradient_ratio_all": float("nan"),
+            "g_matching_gradient_norm_text_adapter": float("nan"),
+            "g_nonmatching_gradient_norm_text_adapter": float("nan"),
+            "g_matching_gradient_ratio_text_adapter": float("nan"),
+            "g_matching_gradient_probe_effective_lambda": float(
+                effective_lambda
+            ),
         }
 
     def _evaluate_matching_gradient_probe(self) -> dict[str, float]:
         """Measure weighted matching/non-matching generator gradients safely."""
 
+        probe_batch = self._matching_gradient_probe_batch
+        probe_samples = (
+            int(probe_batch[0].size(0)) if probe_batch is not None else 0
+        )
+        ramp = self._adversarial_ramp_factor()
+        effective_matching_weight = (
+            float(self.config.lambda_generator_matching)
+            * ramp
+        )
         if (
             self.bundle is None
             or self.generator is None
             or self.normalization is None
             or self.critic is None
             or self.critic.conditioning_mode != "transition_matching"
-            or self._matching_gradient_probe_batch is None
+            or probe_batch is None
         ):
-            return self._inactive_matching_gradient_probe_metrics()
-        batch = self._matching_gradient_probe_batch
+            return self._inactive_matching_gradient_probe_metrics(
+                probe_samples=probe_samples,
+                effective_lambda=effective_matching_weight,
+            )
+        batch = probe_batch
         (
             current_features,
             text_features,
@@ -1263,13 +1297,11 @@ class FilmWGANTrainer(BaseTrainer):
             sample_indices,
             split="train",
         )
-        ramp = self._adversarial_ramp_factor()
-        effective_matching_weight = (
-            float(self.config.lambda_generator_matching) * ramp
-        )
         if eligible.numel() == 0 or effective_matching_weight <= 0.0:
             return self._inactive_matching_gradient_probe_metrics(
-                int(eligible.numel())
+                int(eligible.numel()),
+                probe_samples=probe_samples,
+                effective_lambda=effective_matching_weight,
             )
         parameters = list(self.generator.parameters())
         adapter_ids = (
@@ -1503,9 +1535,8 @@ class FilmWGANTrainer(BaseTrainer):
                 matching_adapter, nonmatching_adapter
             ),
             "g_matching_gradient_probe_effective_lambda": float(
-                self.config.lambda_generator_matching
-            )
-            * self._adversarial_ramp_factor(),
+                effective_matching_weight
+            ),
         }
 
     def _adversarial_ramp_factor(self) -> float:
@@ -2950,6 +2981,7 @@ class FilmWGANTrainer(BaseTrainer):
                         "diag_",
                         "g_transition_",
                         "g_matching_gradient_",
+                        "g_nonmatching_gradient_",
                         "val_matching_",
                     )
                 )
