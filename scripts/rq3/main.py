@@ -28,8 +28,8 @@ from scripts.rq3.news_quiet import (  # noqa: E402
     build_news_quiet_workbook,
     prepare_news_quiet_targets,
 )
-from scripts.rq3.scheduled_news_regime import (  # noqa: E402
-    run_scheduled_news_regime,
+from scripts.rq3.market_jump_detection import (  # noqa: E402
+    run_market_jump_detection,
 )
 from wgan_option.merge_support import DEFAULT_SOURCE_TIMEZONE  # noqa: E402
 
@@ -222,6 +222,24 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Override the frozen scheduled-event calendar path.",
     )
+
+    market_jumps = subparsers.add_parser(
+        "detect-market-jumps",
+        help=(
+            "Detect approximate-ATM and volatility-skew jumps from the full "
+            "raw-IV market index, then join scheduled releases and Factiva news."
+        ),
+    )
+    market_jumps.add_argument(
+        "--config",
+        required=True,
+        help="Market-jump detection YAML config.",
+    )
+    market_jumps.add_argument(
+        "--output-dir",
+        default="",
+        help="Output archive. Defaults to outputs/rq3/atm_skew_jumps_<timestamp>.",
+    )
     return parser
 
 
@@ -328,6 +346,11 @@ def main(argv: Iterable[str] | None = None) -> Path:
         print(f"RQ3 news/quiet result analysis written to {output}")
         return output
     if args.command == "scheduled-news-regime":
+        # Keep the frozen-model training stack out of lightweight analytical
+        # commands such as detect-market-jumps.  Some research environments
+        # intentionally install only the pandas/scipy analysis dependencies.
+        from scripts.rq3.scheduled_news_regime import run_scheduled_news_regime
+
         output = run_scheduled_news_regime(
             args.config,
             output_dir=args.output_dir or None,
@@ -336,6 +359,14 @@ def main(argv: Iterable[str] | None = None) -> Path:
             event_calendar_override=args.event_calendar or None,
         )
         print(f"RQ3 scheduled-news regime archive written to {output}")
+        return output
+    if args.command == "detect-market-jumps":
+        output_dir = args.output_dir or _default_output_dir("atm_skew_jumps")
+        output = run_market_jump_detection(
+            args.config,
+            output_dir=output_dir,
+        )
+        print(f"RQ3 ATM/skew market-jump analysis written to {output}")
         return output
     raise ValueError(f"Unknown RQ3 command: {args.command}")
 

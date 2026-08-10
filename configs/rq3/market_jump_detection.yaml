@@ -1,0 +1,42 @@
+market_jump_detection:
+  inputs:
+    market_index_sqlite: data/processed/raw-market-index/raw_2022_2023_london_itm5_relaxed_v2/market_surface_index.sqlite
+    session_calendar_csv: data/reference/cme_treasury_globex_closures_2022_2023.csv
+    official_event_calendars:
+      - data/reference/rq3_scheduled_macro_events_2022.csv
+      - data/reference/rq3_scheduled_macro_events_2023.csv
+    news_xlsx: data/raw/text_embedding/news_with_openai_embeddings_large.xlsx
+    news_alignment_csv: data/processed/raw-excel-session/rq123_cme_session_20260729-131219/news_market_session_alignment.csv
+    news_source_timezone: Europe/London
+
+  analysis:
+    atm_distance_thresholds: [0.01, 0.02, 0.05]
+    skew_band: 0.05
+    min_skew_span: 0.005
+    rolling_skew_windows:
+      30: 15
+      60: 30
+      120: 60
+    rolling_max_gap_minutes: 5
+    min_scoring_group_size: 30
+    tier_thresholds:
+      high:
+        percentile: 0.999
+        robust_z: 6.0
+      primary:
+        percentile: 0.995
+        robust_z: 5.0
+      broad:
+        percentile: 0.99
+        robust_z: 4.0
+    episode_tolerance_minutes: 5
+    episode_sensitivity_minutes: [0, 10]
+    news_pre_minutes: 5
+    news_post_minutes: 15
+
+  report:
+    enabled: true
+    max_case_events: 12
+
+  validation:
+    enforce_expected_counts: true
