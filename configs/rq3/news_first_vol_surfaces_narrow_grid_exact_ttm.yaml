@@ -1,0 +1,101 @@
+news_first_vol_surfaces:
+  inputs:
+    market_index_sqlite: data/processed/raw-market-index/raw_2022_2023_london_itm5_relaxed_v2/market_surface_index.sqlite
+    pair_slice_metrics_csv: outputs/rq3/atm_skew_jumps_20260810_final/pair_slice_metrics.csv.gz
+    session_calendar_csv: data/reference/cme_treasury_globex_closures_2022_2023.csv
+    rate_curve_csv: data/reference/us_treasury_par_yield_curve_2022_2023.csv
+    news_xlsx: data/raw/text_embedding/news_with_openai_embeddings_large.xlsx
+    news_source_timezone: Europe/London
+
+  analysis:
+    tolerance_minutes: [5, 10, 15, 30]
+    horizon_minutes: 5
+    current_window_minutes: 5
+    atm_qualities: [A, B]
+    include_closed_in_training: false
+
+  grid:
+    strike_bins: 16
+    maturity_bins: 16
+    moneyness_min: 0.97
+    moneyness_max: 1.03
+    maturity_min_days: 1
+    maturity_max_days: 38
+    integer_maturity_days: true
+    maturity_days_nodes: [1, 2, 3, 6, 7, 8, 9, 10, 14, 15, 17, 21, 26, 30, 35, 38]
+
+  quality:
+    pricing_model: black76
+    min_strikes_per_expiry: 2
+    min_expiries_per_surface: 2
+    max_rate_staleness_days: 7
+    max_underlying_staleness_seconds: 60
+    underlying_match_mode: last_prior_trade
+    option_filter_mode: otm_preferred_itm_fallback
+    max_itm_moneyness_distance: 0.05
+    iv_aggregation_mode: volume_weighted_median
+    interpolation_policy: linear_percent_strike_and_linear_total_variance_by_maturity
+
+  validation:
+    enforce_expected_counts: true
+    expected_news_rows: 14900
+    expected_parsed_news_rows: 14900
+    expected_market_pairs: 34450
+    expected_counts_basis: pair_slice_metrics_first_evaluable_pair_exact_ttm_grid_support_audit
+    reconciliation_note: >-
+      This is an independent exact-TTM 16x16 representation. The maturity
+      nodes were selected using only effective origins before 2023-04-01 to
+      increase exact canonical-point coverage while retaining 1/38-day
+      endpoints and a maximum five-business-day gap. Q2 was used only as a
+      stability audit and Q3 was not used to choose the grid. Training
+      eligibility before strict support is unchanged; grid-specific raw-joint
+      support counts and the exact grid fingerprint are frozen below.
+    expected_counts:
+      "5":
+        matched_open_news: 1628
+        surface_usable_news: 1610
+        surface_usable_timestamps: 1329
+        surface_usable_pairs: 1283
+        atm_ab_surface_news: 1311
+        atm_ab_surface_timestamps: 1083
+        atm_ab_surface_pairs: 1051
+        atm_ab_news_maturity_rows: 1955
+        atm_ab_pair_maturities: 1562
+        joint_strict_support_pairs: 1026
+        grid_fingerprint: 7b72f2d3d12a55999415351ba071f8d87863ed57445f1bbf03543e39f9f186b8
+      "10":
+        matched_open_news: 1992
+        surface_usable_news: 1971
+        surface_usable_timestamps: 1615
+        surface_usable_pairs: 1508
+        atm_ab_surface_news: 1568
+        atm_ab_surface_timestamps: 1289
+        atm_ab_surface_pairs: 1216
+        atm_ab_news_maturity_rows: 2281
+        atm_ab_pair_maturities: 1776
+        joint_strict_support_pairs: 1196
+        grid_fingerprint: 7b72f2d3d12a55999415351ba071f8d87863ed57445f1bbf03543e39f9f186b8
+      "15":
+        matched_open_news: 2298
+        surface_usable_news: 2268
+        surface_usable_timestamps: 1851
+        surface_usable_pairs: 1654
+        atm_ab_surface_news: 1771
+        atm_ab_surface_timestamps: 1448
+        atm_ab_surface_pairs: 1316
+        atm_ab_news_maturity_rows: 2529
+        atm_ab_pair_maturities: 1904
+        joint_strict_support_pairs: 1294
+        grid_fingerprint: 7b72f2d3d12a55999415351ba071f8d87863ed57445f1bbf03543e39f9f186b8
+      "30":
+        matched_open_news: 2950
+        surface_usable_news: 2915
+        surface_usable_timestamps: 2378
+        surface_usable_pairs: 1947
+        atm_ab_surface_news: 2241
+        atm_ab_surface_timestamps: 1830
+        atm_ab_surface_pairs: 1529
+        atm_ab_news_maturity_rows: 3110
+        atm_ab_pair_maturities: 2174
+        joint_strict_support_pairs: 1475
+        grid_fingerprint: 7b72f2d3d12a55999415351ba071f8d87863ed57445f1bbf03543e39f9f186b8

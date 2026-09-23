@@ -1,0 +1,220 @@
+news_first_vol_training:
+  datasets:
+    root: data/processed/rq3/news_first_vol_surfaces_q097_103_ttm07_38_v1
+    workbook_template: tolerance_{tolerance02}m/merged_vol.xlsx
+    tolerances_minutes: [5, 10, 15, 30]
+    common_evaluation_tolerance_minutes: 5
+    sheet_name: gan_input_ready
+    text_embedding_mode: lp
+    seed: 42
+    support_mask_mode: raw_joint
+    text_ablation_modes: [real_text]
+    text_shuffle_seed: 42
+
+  # The orchestrator replaces these boundaries per rolling fold.  Keeping F4
+  # here makes direct inspection safe: the default validation ends before Q3.
+  split:
+    train_end_utc: "2023-04-01T00:00:00Z"
+    validation_end_utc: "2023-07-01T00:00:00Z"
+    validation_mc_samples: 16
+
+  label_reliability:
+    # The orchestrator reads these sheets, asserts within-pair equality, joins
+    # the strict-support audit, filters pre-Q3, and passes compact CSV manifests
+    # to the bootstrap core.  Reconstructed draws remain audit-only.
+    pair_manifests:
+      "5": data/processed/rq3/news_first_vol_surfaces_q097_103_ttm07_38_v1/tolerance_05m/merged_vol.xlsx
+      "30": data/processed/rq3/news_first_vol_surfaces_q097_103_ttm07_38_v1/tolerance_30m/merged_vol.xlsx
+    raw_file_globs:
+      - data/raw/option_data/0#TY+/*.csv.gz
+    priced_target_rows:
+      - data/processed/rq3/news_first_vol_surfaces_q097_103_ttm07_38_v1/shared_surface_inputs/surface-raw-excel-precalib-points.csv
+    current_surface_params: data/processed/rq3/news_first_vol_surfaces_q097_103_ttm07_38_v1/shared_surface_inputs/surface-raw-excel.json
+    rate_curve_path: data/reference/us_treasury_par_yield_curve_2022_2023.csv
+    calendar_path: data/reference/cme_treasury_globex_closures_2022_2023.csv
+    priced_target_direction: backward
+    priced_target_calibration_time_column: calibration_datetime_utc
+    target_anchor_horizon_minutes: 5
+    grid:
+      strike_grid: [0.97, 0.974, 0.978, 0.982, 0.986, 0.99, 0.994, 0.998, 1.002, 1.006, 1.01, 1.014, 1.018, 1.022, 1.026, 1.03]
+      maturity_days_grid: [7, 9, 11, 13, 15, 17, 19, 21, 24, 26, 28, 30, 32, 34, 36, 38]
+    pre_q3_end_utc: "2023-07-01T00:00:00Z"
+    bayesian_draws: 1000
+    cluster_draws: 1000
+    seed: 20260820
+    methods: [support_preserving_bayesian, strike_cluster]
+
+  label_reliability_experiment:
+    enabled: true
+    capacity_profile: small
+    initial_learning_rate: 5.0e-7
+    scheduler_min_lr: 5.0e-8
+    seeds: [42, 202, 404]
+    tolerances_minutes: [5, 30]
+    text_ablation_mode: real_text
+    generator_current_input_mode: current_support_masked
+    generator_noise_mode: gaussian
+    noise_dim: 32
+    q4_loader_prediction_forbidden: true
+    dry_run_assumed_winner: C
+    small_profile:
+      gen_base_channels: 4
+      gen_text_hidden_dim: 32
+      gen_text_out_dim: 16
+      gen_hidden_dim: 128
+      disc_base_channels: 4
+      disc_text_hidden_dim: 16
+      disc_hidden_dim: 96
+      expected_regression_parameters: 119376
+      expected_wgan_parameters: 149333
+    folds:
+      - fold_id: F1
+        train_end_utc: "2022-07-01T00:00:00Z"
+        validation_start_utc: "2022-07-01T00:00:00Z"
+        validation_end_utc: "2022-10-01T00:00:00Z"
+      - fold_id: F2
+        train_end_utc: "2022-10-01T00:00:00Z"
+        validation_start_utc: "2022-10-01T00:00:00Z"
+        validation_end_utc: "2023-01-01T00:00:00Z"
+      - fold_id: F3
+        train_end_utc: "2023-01-01T00:00:00Z"
+        validation_start_utc: "2023-01-01T00:00:00Z"
+        validation_end_utc: "2023-04-01T00:00:00Z"
+      - fold_id: F4
+        train_end_utc: "2023-04-01T00:00:00Z"
+        validation_start_utc: "2023-04-01T00:00:00Z"
+        validation_end_utc: "2023-07-01T00:00:00Z"
+    arms:
+      - arm_id: A
+        mode: none
+        filter_min_joint_cells: null
+        soft_weight: false
+      - arm_id: B
+        mode: support_filter
+        filter_min_joint_cells: 16
+        soft_weight: false
+      - arm_id: C
+        mode: soft_weight
+        filter_min_joint_cells: null
+        soft_weight: true
+      - arm_id: D
+        mode: support_filter_soft_weight
+        filter_min_joint_cells: 16
+        soft_weight: true
+    selection:
+      bootstrap_iterations: 10000
+      bootstrap_seed: 20260820
+      holm_family_size: 3
+      alpha: 0.05
+      minimum_nonworse_folds: 3
+      minimum_nonworse_seeds: 2
+      one_se_priority: [C, B, D]
+      q3_used_for_selection: false
+    preflight:
+      max_peak_gpu_memory_gib: 20.0
+      max_host_ram_fraction: 0.85
+
+  models:
+    regression:
+      trainer_command: vol-regression-xlsx
+      training:
+        train_ratio: 0.8
+        channels: 1
+        embedding_dim: 1024
+        noise_dim: 32
+        generator_noise_mode: gaussian
+        generator_current_input_mode: current_support_masked
+        gen_base_channels: 4
+        gen_res_blocks: 0
+        gen_text_hidden_dim: 32
+        gen_text_out_dim: 16
+        gen_hidden_dim: 128
+        disc_base_channels: 4
+        disc_res_blocks: 0
+        disc_text_hidden_dim: 16
+        disc_hidden_dim: 96
+        residual_output_mode: identity_softplus_residual
+        learning_rate: 5.0e-7
+        use_reduce_lr_on_plateau: true
+        reduce_lr_factor: 0.5
+        reduce_lr_patience: 3
+        reduce_lr_min_lr: 5.0e-8
+        num_epochs: 100
+        batch_size: 16
+        beta_1: 0.5
+        beta_2: 0.9
+        lambda_recon: 10.0
+        lambda_calendar: 2.0
+        lambda_butterfly: 2.0
+        lambda_smooth: 0.1
+        lambda_delta_shrink: 0.0
+        use_calendar_constraint: true
+        use_butterfly_constraint: true
+        use_smooth_constraint: true
+        constraint_warmup_epochs: 0
+        best_checkpoint_metric: val_hybrid_score
+        evaluate_initial_checkpoint: true
+        baseline_penalty_weight: 2.0
+        use_early_stopping: true
+        early_stopping_patience: 12
+        early_stopping_min_epochs: 30
+        early_stopping_min_delta: 0.0
+        save_every: 1000000
+    wgan:
+      trainer_command: vol-xlsx
+      training:
+        train_ratio: 0.8
+        channels: 1
+        embedding_dim: 1024
+        noise_dim: 32
+        generator_noise_mode: gaussian
+        generator_current_input_mode: current_support_masked
+        gen_base_channels: 4
+        gen_res_blocks: 0
+        gen_text_hidden_dim: 32
+        gen_text_out_dim: 16
+        gen_hidden_dim: 128
+        disc_base_channels: 4
+        disc_res_blocks: 0
+        disc_text_hidden_dim: 16
+        disc_hidden_dim: 96
+        residual_output_mode: identity_softplus_residual
+        learning_rate: 5.0e-7
+        use_reduce_lr_on_plateau: true
+        reduce_lr_factor: 0.5
+        reduce_lr_patience: 3
+        reduce_lr_min_lr: 5.0e-8
+        num_epochs: 100
+        batch_size: 16
+        beta_1: 0.5
+        beta_2: 0.9
+        discriminator_iter: 5
+        lambda_gp: 10.0
+        lambda_recon: 10.0
+        lambda_calendar: 2.0
+        lambda_butterfly: 2.0
+        lambda_smooth: 0.1
+        lambda_delta_shrink: 0.0
+        use_calendar_constraint: true
+        use_butterfly_constraint: true
+        use_smooth_constraint: true
+        constraint_warmup_epochs: 0
+        best_checkpoint_metric: val_hybrid_score
+        evaluate_initial_checkpoint: true
+        baseline_penalty_weight: 2.0
+        use_early_stopping: true
+        early_stopping_patience: 16
+        early_stopping_min_epochs: 30
+        early_stopping_min_delta: 0.0
+        save_every: 1000000
+
+  runtime:
+    python_executable: /home/haobin_cui/.conda/envs/py312/bin/python
+    gpu_ids: [0, 1]
+    gpu_numa_nodes: {0: 0, 1: 1}
+    slots_per_gpu: 24
+    cpu_threads_per_job: 1
+    use_numa_binding: false
+    numactl_executable: numactl
+    nvidia_smi_executable: nvidia-smi
+    resource_sample_interval_seconds: 2

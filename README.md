@@ -1,242 +1,321 @@
 # wgan_option
 
-`wgan_option` is a research codebase for building bond-option volatility representations and training text-conditioned forecasting models on them.
+Research code for building U.S. Treasury option implied-volatility representations and testing whether news text improves short-horizon surface forecasts.
 
-The repository is being developed as part of a PhD thesis chapter, so the code is organized around reproducibility, data lineage, and experiment comparability as much as around model training itself.
+This repository supports the full thesis workflow: raw option processing, surface construction, news alignment, model training, controlled RQ1/RQ2 comparisons, RQ3 robustness analysis, and reproducible experiment packaging. The current thesis-facing path uses corrected raw TY option implied-volatility observations and a five-minute `current -> future` target.
 
-At a high level, the project asks how news embeddings and option-surface representations can be combined to study and forecast changes in bond-option volatility structure. The current repo supports both vol-surface workflows and SVI-parameter workflows, plus the supporting analysis steps needed to inspect model behavior after training.
+> **Current status (August 2026):** the FiLM-WGAN v3 engineering and audit pipeline is complete at the validation-pilot stage. The latest 12-run pilot did **not** pass scientific admission: matched news text did not outperform the no-text continuation, shuffled-text placebo, or persistence baselines. The outer test remains untouched, so there is no confirmatory RQ1 result yet.
 
-The thesis-facing RQ1-RQ3 workflow now uses corrected raw TY option implied-vol
-points as its primary local-support representation. The canonical background
-entrypoint is:
+## Start here
+
+### 1. Create the tested environment
+
+The research orchestrators expect a conda environment named `py312`. The current workspace was verified with Python 3.12.13 and PyTorch 2.6.0+cu124.
+
+```bash
+conda create -n py312 python=3.12 -y
+conda activate py312
+python -m pip install --upgrade pip
+
+# Install the PyTorch build appropriate for your machine first.
+# This is the CUDA 12.4 command used by the current GPU environment:
+python -m pip install torch --index-url https://download.pytorch.org/whl/cu124
+
+python -m pip install -r requirements.txt
+python -m pip install -e .
+```
+
+Check that the intended Python and PyTorch installation are active:
+
+```bash
+python -c "import sys, torch; print(sys.version); print(torch.__version__); print('cuda=', torch.cuda.is_available())"
+python scripts/film_wgan/main.py --help
+python scripts/rq1_pair/rq1_pair_experiment.py --help
+```
+
+CPU-only execution is sufficient for parsing, audits, and tests. Training launchers assume CUDA unless their configuration explicitly says otherwise.
+
+### 2. Supply the research inputs
+
+Large and licensed inputs are intentionally excluded by `.gitignore`. A fresh clone therefore does not contain a runnable thesis dataset.
+
+| Required path | Purpose |
+| --- | --- |
+| `data/raw/option_data/0#TY+/0#TY+_202[23]-*.csv.gz` | Daily raw TY option trades |
+| `data/raw/text_embedding/news_with_openai_embeddings_large.xlsx` | Factiva news metadata and frozen HD/LP embeddings |
+| `data/reference/` | Rates, CME expiries/session closures, and scheduled-event calendars; the small reference files are tracked |
+| `data/processed/text_features/rq2/<run>/` | Frozen BoW and sentiment artifacts required by the full RQ1-RQ3 driver |
+
+The current v3 pilot additionally expects the frozen session-aligned workbook:
+
+```text
+data/processed/raw-excel-session/
+└── rq123_cme_session_20260729-131219/
+    └── merged_vol_rq2_text.xlsx
+```
+
+The filename contains `rq2_text` because the workbook also carries RQ2 feature columns; it is still the canonical input used by the current RQ1 v3 pilot.
+
+### 3. Run smoke tests before using data or GPUs
+
+```bash
+conda activate py312
+
+python -m unittest discover \
+  -s tests/test_standalone_wgan \
+  -p 'test_film_wgan*.py'
+
+python -m unittest tests.test_scripts.test_rq1_pair_experiment
+```
+
+Run the whole suite with:
+
+```bash
+bash run_all_tests.sh
+```
+
+## Choose the right workflow
+
+| Goal | Use this entrypoint | Status |
+| --- | --- | --- |
+| Reproduce or extend the latest RQ1 FiLM-WGAN protocol | `scripts/rq1_pair/start_v3_pilot_gpu0.sh` | Current v3 diagnostic protocol |
+| Run the broad corrected RQ1-RQ3 workflow | `scripts/rq123/start_corrected_pipeline_background.sh` | Current project-wide driver, but not yet migrated to the isolated v3 protocol |
+| Build and validate one corrected raw-vol workbook | `scripts/raw_vol/prepare_raw_vol_dataset.sh` | Current data-construction path |
+| Train the reusable merged-workbook models | `scripts/train/main.py` | Supported general workflow |
+| Compare standalone conditioning architectures | `scripts/{volgan,cnn_wgan,transformer_wgan,film_wgan,stylemod_wgan,crossattn_wgan}/main.py` | Research baselines |
+| Inspect older code or results | `scripts/archive/` and historical output folders | Legacy/diagnostic only |
+
+Do not use the generic `configs/film_wgan/train_default.yaml` as a substitute for the thesis protocol. It retains legacy row/full-grid defaults for compatibility. The v3 experiment must be prepared through the RQ1 orchestrator so that splits, support, PCA, text alignment, negative plans, hashes, and run fingerprints are frozen together.
+
+## Research design
+
+The central question is:
+
+> Does correctly aligned news text improve a five-minute bond-option volatility-surface forecast beyond the same model trained for the same additional budget without text?
+
+The three thesis workstreams are:
+
+- **RQ1 — incremental LP-text value:** matched LP text versus a shared-parent no-text continuation and a shuffled-text placebo.
+- **RQ2 — text representation:** LP embeddings versus train-fold-only BoW and LLM-sentiment representations. RQ2 is implemented, but has not yet been migrated to the v3 symmetric-negative protocol.
+- **RQ3 — conditional robustness:** frozen-model behavior around scheduled news and market jumps. This is predictive robustness analysis, not a causal event study.
+
+### Semantics that must remain explicit
+
+- In older generated workbooks, `backward = current` and `forward = future`.
+- In the corrected raw workflow, availability time `t` defines non-overlapping half-open quote windows: current `[t-5m, t)` and target `[t, t+5m)`.
+- News timestamps are interpreted in `Europe/London`; a configured publication-availability lag may shift `t`.
+- Raw IV uses CME TY option expiry, Black76, frozen rates and prior futures, with OTM-preferred filtering.
+- `merged_vol.xlsx` is already pair-based: one usable row contains `current_surface -> target_surface`.
+- `merged_svi.xlsx` is direction-level: SVI training pairs backward and forward rows later via `news_row_id`.
+- Surface-pair splits are grouped and chronological; a pair must never cross train, validation, and test.
+- Normalization, support masks, text transforms, and hard-negative plans are fitted or frozen from the permitted development data only.
+- Seven-day ATM is not reported for the irregular raw-support experiment because it lies below observed maturity support.
+
+## Current FiLM-WGAN v3 protocol
+
+The current model is **residual FiLM**, not the older design that applied FiLM after every convolution.
+
+```text
+current raw-IV surface + support mask
+        │
+        ├── no-text CNN backbone ───────────────► base log-IV delta
+        │
+LP text ─► deduplicate/pool ─► train-only PCA-128
+                                      │
+                                      └── bottleneck FiLM + text adapter
+                                                       │
+base delta + tanh(text gate) * text delta ─────────────┘
+        │
+        └── current + delivered delta ─► future surface
+```
+
+The text gate is initialized at zero, so the text model starts exactly nested inside the no-text parent. Stage B then compares equal-budget arms from the same Stage-A checkpoint:
+
+| Arm | Purpose |
+| --- | --- |
+| `pair_pca_no_text_residual` | Stage-A no-text parent |
+| `pair_pca_no_text_continued` | Equal-budget no-text continuation control |
+| `pair_pca_text_residual_pretrained` | Correctly matched LP text |
+| `pair_pca_shuffled_residual_pretrained` | Frozen shuffled-text placebo |
+
+Key v3 safeguards:
+
+- the WGAN realism scalar is separate from the bounded transition-text matching head;
+- the matching head sees the standardized log-IV transition, not the current IV level;
+- symmetric hard negatives protect both the native and placebo positives;
+- identity, lineage overlap, and near-duplicate embeddings are excluded;
+- raw support is fitted on the train fold only;
+- gradient penalty is support-aware and audits unsupported gradients;
+- checkpoint selection is fixed to validation MAE; matcher diagnostics cannot select checkpoints;
+- protocol versions, plans, inputs, resolved configs, and checkpoints carry hashes/fingerprints;
+- admission is fail-closed, and validation failure prevents outer-test generation.
+
+Implementation entry points:
+
+- `src/film_wgan/models.py` — residual-FiLM generator and transition-matching critic
+- `src/film_wgan/data.py` — pair construction, lineage, splits, transforms, and alignment
+- `src/film_wgan/matching.py` — symmetric hard-negative assignment
+- `src/film_wgan/losses.py` — matching losses and support-aware gradient penalty
+- `src/film_wgan/trainer.py` — Stage-B initialization, training, diagnostics, and checkpoints
+- `src/film_wgan/inference.py` — deterministic Monte Carlo evaluation and exports
+- `src/film_wgan/protocol.py` — protocol schemas and hashes
+
+### Run a fresh v3 validation pilot
+
+The launcher is deliberately strict:
+
+- it runs physical GPU 0;
+- it fixes fold `2023Q1`, seeds `42 202 404`, and the four arms above;
+- it refuses a dirty Git worktree;
+- it refuses an existing root whose frozen commit or input manifest does not match;
+- it runs validation only and never consumes the outer test.
+
+Always provide a new experiment root. The launcher's no-argument default points at an older development root and should not be reused.
+
+```bash
+git status --short
+# Continue only when the command above prints nothing.
+
+FILM_WGAN_CONDA_ENV=py312 \
+FILM_WGAN_MAX_PARALLEL=5 \
+bash scripts/rq1_pair/start_v3_pilot_gpu0.sh \
+  outputs/experiments/rq1_film_wgan_v3_pilot_$(date -u +%Y%m%d-%H%M%S)
+```
+
+To reproduce the exact `r4` protocol, use clean commit `4770605`, the frozen input workbook and manifests, and a new output root. GPU-level bitwise identity is not guaranteed. Do not reuse v2 checkpoints or any earlier v3 debug root.
+
+The authoritative result of a completed pilot is:
+
+```text
+<experiment-root>/final_tables/validation_pilot_summary.json
+```
+
+Supporting tables live in `final_tables/`, per-pair comparisons in `comparisons/`, run/checkpoint audits in `checkpoint_selection/`, and frozen provenance in `inputs/`.
+
+## Current RQ1 v3 validation result
+
+The latest complete artifact in the research workspace is:
+
+```text
+outputs/experiments/rq1_film_wgan_v3_symmetric_negative_pilot_r4/
+```
+
+It was produced from clean film commit `4770605` and contains 12/12 completed runs: one 2023Q1 validation fold, three seeds, four arms, and 133 validation surface pairs per arm. Q2-Q4 were prepared but not run. Generated outputs are ignored by Git and therefore are not distributed with a fresh clone.
+
+Mean validation metrics across the three seeds:
+
+| Forecast | Supported-surface MAE | Short-ATM MAE | Shortest-supported ATM absolute error |
+| --- | ---: | ---: | ---: |
+| Current-surface persistence | 0.001719529 | 0.001640669 | 0.001515169 |
+| Stage-A no-text parent | 0.001818275 | 0.001642036 | 0.001523841 |
+| No-text continuation | 0.001815002 | 0.001635068 | 0.001522682 |
+| Matched LP text | 0.001815018 | 0.001634996 | 0.001522479 |
+| Shuffled text | **0.001814768** | **0.001634838** | **0.001521924** |
+
+Lower is better. These are descriptive pilot values, not confirmatory estimates.
+
+- Matched text versus no-text continuation changed surface MAE by `-1.60e-8` in the preregistered `baseline minus matched` direction; matched won in only 1/3 seeds.
+- Matched text versus shuffled text changed surface MAE by `-2.50e-7`; matched won in 0/3 seeds.
+- Matched text was worse than persistence by `9.55e-5` in mean supported-surface MAE.
+- Replacing native text with its placebo alignment changed the generated surface by only `4.16e-8` MAE on average, indicating that the generator was effectively insensitive to text.
+- The fail-closed admission check passed 4 of 10 gates. Matching quality, matched-text MAE, duplicate-free direction, matching-gradient bounds, and cross-seed GP stability were among the failed checks.
+- Transition clipping, numerical round-trip, shuffled-at-chance behavior, and zero unsupported GP gradients passed.
+
+**Interpretation:** the implementation and audit chain are operational, but this frozen configuration has not demonstrated useful incremental text signal. This does not prove that news has no signal under every alignment, representation, horizon, or architecture; it does mean the project must not unlock the outer test or report a positive RQ1 finding from this pilot.
+
+## Full corrected RQ1-RQ3 driver
+
+The broad project-wide pipeline snapshots external inputs, builds and validates the corrected raw-vol workbook, runs RQ1/RQ2 matrices, executes RQ3 robustness analysis, records provenance, and can optionally package the experiment:
 
 ```bash
 GPU_IDS="0 1" RUNS_PER_GPU=2 \
 bash scripts/rq123/start_corrected_pipeline_background.sh
 ```
 
-This workflow enforces Factiva `Europe/London` timestamps, non-overlapping
-five-minute current/target windows, CME TY option expiry, Black76 with frozen
-rates and prior futures, OTM filtering, train-fold-only support masks, strict
-text lineage, and rolling development inference. Raw-vol 7-day ATM is not
-reported because it lies below observed maturity support. RQ3 is a conditional
-predictive robustness analysis, not a causal event study.
-
-## Architecture Overview
-
-The main executable flow is:
-
-```text
-raw option data
--> scripts/generate_surface
--> data/processed/<model>-<data_range>/<run_ts>/
--> scripts/merge_file
--> merged_svi.xlsx / merged_vol.xlsx / merged_params.xlsx
--> scripts/train
--> outputs/training/<family>/<run_ts>/
--> scripts/generate_result or scripts/analyze_error
-```
-
-This is not just ETL. In thesis terms, it is the experimental data lineage that links raw inputs, generated surfaces, merged audit workbooks, trainable datasets, saved checkpoints, and post-training evaluation artifacts.
-
-## `src/` Architecture
-
-### `src/wgan_option`
-
-Training and experiment runtime code.
-
-- config models and CLI-facing config parsing for training, result generation, and error analysis
-- merged-xlsx trainers for vol-surface WGAN training and SVI regressor training
-- neural network definitions for generator, discriminator, GAN wrapper, and SVI regressor
-- dataset loaders for merged workbooks and the older daily-surface training path
-- shared helpers for inference, metrics export, run-directory layout, and training plots
-
-This is the package to read first when reviewing model behavior, experiment configuration, or output artifact conventions.
-
-### `src/quantlib`
-
-Numerical and calendar core for surface construction and reconstruction.
-
-- business-day calendars, holiday logic, daycount conventions, and date utilities
-- implied-volatility surface abstractions and interpolation helpers
-- raw option-surface construction from trade files
-- lower-level quantitative utilities used by generation, reconstruction, and analysis workflows
-
-This package is the main source of truth for how surfaces and SVI parameters are interpreted numerically.
-
-### `src/market_data`
-
-Market-data contracts and preprocessing helpers.
-
-- contract parsing for futures and options
-- DTOs for raw quote and trade records
-- filtering and validation helpers for raw market-data files
-
-This package is less central than `wgan_option` and `quantlib` for the current merged-workbook workflows, but it still documents important assumptions about the upstream data model.
-
-### `src/volgan`
-
-Standalone MLP-based conditional GAN for volatility surface generation.
-
-- MLP generator and discriminator with Softplus activations and Sigmoid output
-- BCE adversarial training with label smoothing (real=0.9, fake=0.0)
-- automatic gradient matching to balance smoothness penalties against adversarial loss
-- arbitrage constraints applied in post-processing only (not in training loss)
-- see [src/volgan/README.md](src/volgan/README.md) for architecture and implementation details
-
-### `src/cnn_wgan`
-
-Standalone CNN-based Wasserstein GAN for volatility surface generation.
-
-- convolutional surface encoder with residual blocks, text MLP encoder, and fusion MLP
-- WGAN-GP adversarial training with gradient penalty for Lipschitz constraint
-- calendar and butterfly arbitrage penalties applied during training
-- weighted smoothness regularization across maturity and strike dimensions
-- see [src/cnn_wgan/README.md](src/cnn_wgan/README.md) for architecture and implementation details
-
-### `src/transformer_wgan`
-
-Standalone Transformer-based Wasserstein GAN for volatility surface generation.
-
-- Transformer encoder with learnable 2D positional embeddings and CLS token aggregation
-- WGAN-GP adversarial training with Math SDPA backend for double-backward compatibility
-- configurable objective: pure adversarial or adversarial + L1 reconstruction loss
-- calendar/butterfly arbitrage penalties with optional constraint warmup
-- LR scheduling, early stopping, and baseline-aware evaluation metrics
-- see [src/transformer_wgan/README.md](src/transformer_wgan/README.md) for architecture and implementation details
-
-### `src/film_wgan`
-
-Standalone CNN WGAN-GP whose generator and critic are conditioned on the news embedding via FiLM (Feature-wise Linear Modulation).
-
-- text encoder produces per-channel `(gamma, beta)` that modulate every convolution over the current surface
-- single CNN pass per forward (no dual-branch surface encoder), so "text → current → future" is the dominant causal path
-- WGAN-GP training with calendar / butterfly arbitrage penalties, smoothness regularization, and optional reconstruction loss
-- used as an architectural baseline against `stylemod_wgan`
-
-### `src/stylemod_wgan`
-
-Standalone StyleGAN-style WGAN-GP that injects a global style vector into a CNN generator.
-
-- style vector built from concatenated `(surface_summary, text_features)` plus noise; style demodulation on weights
-- ModulatedConv2d stack + StyledResidualConvBlocks generate a log-IV delta added back to the current surface
-- FiLM-conditioned critic reused from `film_wgan` for fair adversarial comparison
-- same WGAN-GP + arbitrage / smoothness / reconstruction constraint set as the other CNN variants
-
-### `src/crossattn_wgan`
-
-Standalone WGAN-GP that uses cross-attention between the surface tokens and the text embedding instead of FiLM/style modulation.
-
-- surface-token queries attend to text-key/value projections, letting each spatial location pick up different news context
-- shares the merged-vol workbook format and WGAN-GP constraint stack with the other standalone modules
-- intended as a comparison point for FiLM (per-channel) vs cross-attention (per-token) text conditioning
-
-### Shared Utilities
-
-- `src/logger.py`
-  - shared logging setup helper for consistent runtime logs
-- `src/utils/draw.py`
-  - local plotting helper for visualizing processed surface data
-- `src/utils/output_paths.py`
-  - dataset-aware output root resolution and checkpoint discovery
-- `src/utils/training_paths.py`
-  - run directory and generate-result directory layout helpers
-- `src/utils/standalone_cli.py`
-  - shared CLI entrypoint builder for standalone modules
-
-## `scripts/` Jobs
-
-The repo contains several script families. The preferred entrypoints are the unified CLIs under `scripts/generate_surface`, `scripts/train`, `scripts/generate_result`, and `scripts/analyze_error`.
-
-### Core Pipeline Jobs
-
-| Job | Entrypoint | Task | Main input | Main output | Status |
-| --- | --- | --- | --- | --- | --- |
-| `generate_surface` | `python scripts/generate_surface/main.py generate_surface ...` | Build minute-level surface or parameter outputs from raw option files | raw option data under `data/raw/option_data` plus a surface-builder config | one processed run directory under `data/processed/<model>-<data_range>/<run_ts>/` | Core pipeline |
-| `merge_svi` | `python scripts/merge_file/merge_svi.py --input-dir ...` | Build a direction-level SVI audit workbook | one generated run directory plus the news embedding workbook | `merged_svi.xlsx` | Core pipeline |
-| `merge_vol` | `python scripts/merge_file/merge_vol.py --input-dir ...` | Reconstruct paired current/target vol surfaces and build the training workbook | one generated run directory plus the news embedding workbook | `merged_vol.xlsx` | Core pipeline |
-| `merge_params` | `python scripts/merge_file/merge_params.py --input-dir ...` | Build a model-neutral parameter audit workbook across surface models | one generated run directory plus the news embedding workbook | `merged_params.xlsx` | Core pipeline |
-| `train vol-xlsx` | `python scripts/train/main.py vol-xlsx ...` | Train the merged vol-surface WGAN workflow | `merged_vol.xlsx` plus a training config | timestamped training artifacts under `outputs/training/vol_xlsx/` or inferred output root | Core pipeline, preferred training entrypoint |
-| `train svi-xlsx` | `python scripts/train/main.py svi-xlsx ...` | Train the merged SVI supervised regressor workflow | `merged_svi.xlsx` plus a training config | timestamped training artifacts under `outputs/training/svi_xlsx/` or inferred output root | Core pipeline, preferred training entrypoint |
-
-### Supporting Research Jobs
-
-| Job | Entrypoint | Task | Main input | Main output | Status |
-| --- | --- | --- | --- | --- | --- |
-| `generate_result vol` | `python scripts/generate_result/main.py vol ...` | Re-run a trained vol model on selected samples and save comparison payloads | `merged_vol.xlsx` plus a saved generator checkpoint | JSON payloads, per-sample plots, run-level short-end ATM time-series plots, and `summary.csv` | Supporting research |
-| `generate_result svi` | `python scripts/generate_result/main.py svi ...` | Predict future SVI, reconstruct surfaces, and save sample-level comparisons | `merged_svi.xlsx` plus a saved SVI regressor checkpoint | JSON payloads, plots, and `summary.csv` | Supporting research |
-| `generate_result plot` | `python scripts/generate_result/main.py plot --input-json ...` | Render a saved sample payload into comparison plots | one saved payload JSON | PNG comparison plots | Supporting research |
-| `analyze_error vol` | `python scripts/analyze_error/main.py vol ...` | Compute distributional error summaries for generated future vol surfaces | `merged_vol.xlsx` plus a saved generator checkpoint | `errors.csv`, bootstrap outputs, and histograms | Supporting research |
-| `analyze_error svi` | `python scripts/analyze_error/main.py svi ...` | Compute distributional error summaries after SVI prediction and surface reconstruction | `merged_svi.xlsx` plus a saved SVI regressor checkpoint | `errors.csv`, bootstrap outputs, and histograms | Supporting research |
-
-### Standalone Model Training Jobs
-
-| Job | Entrypoint | Task | Main input | Main output | Status |
-| --- | --- | --- | --- | --- | --- |
-| `train volgan` | `python scripts/volgan/main.py train --config ...` | Train the standalone MLP VolGAN on merged vol surfaces | `merged_vol.xlsx` plus a training config | timestamped artifacts under `outputs/training/volgan/` | Standalone pipeline |
-| `train cnn-wgan` | `python scripts/cnn_wgan/main.py train --config ...` | Train the standalone CNN WGAN-GP on merged vol surfaces | `merged_vol.xlsx` plus a training config | timestamped artifacts under `outputs/training/cnn_wgan/` | Standalone pipeline |
-| `train transformer-wgan` | `python scripts/transformer_wgan/main.py train --config ...` | Train the standalone Transformer WGAN-GP on merged vol surfaces | `merged_vol.xlsx` plus a training config | timestamped artifacts under `outputs/training/transformer_wgan/` | Standalone pipeline |
-| `train film-wgan` | `python scripts/film_wgan/main.py train --config ...` | Train the FiLM-conditioned CNN WGAN-GP on merged vol surfaces | `merged_vol.xlsx` plus a training config | timestamped artifacts under `outputs/training/film_wgan/` | Standalone pipeline |
-| `train stylemod-wgan` | `python scripts/stylemod_wgan/main.py train --config ...` | Train the StyleGAN-style WGAN-GP on merged vol surfaces | `merged_vol.xlsx` plus a training config | timestamped artifacts under `outputs/training/stylemod_wgan/` | Standalone pipeline |
-| `train crossattn-wgan` | `python scripts/crossattn_wgan/main.py train --config ...` | Train the cross-attention-conditioned WGAN-GP on merged vol surfaces | `merged_vol.xlsx` plus a training config | timestamped artifacts under `outputs/training/crossattn_wgan/` | Standalone pipeline |
-| `generate-result volgan` | `python scripts/volgan/main.py sample --config ...` | Generate scenarios from a trained VolGAN checkpoint | `merged_vol.xlsx` plus a saved checkpoint | JSON payloads, plots, and `summary.csv` | Standalone pipeline |
-| `generate-result cnn-wgan` | `python scripts/cnn_wgan/main.py generate-result --config ...` | Generate scenarios from a trained CNN WGAN checkpoint | `merged_vol.xlsx` plus a saved checkpoint | JSON payloads, plots, and `summary.csv` | Standalone pipeline |
-| `generate-result transformer-wgan` | `python scripts/transformer_wgan/main.py generate-result --config ...` | Generate scenarios from a trained Transformer WGAN checkpoint | `merged_vol.xlsx` plus a saved checkpoint | JSON payloads, plots, and `summary.csv` | Standalone pipeline |
-| `generate-result film-wgan` | `python scripts/film_wgan/main.py generate-result --config ...` | Generate scenarios from a trained Film WGAN checkpoint | `merged_vol.xlsx` plus a saved checkpoint | JSON payloads, plots, `summary.csv`, plus fixed `generate_result/atm_vol/` sample/full ATM-vol CSV outputs and optional PNGs | Standalone pipeline |
-| `generate-result stylemod-wgan` | `python scripts/stylemod_wgan/main.py generate-result --config ...` | Generate scenarios from a trained StyleMod WGAN checkpoint | `merged_vol.xlsx` plus a saved checkpoint | JSON payloads, plots, and `summary.csv` | Standalone pipeline |
-| `generate-result crossattn-wgan` | `python scripts/crossattn_wgan/main.py generate-result --config ...` | Generate scenarios from a trained CrossAttn WGAN checkpoint | `merged_vol.xlsx` plus a saved checkpoint | JSON payloads, plots, and `summary.csv` | Standalone pipeline |
-
-### Maintenance and Data Utility Jobs
-
-| Job | Entrypoint | Task | Main input | Main output | Status |
-| --- | --- | --- | --- | --- | --- |
-| `merge_raw_option_data` | `python scripts/merge_raw_option_data.py ...` | Merge raw gzip CSV files into one inspection dataset | a directory of raw `*.csv.gz` option files | one merged gzip CSV | Maintenance / data utility |
-| `migrate_training_outputs` | `python scripts/train/migrate_training_outputs.py ...` | Move older training run directories into the newer `outputs/training/...` layout | legacy training output directories | migrated run directories in the normalized layout | Maintenance / migration |
-
-### Convenience Wrappers
-
-These are helpers for launching background jobs. They are not the primary APIs of the repo.
-
-| Wrapper | Wraps | Purpose | Status |
-| --- | --- | --- | --- |
-| `run_train.sh` | `scripts/train/main.py` | background launcher for training jobs | Convenience wrapper |
-| `run_analyze_error.sh` | `scripts/analyze_error/main.py` | background launcher for error-analysis jobs | Convenience wrapper |
-| `run_minute_svi_excel_gpu.sh` | `scripts/generate_surface/main.py generate_surface ...` | background launcher for GPU `svi` + `excel` generation | Convenience wrapper |
-| `run_volgan_svi_excel.sh` | `scripts/volgan/main.py` | background launcher for VolGAN train + generate-result | Convenience wrapper |
-| `run_cnn_wgan_svi_excel.sh` | `scripts/cnn_wgan/main.py` | background launcher for CNN WGAN train + generate-result | Convenience wrapper |
-| `run_transformer_wgan_svi_excel.sh` | `scripts/transformer_wgan/main.py` | background launcher for Transformer WGAN train + generate-result | Convenience wrapper |
-| `run_film_wgan_svi_excel.sh` | `scripts/film_wgan/main.py` | background launcher for Film WGAN training | Convenience wrapper |
-| `run_stylemod_wgan_svi_excel.sh` | `scripts/stylemod_wgan/main.py` | background launcher for StyleMod WGAN training | Convenience wrapper |
-| `run_all_tests.sh` | `pytest` | run the project test suite in one shot | Convenience wrapper |
-| `run_merge_vol.sh` | `scripts/merge_file/merge_vol.py` | background launcher for merged-vol workbook construction | Convenience wrapper |
-| `run_generate-surface_svi_excel_parallel_bg.sh` | `scripts/generate_surface/main.py` | parallel background launcher for SVI + excel surface generation | Convenience wrapper |
-
-## Semantics That Matter
-
-- `backward` means the current snapshot aligned with the original news timestamp.
-- `forward` means the future snapshot aligned with the forward offset window.
-- In practice, this means `backward = current` and `forward = future` throughout the merged workflows.
-- `merged_vol.xlsx` is already paired:
-  - one usable row is already `current_surface -> target_surface`
-  - this is the training-ready workbook for vol-surface forecasting
-- `merged_svi.xlsx` is direction-level, not pair-level:
-  - the SVI training path pairs `backward` and `forward` rows later during training
-  - the executable pairing logic uses `news_direction_audit`, not the direction-level `gan_input_ready` sheet
-- merged-xlsx training supports three text embedding modes:
-  - `hd`
-  - `lp`
-  - `concat`
-- the default text mode remains `hd`, which keeps the merged workflows aligned with the earlier experiments
-
-## Canonical Commands
-
-Install the package in editable mode:
+Monitor the most recent run:
 
 ```bash
-python -m pip install -e .
+bash scripts/rq123/monitor_corrected_pipeline.sh
 ```
 
-Build one processed minute-surface run:
+Important: this broad driver currently uses `train_rq1_pair_textbase.yaml` and `train_rq2_pair_textbase.yaml`. It is not the same protocol as the isolated v3 symmetric-negative pilot. Treat its outputs as their own frozen development protocol; do not combine estimates across the two.
+
+To rebuild only the CME-session-aligned workbook:
+
+```bash
+ENV_NAME=py312 \
+bash scripts/rq123/build_session_aligned_dataset.sh
+```
+
+## Chapter 3 shared-market bootstrap correction
+
+The analysis-only v2 entrypoint recomputes RQ1–RQ3 and architecture/alignment
+inference from frozen pair-level errors. Every bootstrap draw shares its
+fold/session sampling weights across model seeds and paired conditions. The
+quarter resampling and the original equal-cell or pooled-pair estimands are
+retained; RQ4 remains outside this correction.
+
+```bash
+python -m scripts.rq123.chapter3_shared_panel_bootstrap_v2
+python -m scripts.rq123.chapter3_shared_panel_bootstrap_v2 --verify-only
+python -m scripts.rq123.verify_chapter3_bootstrap_bindings
+```
+
+Results, replayable schedules, input/output hashes, and the old/new inference
+comparison are written to
+`outputs/analysis/chapter3_shared_market_panel_bootstrap_10000_v2`.
+An existing output directory is never overwritten. Verification replays the
+saved weights against the archived canonical panels and checks frozen inputs;
+neither command trains models or regenerates predictions. The historical
+nested-bootstrap scripts and experiment artifacts remain available for audit.
+The final command separately checks the manuscript's numerical bindings in
+`docs/chapter3_bootstrap_bindings.json`; it does not edit the manuscript or
+replace a LaTeX compilation.
+The manuscript preserves the approved reporting conventions: the main summary
+tables display v2 bootstrap-draw mean MAEs, paired RQ1–RQ3 inference retains
+original-sample equal-cell log ratios, and architecture/alignment robustness
+retains original-sample pooled-pair estimates. Validation-trajectory MAEs remain
+observed equal-cell summaries. These quantities are explicitly distinguished;
+one must not reconstruct a paired log ratio from displayed bootstrap means.
+The explicit source mappings can also be checked for completeness and drift:
+
+```bash
+python -m scripts.rq123.build_chapter3_bootstrap_bindings --check
+```
+
+See [the integration notes](docs/chapter3_shared_panel_bootstrap_v2_integration_notes.md)
+for the authorized resolution of concurrent edits, inferential limitations,
+verification results, and the remaining full-thesis rendering checks.
+
+## Reusable data and model workflows
+
+### Build a corrected raw-vol workbook
+
+```bash
+ENV_NAME=py312 \
+DEVICE=cpu \
+RUN_TS=raw_vol_$(date -u +%Y%m%d-%H%M%S) \
+bash scripts/raw_vol/prepare_raw_vol_dataset.sh
+```
+
+This generates and validates:
+
+```text
+data/processed/raw-excel/<run-id>/
+├── merged_vol.xlsx
+├── raw_vol_dataset_validation.json
+└── generation and lineage artifacts
+```
+
+Add the frozen RQ2 text features when needed:
+
+```bash
+FEATURE_DIR=data/processed/text_features/rq2/<feature-run> \
+bash scripts/raw_vol/enrich_raw_vol_rq2_text.sh \
+  data/processed/raw-excel/<run-id>
+```
+
+### Generate and merge an SVI-based workbook
 
 ```bash
 python scripts/generate_surface/main.py generate_surface \
@@ -244,714 +323,119 @@ python scripts/generate_surface/main.py generate_surface \
   --model svi \
   --data_range excel \
   --config configs/surface_builder/svi/generate_surface-svi-excel.yaml
-```
 
-Build merged workbooks from one processed run:
-
-```bash
-python scripts/merge_file/merge_svi.py --input-dir data/processed/svi-excel/<run_ts>
-python scripts/merge_file/merge_vol.py --input-dir data/processed/svi-excel/<run_ts>
-```
-
-Train the preferred merged-workbook paths:
-
-```bash
-python scripts/train/main.py vol-xlsx --config configs/wgan/train_vol_xlsx.yaml
-python scripts/train/main.py svi-xlsx --config configs/wgan/train_svi_xlsx.yaml
-```
-
-Run post-training inspection:
-
-```bash
-python scripts/generate_result/main.py vol --config configs/wgan/train_vol_xlsx.yaml
-python scripts/analyze_error/main.py vol --config configs/analyze_error/vol.yaml
-```
-
-Train the standalone model variants:
-
-```bash
-python scripts/volgan/main.py train --config configs/volgan/train_lp.yaml
-python scripts/cnn_wgan/main.py train --config configs/cnn_wgan/train_lp.yaml
-python scripts/transformer_wgan/main.py train --config configs/transformer_wgan/train_lp.yaml
-```
-
-Or use the convenience shell wrappers (background execution):
-
-```bash
-bash run_volgan_svi_excel.sh configs/volgan/train_lp.yaml
-bash run_cnn_wgan_svi_excel.sh configs/cnn_wgan/train_lp.yaml
-bash run_transformer_wgan_svi_excel.sh configs/transformer_wgan/train_lp.yaml
-```
-
-For flags, advanced configuration, and workflow-specific details, read the script-level READMEs under `scripts/`.
-
-## Project Layout
-
-```text
-wgan_option/
-├── configs/
-│   ├── analyze_error/             # Error-analysis configs
-│   ├── generate_result/           # Post-training inference configs
-│   ├── surface_builder/           # Surface-generation configs by model
-│   ├── wgan/                      # Merged-workbook training configs
-│   ├── volgan/                    # Standalone VolGAN training and sampling configs
-│   ├── cnn_wgan/                  # Standalone CNN WGAN training configs
-│   ├── transformer_wgan/          # Standalone Transformer WGAN training configs
-│   ├── film_wgan/                 # Standalone Film (FiLM) WGAN training configs
-│   ├── stylemod_wgan/             # Standalone StyleMod WGAN training configs
-│   └── crossattn_wgan/            # Standalone CrossAttention WGAN training configs
-├── data/                          # Raw inputs and processed run directories
-├── docs/                          # Thesis design notes and architecture writeups
-├── scripts/
-│   ├── analyze_error/             # Post-training error distribution analysis
-│   ├── generate_result/           # Post-training sample generation and plotting
-│   ├── generate_surface/          # Unified minute surface-generation CLI
-│   ├── merge_file/                # Workbook construction from generated runs
-│   ├── train/                     # Unified merged-xlsx training CLI
-│   ├── volgan/                    # Standalone VolGAN train and sample CLI
-│   ├── cnn_wgan/                  # Standalone CNN WGAN train and generate-result CLI
-│   ├── transformer_wgan/          # Standalone Transformer WGAN train and generate-result CLI
-│   ├── film_wgan/                 # Standalone Film WGAN train and generate-result CLI
-│   ├── stylemod_wgan/             # Standalone StyleMod WGAN train and generate-result CLI
-│   ├── crossattn_wgan/            # Standalone CrossAttention WGAN train and generate-result CLI
-│   └── merge_raw_option_data.py   # Raw-data inspection utility
-├── src/
-│   ├── market_data/               # Contract parsing and raw-data DTO helpers
-│   ├── quantlib/                  # Numerical and calendar core
-│   ├── utils/                     # Shared utilities (output paths, training paths, CLI helpers)
-│   ├── wgan_option/               # Training, inference, configs, and loaders
-│   ├── volgan/                    # Standalone MLP VolGAN module (BCE adversarial)
-│   ├── cnn_wgan/                  # Standalone CNN WGAN-GP module
-│   ├── transformer_wgan/          # Standalone Transformer WGAN-GP module
-│   ├── film_wgan/                 # Standalone FiLM-conditioned WGAN-GP module
-│   ├── stylemod_wgan/             # Standalone StyleGAN-style modulated WGAN-GP module
-│   ├── crossattn_wgan/            # Standalone cross-attention-conditioned WGAN-GP module
-│   └── logger.py                  # Shared logging helper
-├── tests/                         # Script, quantlib, and workflow tests
-│   └── test_standalone_wgan/      # Tests for standalone WGAN modules
-├── run_train.sh                   # Training launcher helper
-├── run_analyze_error.sh           # Analyze-error launcher helper
-├── run_minute_svi_excel_gpu.sh    # Generate-surface launcher helper
-├── run_volgan_svi_excel.sh        # VolGAN launcher helper
-├── run_cnn_wgan_svi_excel.sh      # CNN WGAN launcher helper
-├── run_transformer_wgan_svi_excel.sh  # Transformer WGAN launcher helper
-├── run_film_wgan_svi_excel.sh     # Film WGAN launcher helper
-├── run_stylemod_wgan_svi_excel.sh # StyleMod WGAN launcher helper
-├── run_merge_vol.sh               # merged-vol workbook launcher helper
-├── run_all_tests.sh               # test-suite launcher helper
-├── run_generate-surface_svi_excel_parallel_bg.sh  # parallel surface-generation launcher
-└── README.md
-```
-
-## Where To Read Next
-
-Thesis design and experiment framing:
-
-- [docs/input_vol.md](docs/input_vol.md)
-- [docs/input_svi.md](docs/input_svi.md)
-- [docs/vol_surface_gan_architecture.md](docs/vol_surface_gan_architecture.md)
-- [docs/current_executable_workflows.md](docs/current_executable_workflows.md)
-
-Script-level operational details:
-
-- [scripts/README.md](scripts/README.md)
-- [scripts/generate_surface/README.md](scripts/generate_surface/README.md)
-- [scripts/merge_file/README.md](scripts/merge_file/README.md)
-- [scripts/train/README.md](scripts/train/README.md)
-- [scripts/generate_result/README.md](scripts/generate_result/README.md)
-- [scripts/analyze_error/README.md](scripts/analyze_error/README.md)
-
-Training diagnostics and model notes:
-
-- [docs/gan_model_detailed_architecture.md](docs/gan_model_detailed_architecture.md)
-- [docs/svi_regressor_architecture.md](docs/svi_regressor_architecture.md)
-- [docs/training_loss_curves.md](docs/training_loss_curves.md)
-- [docs/reduce_lr_on_plateau.md](docs/reduce_lr_on_plateau.md)
-
-Standalone module architecture:
-
-- [src/volgan/README.md](src/volgan/README.md)
-- [src/cnn_wgan/README.md](src/cnn_wgan/README.md)
-- [src/transformer_wgan/README.md](src/transformer_wgan/README.md)
-
-## Notes
-
-- The preferred merged-workbook training entrypoint is `scripts/train/main.py`; older daily-surface training logic still lives under `src/wgan_option`.
-- The merged vol workflow is currently the closest executable path to the thesis-facing current-surface -> future-surface forecasting setup.
-- The merged SVI workflow is a paired forecasting implementation, even though the source workbook remains direction-oriented.
-- The script families under `scripts/` are intentionally thin wrappers around reusable logic in `src/`.
-- The standalone modules (`volgan`, `cnn_wgan`, `transformer_wgan`, `film_wgan`, `stylemod_wgan`, `crossattn_wgan`) are fully independent of `src/wgan_option` and share only the `merged_vol.xlsx` workbook format and utilities under `src/utils/`.
-- Among the CNN-based WGAN variants, `film_wgan` realizes "text → current → future" most directly by letting text embeddings modulate every convolution over the current surface via FiLM; `stylemod_wgan` folds text into a global style vector, and `crossattn_wgan` lets each surface token attend to text features.
-
-## Model Guide
-
-The executable models in this repo split into two families. The mainline merged-workbook paths live under `src/wgan_option`: `vol-xlsx` is the preferred surface-forecasting route, while `svi-xlsx` is the paired parameter-forecasting route. The standalone baselines (`volgan`, `cnn_wgan`, `transformer_wgan`, `film_wgan`, `stylemod_wgan`, `crossattn_wgan`) share `merged_vol.xlsx` as input but change the conditioning mechanism, inductive bias, and training dynamics for research comparison.
-
-### Merged Vol WGAN (vol-xlsx)
-
-#### What it predicts
-
-This model forecasts a future volatility surface from one already paired `merged_vol.xlsx` row:
-
-- `current_surface = backward/current`
-- `text_embedding = news embedding at the current timestamp`
-- `future_surface = forward/future`
-
-It is the main executable path that most directly matches the thesis framing of `text + current surface -> future surface`.
-
-#### Architecture
-
-The mainline merged-vol trainer is a conditional CNN WGAN-GP. Its generator encodes the current surface, compresses the text embedding with an MLP, concatenates those features with noise, predicts a residual delta, and reconstructs the future surface through a positive residual map. The critic scores candidate `(current, future, text)` tuples.
-
-```text
-Generator
-current_surface ──► Surface CNN Encoder ──► surface_features ───────────┐
-text_embedding ──► Text MLP Encoder ─────► text_features ───────────────┼─► concat ─► Fusion MLP ─► delta
-noise ───────────────────────────────────────────────────────────────────┘
-                                                                                               │
-                                                                                               ▼
-                                                           future = softplus(current + delta) + 1e-4
-
-Critic
-[current_surface, future_surface] ──► Joint CNN Encoder ──► pair_features ───────┐
-text_embedding ─────────────────────► Text MLP Encoder ─► text_features ──────────┼─► classifier ─► score
-```
-
-#### Strengths
-
-- It is the closest current executable match to the thesis-facing surface forecasting question.
-- The CNN encoder gives a clear local inductive bias over strike and maturity while keeping the predictor simpler than attention-heavy variants.
-- The mainline runtime already integrates WGAN-GP, reconstruction pressure, arbitrage penalties, smoothness penalties, scheduling, metrics, and downstream inspection scripts.
-- `merged_vol.xlsx` is already pair-based, so the `backward/current -> forward/future` lineage is explicit before training starts.
-
-#### Limitations
-
-- Text enters as a global feature vector, so spatially specific text effects are only learned indirectly through the fusion head and critic.
-- Adversarial training is harder to stabilize and explain than the supervised SVI path.
-- Direct surface forecasting can work well empirically but is less structurally interpretable than forecasting SVI parameters first.
-
-#### Pipeline and CLI
-
-- Upstream data lineage: `generate_surface -> merge_vol -> merged_vol.xlsx`
-- Main training entrypoint:
-
-```shell
-python scripts/train/main.py vol-xlsx --config configs/wgan/train_vol_xlsx.yaml
-```
-
-- Post-training inspection:
-
-```shell
-python scripts/generate_result/main.py vol --config configs/wgan/train_vol_xlsx.yaml
-python scripts/analyze_error/main.py vol --config configs/analyze_error/vol.yaml
-```
-
-### Merged SVI Regressor (svi-xlsx)
-
-#### What it predicts
-
-This path predicts future padded SVI parameters and future slice count from paired `backward/current -> forward/future` SVI samples. Unlike `merged_vol.xlsx`, `merged_svi.xlsx` remains direction-level. The trainer pairs usable `backward` and `forward` rows from `news_direction_audit` at runtime by `news_row_id`.
-
-#### Architecture
-
-The model is a supervised MLP regressor rather than a GAN. It flattens the current padded SVI representation, appends mask and count information, encodes the current side and the text side separately, fuses them in a shared trunk, and then predicts both the future SVI vector and the future slice-count class.
-
-```text
-current_svi_matrix + current_mask + current_slice_count
-        │
-        └──► flatten / concatenate ──► Current Encoder ────────────────┐
-text_embedding ──────────────────────► Text Encoder ────────────────────┼─► Shared Trunk ──► Regression Head ─► future_svi_flat
-                                                                        │
-                                                                        └──────────────────► Count Head ─────► future_slice_count
-```
-
-#### Strengths
-
-- It keeps the SVI representation explicit, which is valuable for thesis experiments about representation choice.
-- Supervised training is usually more stable and easier to diagnose than adversarial training.
-- Predicting slice count as a separate head keeps the varying-slice structure visible instead of hiding it inside a surface image tensor.
-- The output is easier to inspect slice-by-slice than direct surface pixels.
-
-#### Limitations
-
-- The model depends heavily on upstream SVI calibration quality and on the runtime pairing logic staying clean.
-- Fixed-width padding with `max_slices` is pragmatic but constrains how much term-structure variation can be represented directly.
-- It models parameter vectors, not the full conditional distribution of future surfaces, so scenario diversity is limited relative to GAN paths.
-
-#### Pipeline and CLI
-
-- Upstream data lineage: `generate_surface -> merge_svi -> merged_svi.xlsx -> runtime backward/current + forward/future pairing`
-- Main training entrypoint:
-
-```shell
-python scripts/train/main.py svi-xlsx --config configs/wgan/train_svi_xlsx.yaml
-```
-
-- Post-training inspection:
-
-```shell
-python scripts/generate_result/main.py svi --config configs/wgan/train_svi_xlsx.yaml
-python scripts/analyze_error/main.py svi --config configs/analyze_error/svi.yaml
-```
-
-### VolGAN
-
-#### What it predicts
-
-VolGAN is the lowest-capacity standalone baseline. It flattens the current surface, concatenates it with the text embedding and noise, and predicts a future log-IV increment. The discriminator then judges whether a candidate delta looks realistic under the same condition.
-
-#### Architecture
-
-This model uses an MLP generator and an MLP discriminator with BCE adversarial training rather than WGAN-GP. It keeps the conditioning path simple on purpose.
-
-```text
-Generator
-current_surface_flat ──┐
-text_embedding ────────┼─► concat ─► MLP ─► delta
-noise ─────────────────┘
-                                        │
-                                        ▼
-                   future = exp(log(current) + delta)
-
-Discriminator
-current_surface_flat ──┐
-text_embedding ────────┼─► concat ─► MLP ─► probability(real | current, text, delta)
-candidate_delta ───────┘
-```
-
-#### Strengths
-
-- It is the cheapest baseline to train and the easiest one to reason about end-to-end.
-- Flattened inputs make it a useful control for asking how much spatial inductive bias actually matters.
-- BCE plus gradient-matched smoothness penalties gives a historically simple benchmark against the WGAN families.
-
-#### Limitations
-
-- Flattening discards the 2D geometry of the surface, so local strike/maturity structure must be relearned by a plain MLP.
-- BCE GAN objectives are typically less stable than WGAN-GP under the same data conditions.
-- Arbitrage is handled in post-processing rather than built into the training loss.
-
-#### Pipeline and CLI
-
-- Upstream data lineage: `generate_surface -> merge_vol -> merged_vol.xlsx`
-- CLI behavior: `train` only trains; `pipeline` runs `train -> generate-result`; `sample` and `generate-result` rerun scenario generation from an existing run or checkpoint.
-
-```shell
-python scripts/volgan/main.py train --config configs/volgan/train_lp.yaml
-python scripts/volgan/main.py sample --config configs/volgan/train_lp.yaml
-python scripts/volgan/main.py generate-result --config configs/volgan/train_lp.yaml
-python scripts/volgan/main.py pipeline --config configs/volgan/train_lp.yaml
-```
-
-### CNN WGAN
-
-#### What it predicts
-
-CNN WGAN is the standalone convolutional baseline for forecasting future surfaces from paired `merged_vol.xlsx` rows. It uses the current surface as a 2D grid, the text embedding as a global condition, and noise as a scenario source.
-
-#### Architecture
-
-The generator uses a surface CNN encoder plus a text MLP encoder, then predicts a log-IV delta with a fusion MLP. The critic sees stacked current and future surfaces plus the same text condition.
-
-```text
-Generator
-current_surface ──► Surface CNN Encoder ──► surface_features ───────────┐
-text_embedding ──► Text MLP Encoder ─────► text_features ───────────────┼─► concat ─► Fusion MLP ─► delta
-noise ───────────────────────────────────────────────────────────────────┘
-                                                                                               │
-                                                                                               ▼
-                                                           future = exp(log(current) + delta)
-
-Critic
-[current_surface, future_surface] ──► Joint CNN Encoder ──► pair_features ───────┐
-text_embedding ─────────────────────► Text MLP Encoder ─► text_features ──────────┼─► classifier ─► score
-```
-
-#### Strengths
-
-- It gives a clean convolutional baseline with explicit 2D surface structure but without extra conditioning machinery.
-- The architecture is easier to interpret than Transformer, FiLM, or StyleMod variants.
-- WGAN-GP plus calendar, butterfly, smoothness, and optional reconstruction penalties make it a stronger research baseline than a plain GAN.
-
-#### Limitations
-
-- Text conditioning stays global, so the model cannot explicitly route different news effects to different surface regions.
-- It is less expressive than FiLM, StyleMod, or CrossAttention for studying richer text-conditioning mechanisms.
-- As a standalone baseline, it duplicates some of the mainline merged-vol ideas rather than replacing them.
-
-#### Pipeline and CLI
-
-- Upstream data lineage: `generate_surface -> merge_vol -> merged_vol.xlsx`
-- CLI behavior: `train` defaults to `run_pipeline()`; `sample` is a thin alias-style generate path; `generate-result` is the explicit generate alias.
-
-```shell
-python scripts/cnn_wgan/main.py train --config configs/cnn_wgan/train_lp_gen128_disc128.yaml
-python scripts/cnn_wgan/main.py sample --config configs/cnn_wgan/train_lp_gen128_disc128.yaml
-python scripts/cnn_wgan/main.py generate-result --config configs/cnn_wgan/train_lp_gen128_disc128.yaml
-```
-
-### Transformer WGAN
-
-#### What it predicts
-
-Transformer WGAN forecasts future surfaces by treating the surface grid as a token sequence. It augments those surface tokens with one text token and one noise token, then uses self-attention to model longer-range structure than a local CNN can capture directly.
-
-#### Architecture
-
-The generator projects each surface location into token space, adds learnable 2D positional embeddings, prepends text and noise tokens, and uses a Transformer encoder to predict one delta per grid point. The critic uses a CLS token over paired current/future surface tokens.
-
-```text
-Generator
-current_surface ──► surface tokens + 2D positional embeddings ───────────────┐
-text_embedding ──► text token ────────────────────────────────────────────────┼─► Transformer Encoder ─► output head ─► delta(HxW)
-noise ───────────► noise token ───────────────────────────────────────────────┘
-                                                                                                 │
-                                                                                                 ▼
-                                                             future = softplus(current + delta) + 1e-4
-
-Critic
-[current_surface, future_surface] ──► paired surface tokens + positions ──────┐
-text_embedding ─────────────────────► text token ──────────────────────────────┼─► Transformer Encoder ─► CLS head ─► score
-learned CLS token ──────────────────────────────────────────────────────────────┘
-```
-
-#### Strengths
-
-- Self-attention can express long-range strike/maturity dependencies more directly than local convolution.
-- The architecture is useful when the research question is about global surface coordination rather than only local smoothness.
-- The generator/critic setup makes it a natural comparison point against CNN-based condition mechanisms.
-
-#### Limitations
-
-- Training cost is higher than the CNN variants, and WGAN-GP on a Transformer critic is harder to stabilize.
-- The critic’s gradient-penalty path requires math SDPA rather than faster attention kernels during the double-backward step.
-- Tokenized modeling is less immediately interpretable than explicit FiLM or StyleMod conditioning when the goal is to explain how text enters the surface path.
-
-#### Pipeline and CLI
-
-- Upstream data lineage: `generate_surface -> merge_vol -> merged_vol.xlsx`
-- CLI behavior: `train` defaults to `run_pipeline()`; `sample` is a thin alias-style generate path; `generate-result` is the explicit generate alias.
-
-```shell
-python scripts/transformer_wgan/main.py train --config configs/transformer_wgan/train_lp.yaml
-python scripts/transformer_wgan/main.py sample --config configs/transformer_wgan/train_lp.yaml
-python scripts/transformer_wgan/main.py generate-result --config configs/transformer_wgan/train_lp.yaml
-```
-
-### FiLM WGAN
-
-#### What it predicts
-
-FiLM WGAN is the most direct standalone implementation of the repo’s intended `text -> current -> future` pathway. The current surface remains the main carrier of local structure, but the news embedding modulates every convolutional stage through feature-wise affine transforms.
-
-#### Architecture
-
-The generator first compresses the text embedding into `text_features`, then uses those same features to modulate each convolutional block over the current surface. After the FiLM-conditioned stack, the model fuses surface features, text features, and noise to predict a log-IV delta.
-
-```text
-text_embedding ──► text_encoder ──► text_features ───────────┐
-                                                             │
-current_surface ──► conv1 ──► FiLM1(·, text_features) ──► LeakyReLU
-                              ↑
-                         text directly modulates current-surface features
-                    ──► conv2 ──► FiLM2(·, text_features) ──► LeakyReLU
-                    ──► conv3 ──► FiLM3(·, text_features) ──► LeakyReLU
-                    ──► FiLM-ResBlocks (each block applies FiLM twice with text_features)
-                                  │
-                                  ▼
-                         surface_features (text-modulated)
-                                  │
-                                  ▼
-    concat([surface_features, text_features, noise]) ─► fusion MLP ─► delta
-                                                                         │
-                                                                         ▼
-                                             future = exp(log(current) + delta)
-
-Critic
-[current_surface, future_surface] ──► conv stack ──► FiLM at each stage with text_features ──► classifier ──► score
-text_embedding ─────────────────────► text_encoder ────────────────────────────────────────────┘
-```
-
-#### Strengths
-
-- The text-conditioning mechanism is explicit at every convolutional stage rather than only at the fusion layer.
-- It matches the research intuition that news should reshape how the model reads the current surface, not only how it post-processes a global summary.
-- Compared with StyleMod and CrossAttention, the conditioning path stays relatively easy to inspect channel by channel.
-
-#### Limitations
-
-- Text still arrives as one global vector, so modulation is channel-wise rather than location-specific.
-- Strong early conditioning can make optimization more sensitive than the plain CNN baseline.
-- It is more expressive than the plain CNN baseline, but less flexible than token-level attention for spatially heterogeneous text effects.
-
-#### Pipeline and CLI
-
-- Upstream data lineage: `generate_surface -> merge_vol -> merged_vol.xlsx`
-- CLI behavior: `train` defaults to `run_pipeline()`; `sample` is a thin alias-style generate path; `generate-result` is the explicit generate alias.
-
-```shell
-python scripts/film_wgan/main.py train --config configs/film_wgan/train_lp_gen128_disc128.yaml
-python scripts/film_wgan/main.py sample --config configs/film_wgan/train_lp_gen128_disc128.yaml
-python scripts/film_wgan/main.py generate-result --config configs/film_wgan/train_lp_gen128_disc128.yaml
-```
-
-### StyleMod WGAN
-
-#### What it predicts
-
-StyleMod WGAN predicts future surfaces from the same paired `merged_vol.xlsx` rows, but it routes the condition through a global style vector rather than through direct per-layer FiLM on the current-surface branch.
-
-#### Architecture
-
-The generator summarizes the current surface into a condition surface summary, encodes the text embedding, combines both into a base style, adds a noise-derived style component, and then uses modulated convolutions and styled residual blocks to produce the delta. The critic reuses the FiLM-conditioned design so that the main generator-side comparison stays focused on conditioning choice.
-
-```text
-current_surface ──► condition_surface_encoder ──► surface_summary ───────┐
-text_embedding ──► text_encoder ─────────────────► text_features ─────────┼─► concat ─► condition_vector ─► style_base ──┐
-noise ───────────► style_noise MLP ────────────────────────────────────────────────────────────────────────────────────────┘
-                                                                                                                          │
-                                                                                                                          ├─► global_style
-                                                                                                                          ▼
-current_surface ──► conv stem ──► modulated conv1 ──► modulated conv2 ──► styled residual blocks ──► surface_features ───┐
-                                                                                                                            │
-                                      concat([surface_features, condition_vector, global_style]) ───────────────────────────┘
-                                                                                                                            │
-                                                                                                                            ▼
-                                                                                     fusion MLP ─► delta ─► future = exp(log(current) + delta)
-
-Critic
-[current_surface, future_surface] ──► FiLM-conditioned conv stack with text_features ──► classifier ─► score
-text_embedding ─────────────────────► text_encoder ──────────────────────────────────────┘
-```
-
-#### Strengths
-
-- A global style vector is a strong inductive bias for coherent surface-wide shifts such as level, skew, or curvature moves.
-- It separates condition summarization from the modulated generator path, which is useful for comparing against FiLM’s more direct conditioning.
-- Reusing the FiLM critic keeps the architectural comparison centered on generator conditioning rather than on a completely new adversary.
-
-#### Limitations
-
-- One global style can blur location-specific text effects that might matter at particular maturities or strikes.
-- The extra condition-surface encoder and style stack make the generator more complex than the plain CNN or FiLM baseline.
-- Interpretation is less direct than FiLM because the condition is mixed into a latent style space before modulation happens.
-
-#### Pipeline and CLI
-
-- Upstream data lineage: `generate_surface -> merge_vol -> merged_vol.xlsx`
-- CLI behavior: `train` defaults to `run_pipeline()`; `sample` is a thin alias-style generate path; `generate-result` is the explicit generate alias.
-
-```shell
-python scripts/stylemod_wgan/main.py train --config configs/stylemod_wgan/train_lp_gen64_disc64_tuned.yaml
-python scripts/stylemod_wgan/main.py sample --config configs/stylemod_wgan/train_lp_gen64_disc64_tuned.yaml
-python scripts/stylemod_wgan/main.py generate-result --config configs/stylemod_wgan/train_lp_gen64_disc64_tuned.yaml
-```
-
-### CrossAttention WGAN
-
-#### What it predicts
-
-CrossAttention WGAN forecasts future surfaces by letting the current-surface feature map attend to text-derived virtual tokens. It is the standalone baseline that most explicitly asks whether text should act locally over surface locations instead of only globally over channels or style vectors.
-
-#### Architecture
-
-The generator first builds a CNN feature map from the current surface, compresses the text embedding, expands that compressed text into a small bank of virtual tokens, and applies multi-head cross-attention from surface queries to text keys/values. The attended feature map is then flattened and fused with the text vector and noise to predict the delta.
-
-```text
-current_surface ──► Surface CNN Encoder ──► surface_feature_map ──► Cross-Attention(surface queries, text keys/values) ──► attended_surface_features
-                                                                                               ▲
-text_embedding ──► Text Encoder ──► text_features ──► text_to_tokens ──────────────────────────┘
-
-flatten(attended_surface_features) ───────────────────────────────────────────────┐
-text_features ─────────────────────────────────────────────────────────────────────┼─► concat ─► Fusion MLP ─► delta
-noise ─────────────────────────────────────────────────────────────────────────────┘                           │
-                                                                                                              ▼
-                                                                                          future = exp(log(current) + delta)
-
-Critic
-[current_surface, future_surface] ──► joint CNN encoder ──► cross-attention with text tokens ──► classifier ─► score
-text_embedding ─────────────────────► text encoder ─► virtual text tokens ───────────────────────┘
-```
-
-#### Strengths
-
-- It offers the clearest standalone test of whether text should affect different surface regions differently.
-- Cross-attention is more expressive than global fusion when the text signal may matter differently across maturities and strikes.
-- It keeps a CNN surface stem, so the model still benefits from local geometric bias before attention is applied.
-
-#### Limitations
-
-- It is more computationally involved than the FiLM and plain CNN baselines.
-- The text side is still compressed into a single embedding before token expansion, so the attention mechanism is richer than the input text representation itself.
-- Interpreting head-level attention is possible, but less straightforward than reading FiLM channel modulation.
-
-#### Pipeline and CLI
-
-- Upstream data lineage: `generate_surface -> merge_vol -> merged_vol.xlsx`
-- CLI behavior: `train` defaults to `run_pipeline()`; `sample` is a thin alias-style generate path; `generate-result` is the explicit generate alias.
-
-```shell
-python scripts/crossattn_wgan/main.py train --config configs/crossattn_wgan/train_lp_gen128_disc128.yaml
-python scripts/crossattn_wgan/main.py sample --config configs/crossattn_wgan/train_lp_gen128_disc128.yaml
-python scripts/crossattn_wgan/main.py generate-result --config configs/crossattn_wgan/train_lp_gen128_disc128.yaml
-```
-
-
-# Pipelines
-
-Each pipeline walks end-to-end from raw inputs to a trained checkpoint and post-training artifacts. Unless noted, commands assume the repo root as the working directory, `py312` conda env is active, and the package is installed editable (`python -m pip install -e .`).
-
-## 0. Environment bootstrap
-
-```shell
-# one-time: create env, install deps, and install the repo editable
-conda create -n py312 python=3.12 -y
-conda activate py312
-python -m pip install -r requirements.txt
-python -m pip install -e .
-
-# quick sanity check
-bash run_all_tests.sh
-```
-
-## 1. run SVI vol xlsx (preferred merged-workbook path)
-
-End-to-end: build SVI surface → merge paired vol workbook → train merged vol-surface WGAN → post-training inspection.
-
-```shell
-# 1.1 build one processed SVI minute-surface run (GPU)
-python scripts/generate_surface/main.py generate_surface \
-  --device gpu \
-  --model svi \
-  --data_range excel \
-  --config configs/surface_builder/svi/generate_surface-svi-excel.yaml
-# or parallel background:
-# bash run_generate-surface_svi_excel_parallel_bg.sh
-
-# 1.2 merge into the training-ready paired workbook
-python scripts/merge_file/merge_vol.py \
-  --input-dir data/processed/svi-excel/<run_ts>
-# or background:
-# bash run_merge_vol.sh data/processed/svi-excel/<run_ts>
-
-# 1.3 train merged vol-surface WGAN (preferred entrypoint)
-python scripts/train/main.py vol-xlsx \
-  --config configs/wgan/train_vol_xlsx_24gb_lp_aggressive_es.yaml
-# background launcher:
-# bash run_train.sh configs/wgan/train_vol_xlsx_24gb_lp_aggressive_es.yaml
-
-# 1.4 post-training inspection (generate samples + error analysis)
-python scripts/generate_result/main.py vol \
-  --config configs/generate_result/vol_best.yaml
-python scripts/analyze_error/main.py vol \
-  --config configs/analyze_error/vol.yaml
-# background: bash run_analyze_error.sh configs/analyze_error/vol.yaml
-```
-
-## 2. run raw vol xlsx
-
-Raw-excel data path (no SVI parameterization, surfaces built directly from trades).
-
-```shell
-python scripts/generate_surface/main.py generate_surface \
-  --device gpu \
-  --config configs/surface_builder/raw/generate_surface-raw-excel-pipeline.yaml
+python scripts/merge_file/merge_svi.py \
+  --input-dir data/processed/svi-excel/<run-id>
 
 python scripts/merge_file/merge_vol.py \
-  --input-dir data/processed/raw-excel/<run_ts>
+  --input-dir data/processed/svi-excel/<run-id>
+```
 
+### Train the general merged-workbook models
+
+Review and copy a config before changing paths; thesis configs often contain frozen workspace-specific inputs.
+
+```bash
 python scripts/train/main.py vol-xlsx \
-  --config configs/wgan/train_vol_xlsx_24gb_raw_lp_aggressive_es_noconta.yaml
-
-python scripts/generate_result/main.py vol \
   --config configs/wgan/train_vol_xlsx.yaml
-```
 
-## 3. run SVI xlsx (supervised SVI regressor)
+python scripts/train/main.py vol-regression-xlsx \
+  --config configs/wgan/train_vol_regression_xlsx.yaml
 
-```shell
 python scripts/train/main.py svi-xlsx \
   --config configs/wgan/train_svi_xlsx.yaml
-
-python scripts/generate_result/main.py svi \
-  --config configs/wgan/train_svi_xlsx.yaml
-
-python scripts/analyze_error/main.py svi \
-  --config configs/analyze_error/svi.yaml
 ```
 
-## 4. Standalone model pipelines
+Standalone model CLIs follow the same pattern:
 
-Each standalone module shares `merged_vol.xlsx` as input and writes to `outputs/training/<model>/`. This section is the quick-start index only. For model rationale, strengths, limitations, and exact CLI semantics, see [Model Guide](#model-guide), especially [VolGAN](#volgan), [CNN WGAN](#cnn-wgan), [Transformer WGAN](#transformer-wgan), [FiLM WGAN](#film-wgan), [StyleMod WGAN](#stylemod-wgan), and [CrossAttention WGAN](#crossattention-wgan).
+```bash
+python scripts/cnn_wgan/main.py train \
+  --config configs/cnn_wgan/train_lp_gen128_disc128.yaml
 
-### 4.1 VolGAN (MLP baseline)
+python scripts/transformer_wgan/main.py train \
+  --config configs/transformer_wgan/train_lp.yaml
 
-```shell
-# full standalone pipeline: train -> generate-result
-python scripts/volgan/main.py pipeline --config configs/volgan/train_lp.yaml
-
-# rerun scenario generation from an existing run/checkpoint
-python scripts/volgan/main.py sample --config configs/volgan/train_lp.yaml
-# or: bash run_volgan_svi_excel.sh configs/volgan/train_lp.yaml
+python scripts/film_wgan/main.py train \
+  --config configs/film_wgan/train_lp_gen128_disc128.yaml
 ```
 
-### 4.2 CNN WGAN
+For these standalone CLIs, `train` normally performs training followed by result generation, while `sample` is an alias for `generate-result`. These general configurations are architectural baselines, not the frozen RQ1 v3 experiment.
 
-```shell
-# `train` already defaults to the full pipeline: training + generate-result
-python scripts/cnn_wgan/main.py train --config configs/cnn_wgan/train_lp_gen128_disc128.yaml
-python scripts/cnn_wgan/main.py sample --config configs/cnn_wgan/train_lp_gen128_disc128.yaml
-# or: bash run_cnn_wgan_svi_excel.sh configs/cnn_wgan/train_lp_gen128_disc128.yaml
+## Data flow and repository map
+
+```text
+raw TY option trades + news workbook + market references
+        │
+        ├── scripts/raw_vol / scripts/generate_surface
+        │       └── data/processed/<dataset>/<run-id>/
+        │
+        ├── scripts/merge_file / scripts/rq2 enrichment
+        │       └── merged_vol.xlsx / merged_svi.xlsx / merged_params.xlsx
+        │
+        ├── scripts/train or scripts/rq1_pair / scripts/rq2_pair
+        │       └── checkpoints, metrics, manifests, hashes
+        │
+        └── scripts/generate_result / scripts/analyze_error / scripts/rq3
+                └── comparisons, figures, final tables, packaged evidence
 ```
 
-### 4.3 Transformer WGAN
+| Path | Responsibility |
+| --- | --- |
+| `src/quantlib/` | Calendars, pricing, implied volatility, SVI/SABR/raw surfaces, and interpolation |
+| `src/market_data/` | Contract parsing and market-data DTOs |
+| `src/wgan_option/` | General merged-workbook WGAN/regression/SVI training |
+| `src/film_wgan/` | Current residual-FiLM research model and protocol support |
+| `src/{volgan,cnn_wgan,transformer_wgan,stylemod_wgan,crossattn_wgan}/` | Standalone architectural baselines |
+| `scripts/raw_vol/` | Corrected raw-IV construction and audits |
+| `scripts/rq1_pair/` | RQ1 Stage-A/Stage-B orchestration |
+| `scripts/rq2_pair/` | RQ2 representation experiments |
+| `scripts/rq3/` | Scheduled-news and market-jump robustness |
+| `configs/` | Executable experiment and pipeline configurations |
+| `tests/` | Unit, CLI, semantic, and protocol-tamper tests |
+| `docs/` | Thesis design, methodology, architecture reviews, and historical result notes |
+| `outputs/experiments/` | Generated experiment artifacts; ignored by Git |
 
-```shell
-# `train` already defaults to the full pipeline: training + generate-result
-python scripts/transformer_wgan/main.py train --config configs/transformer_wgan/train_lp.yaml
-python scripts/transformer_wgan/main.py sample --config configs/transformer_wgan/train_lp.yaml
-# or: bash run_transformer_wgan_svi_excel.sh configs/transformer_wgan/train_lp.yaml
-```
+## Reproducibility rules
 
-### 4.4 Film WGAN (FiLM-conditioned, "text → current → future" baseline)
+- Start formal experiments from a clean worktree and preserve the exact commit.
+- Never overwrite a frozen experiment root; create a new timestamped root.
+- Keep input manifests, resolved configs, split/support/text plans, hashes, and Git state with every run.
+- Do not reuse v2 FiLM checkpoints in v3. The v2 shuffled arm had asymmetric negative contamination and is superseded.
+- Do not pool old SVI, pre-corrected raw-vol, v2, and v3 estimates as if they were one protocol.
+- Do not read the outer test until every validation admission gate passes.
+- Do not claim static-arbitrage or seven-day ATM results on irregular raw support where those metrics are explicitly unavailable.
 
-```shell
-# `train` already defaults to the full pipeline: training + generate-result
-python scripts/film_wgan/main.py train --config configs/film_wgan/train_lp_gen128_disc128.yaml
-python scripts/film_wgan/main.py sample --config configs/film_wgan/train_lp_gen128_disc128.yaml
-# or: bash run_film_wgan_svi_excel.sh configs/film_wgan/train_lp_gen128_disc128.yaml
-```
+## Known limitations
 
-### 4.5 StyleMod WGAN (StyleGAN-style text+noise style vector)
+- The current v3 result is one validation fold with three seeds, not the planned multi-fold confirmatory experiment.
+- The generator is nearly insensitive to text and its Monte Carlo scenarios are severely under-dispersed.
+- The no-text model does not beat persistence on the full supported surface.
+- Support-aware GP is numerically correct on unsupported cells but unstable across v3 seeds.
+- Calendar/butterfly/smoothness penalties are disabled for irregular raw support until support-aware edge penalties are implemented.
+- RQ2 has not yet adopted the v3 transition-matching and symmetric-negative protocol.
+- The frozen embedding vectors are available locally, but their upstream API request/preprocessing provenance is incomplete.
+- FiLM checkpoints do not contain optimizer/scheduler state, so interrupted jobs restart rather than resume at the exact epoch.
+- Dependency files constrain version ranges but do not lock the complete environment; preserve the working conda/PyTorch/CUDA stack with formal artifacts.
+- Generated datasets and outputs are ignored; sharing a result requires packaging its manifests and tables explicitly.
 
-```shell
-# `train` already defaults to the full pipeline: training + generate-result
-python scripts/stylemod_wgan/main.py train --config configs/stylemod_wgan/train_lp_gen64_disc64_tuned.yaml
-python scripts/stylemod_wgan/main.py sample --config configs/stylemod_wgan/train_lp_gen64_disc64_tuned.yaml
-# or: bash run_stylemod_wgan_svi_excel.sh configs/stylemod_wgan/train_lp_gen64_disc64_tuned.yaml
-```
+## Documentation
 
-### 4.6 CrossAttention WGAN
+Read these next:
 
-```shell
-# `train` already defaults to the full pipeline: training + generate-result
-python scripts/crossattn_wgan/main.py train --config configs/crossattn_wgan/train_lp_gen128_disc128.yaml
-python scripts/crossattn_wgan/main.py sample --config configs/crossattn_wgan/train_lp_gen128_disc128.yaml
-```
+- [Current executable workflows](docs/current_executable_workflows.md)
+- [Raw-vol interpolation for RQ1/RQ2](docs/raw_vol_interpolation_rq1_rq2.md)
+- [Vol-surface input design](docs/input_vol.md)
+- [SVI input design](docs/input_svi.md)
+- [Vol-surface GAN architecture](docs/vol_surface_gan_architecture.md)
+- [FiLM-WGAN architecture review](docs/summary/20260809-005100/film_wgan_architecture_review.md)
+- [RQ2 BoW design](docs/rq2_bow_film_wgan.md)
+- [RQ2 sentiment design](docs/rq2_llm_sentiment_film_wgan.md)
+- [RQ3 calculation logic](docs/rq3_event_study_calculation_logic.md)
+- [Thesis experiment status](docs/thesis_experiment_plan_status.md)
+- [Script index](scripts/README.md)
 
-## 5. Run monitoring & management
+Some historical documents describe older SVI grids, projection critics, or per-layer FiLM. When a document conflicts with `src/`, `scripts/`, a resolved config, or a frozen experiment manifest, treat the executable artifact as the implementation record and call out the mismatch rather than silently merging protocols.
 
-Most `run_*.sh` wrappers write to `logs/<module>/<run_ts>/` with `run.log` and `run.pid`:
+## Research-use note
 
-```shell
-# follow training logs
-tail -f logs/stylemod_wgan/<run_ts>/run.log
-
-# check if a background job is still running
-kill -0 "$(cat logs/stylemod_wgan/<run_ts>/run.pid)" 2>/dev/null && echo running || echo stopped
-
-# stop a background job
-kill "$(cat logs/stylemod_wgan/<run_ts>/run.pid)"
-```
-
-Training artifacts (checkpoints, metrics CSV/JSON, loss curves PNG, resolved config) live under `outputs/training/<module>/<data_range>/<run_ts>/`. The best checkpoint is `<module>_best.pt`; `metrics/best_checkpoint.json` records `best_epoch` and `best_metric`.
+This is a thesis research repository, not a production trading system. Results are experimental, data access may be licensed, and no output should be interpreted as investment advice.

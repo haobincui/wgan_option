@@ -1,0 +1,103 @@
+# Independent Q3-only capacity/epoch extension for the four Mask+Coords arms.
+# Text adapters are properties of the arms and never change with capacity.
+film_unet_capacity_epoch_3seed_sweep:
+  schema_version: 1
+  experiment_kind: film_unet_mask_coords_capacity_epoch60_3seed_q3_v1
+  base_training_config: configs/rq3/news_first_vol_film_lp_critic_capacity_seed42_lr2p5e7.yaml
+  seeds: [42, 202, 404]
+  capacity_profiles: [c04, c08, c12, c16, c24, c32]
+  learning_rate: 5.0e-7
+  max_epochs: 60
+  lr_warmup_epochs: 0
+  early_stopping_min_epochs: 30
+  early_stopping_patience: 20
+  validation_mc_samples: 16
+
+  arms:
+    film_unet_mask_coords_text128:
+      label: FiLM U-Net mask+coordinates, LP1024-256-128 + LP critic
+      generator_conditioning_mode: film_unet_mask_coords_v1
+      critic_conditioning_mode: lp_concat_v1
+      gen_text_hidden_dim: 256
+      gen_text_out_dim: 128
+    film_unet_mask_coords_text64:
+      label: FiLM U-Net mask+coordinates, LP1024-64-64 + LP critic
+      generator_conditioning_mode: film_unet_mask_coords_v1
+      critic_conditioning_mode: lp_concat_v1
+      gen_text_hidden_dim: 64
+      gen_text_out_dim: 64
+    film_unet_mask_coords_text64_nolp:
+      label: FiLM U-Net mask+coordinates, LP1024-64-64 + NoLP same-shape critic
+      generator_conditioning_mode: film_unet_mask_coords_v1
+      critic_conditioning_mode: lp_disabled_same_shape_v1
+      gen_text_hidden_dim: 64
+      gen_text_out_dim: 64
+    film_unet_mask_coords_text64_projection:
+      label: FiLM U-Net mask+coordinates, LP1024-64-64 + projection critic
+      generator_conditioning_mode: film_unet_mask_coords_v1
+      critic_conditioning_mode: lp_projection_v1
+      gen_text_hidden_dim: 64
+      gen_text_out_dim: 64
+
+  # Capacity changes only convolutional/critic widths. Critic text width is
+  # deliberately fixed at 128; Generator text widths remain arm-specific.
+  profiles:
+    c04:
+      gen_base_channels: 4
+      gen_res_blocks: 0
+      gen_hidden_dim: 128
+      disc_base_channels: 4
+      disc_res_blocks: 0
+      disc_text_hidden_dim: 128
+      disc_hidden_dim: 96
+    c08:
+      gen_base_channels: 8
+      gen_res_blocks: 0
+      gen_hidden_dim: 256
+      disc_base_channels: 8
+      disc_res_blocks: 0
+      disc_text_hidden_dim: 128
+      disc_hidden_dim: 192
+    c12:
+      gen_base_channels: 12
+      gen_res_blocks: 0
+      gen_hidden_dim: 384
+      disc_base_channels: 12
+      disc_res_blocks: 0
+      disc_text_hidden_dim: 128
+      disc_hidden_dim: 288
+    c16:
+      gen_base_channels: 16
+      gen_res_blocks: 0
+      gen_hidden_dim: 512
+      disc_base_channels: 16
+      disc_res_blocks: 0
+      disc_text_hidden_dim: 128
+      disc_hidden_dim: 384
+    c24:
+      gen_base_channels: 24
+      gen_res_blocks: 0
+      gen_hidden_dim: 768
+      disc_base_channels: 24
+      disc_res_blocks: 0
+      disc_text_hidden_dim: 128
+      disc_hidden_dim: 576
+    c32:
+      gen_base_channels: 32
+      gen_res_blocks: 0
+      gen_hidden_dim: 1024
+      disc_base_channels: 32
+      disc_res_blocks: 0
+      disc_text_hidden_dim: 128
+      disc_hidden_dim: 786
+
+  runtime:
+    python_executable: /home/haobin_cui/.conda/envs/py312/bin/python
+    gpu_ids: [0, 1]
+    workers_per_gpu: 18
+    benchmark_workers_per_gpu: 18
+    cpu_threads_per_job: 1
+    poll_interval_seconds: 2
+    resource_sample_interval_seconds: 2
+    max_peak_gpu_memory_gib: 20.0
+    max_host_ram_fraction: 0.85

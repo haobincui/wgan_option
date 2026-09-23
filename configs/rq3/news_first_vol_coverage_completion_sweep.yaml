@@ -1,0 +1,249 @@
+news_first_vol_training:
+  datasets:
+    root: data/processed/rq3/news_first_vol_surfaces_q097_103_ttm07_38_v1
+    workbook_template: tolerance_{tolerance02}m/merged_vol.xlsx
+    tolerances_minutes: [5, 10, 15, 30]
+    common_evaluation_tolerance_minutes: 5
+    sheet_name: gan_input_ready
+    text_embedding_mode: lp
+    seed: 42
+    support_mask_mode: raw_joint
+    text_ablation_modes: [current_only, real_text, text_shuffle]
+    text_shuffle_seed: 42
+
+  split:
+    train_end_utc: "2023-07-01T00:00:00Z"
+    validation_end_utc: "2023-10-01T00:00:00Z"
+    validation_mc_samples: 16
+
+  coverage_completion_sweep:
+    enabled: true
+    q4_prediction_and_evaluation_forbidden: true
+
+    # The two completed roots supply cells that must not be trained again.
+    # Their registries, resolved-config hashes and Q3 pair metrics are hashed
+    # into this experiment's immutable source lineage.
+    reference_experiments:
+      fixed_lr_capacity:
+        root: outputs/experiments/rq3_news_first_vol_fixed_lr_capacity_seed_sweep_q097_103_ttm07_38_v1
+        pair_metrics: outputs/experiments/rq3_news_first_vol_fixed_lr_capacity_seed_sweep_q097_103_ttm07_38_v1/analysis/fixed_lr_capacity_q3_pair_metrics.csv.gz
+        registry: outputs/experiments/rq3_news_first_vol_fixed_lr_capacity_seed_sweep_q097_103_ttm07_38_v1/registry/jobs.json
+        resolved_config_hash: outputs/experiments/rq3_news_first_vol_fixed_lr_capacity_seed_sweep_q097_103_ttm07_38_v1/registry/resolved_config.sha256
+      local_lr:
+        root: outputs/experiments/rq3_news_first_vol_local_lr_seed_sweep_q097_103_ttm07_38_v1
+        pair_metrics: outputs/experiments/rq3_news_first_vol_local_lr_seed_sweep_q097_103_ttm07_38_v1/analysis/local_lr_q3_pair_metrics.csv.gz
+        registry: outputs/experiments/rq3_news_first_vol_local_lr_seed_sweep_q097_103_ttm07_38_v1/registry/jobs.json
+        resolved_config_hash: outputs/experiments/rq3_news_first_vol_local_lr_seed_sweep_q097_103_ttm07_38_v1/registry/resolved_config.sha256
+
+    learning_rate_profiles:
+      lr_5e_07: {initial_learning_rate: 5.0e-7, scheduler_min_lr: 5.0e-8}
+      lr_7_5e_07: {initial_learning_rate: 7.5e-7, scheduler_min_lr: 7.5e-8}
+      lr_1e_06: {initial_learning_rate: 1.0e-6, scheduler_min_lr: 1.0e-7}
+      lr_1_5e_06: {initial_learning_rate: 1.5e-6, scheduler_min_lr: 1.5e-7}
+      lr_2e_06: {initial_learning_rate: 2.0e-6, scheduler_min_lr: 2.0e-7}
+
+    profiles:
+      micro:
+        gen_base_channels: 1
+        gen_text_hidden_dim: 8
+        gen_text_out_dim: 4
+        gen_hidden_dim: 32
+        disc_base_channels: 1
+        disc_text_hidden_dim: 4
+        disc_hidden_dim: 24
+        expected_regression_parameters: 20070
+        expected_wgan_parameters: 25850
+      tiny:
+        gen_base_channels: 2
+        gen_text_hidden_dim: 16
+        gen_text_out_dim: 8
+        gen_hidden_dim: 64
+        disc_base_channels: 2
+        disc_text_hidden_dim: 8
+        disc_hidden_dim: 48
+        expected_regression_parameters: 46528
+        expected_wgan_parameters: 59227
+      small:
+        gen_base_channels: 4
+        gen_text_hidden_dim: 32
+        gen_text_out_dim: 16
+        gen_hidden_dim: 128
+        disc_base_channels: 4
+        disc_text_hidden_dim: 16
+        disc_hidden_dim: 96
+        expected_regression_parameters: 119376
+        expected_wgan_parameters: 149333
+      medium:
+        gen_base_channels: 8
+        gen_text_hidden_dim: 64
+        gen_text_out_dim: 32
+        gen_hidden_dim: 256
+        disc_base_channels: 8
+        disc_text_hidden_dim: 32
+        disc_hidden_dim: 192
+        expected_regression_parameters: 344800
+        expected_wgan_parameters: 422953
+      large:
+        gen_base_channels: 12
+        gen_text_hidden_dim: 96
+        gen_text_out_dim: 48
+        gen_hidden_dim: 384
+        disc_base_channels: 12
+        disc_text_hidden_dim: 48
+        disc_hidden_dim: 288
+        expected_regression_parameters: 676528
+        expected_wgan_parameters: 821117
+      legacy:
+        gen_base_channels: 32
+        gen_text_hidden_dim: 256
+        gen_text_out_dim: 128
+        gen_hidden_dim: 1024
+        disc_base_channels: 32
+        disc_text_hidden_dim: 128
+        disc_hidden_dim: 786
+        expected_regression_parameters: 3929728
+        expected_wgan_parameters: 4691653
+
+    # Stages are strictly sequential. A hash-verified QA record from the
+    # preceding stage is a prerequisite for materializing the next stage.
+    stages:
+      - stage_id: stage_1_regression_tolerance_completion
+        model_family: regression
+        capacity_profiles: [micro, tiny, small, medium, large, legacy]
+        lr_profiles: [lr_5e_07]
+        seeds: [42, 202, 404]
+        tolerances_minutes: [10, 15]
+        text_ablation_modes: [current_only, real_text]
+        expected_jobs: 72
+      - stage_id: stage_2_regression_text_shuffle_completion
+        model_family: regression
+        capacity_profiles: [micro, tiny, small, medium, large, legacy]
+        lr_profiles: [lr_5e_07]
+        seeds: [42, 202, 404]
+        tolerances_minutes: [5, 10, 15, 30]
+        text_ablation_modes: [text_shuffle]
+        expected_jobs: 72
+      - stage_id: stage_3_wgan_low_lr_capacity
+        model_family: wgan
+        capacity_profiles: [micro, tiny, small, medium, large, legacy]
+        lr_profiles: [lr_5e_07]
+        seeds: [42, 202, 404]
+        tolerances_minutes: [5, 30]
+        text_ablation_modes: [current_only, real_text]
+        expected_jobs: 72
+      - stage_id: stage_4_regression_capacity_lr_interaction
+        model_family: regression
+        capacity_profiles: [micro, tiny, small, medium, legacy]
+        lr_profiles: [lr_7_5e_07, lr_1e_06, lr_1_5e_06, lr_2e_06]
+        seeds: [42, 202, 404]
+        tolerances_minutes: [5, 30]
+        text_ablation_modes: [current_only, real_text]
+        expected_jobs: 240
+
+  models:
+    regression:
+      trainer_command: vol-regression-xlsx
+      training:
+        train_ratio: 0.8
+        channels: 1
+        embedding_dim: 1024
+        noise_dim: 32
+        gen_base_channels: 12
+        gen_res_blocks: 0
+        gen_text_hidden_dim: 96
+        gen_text_out_dim: 48
+        gen_hidden_dim: 384
+        disc_base_channels: 12
+        disc_res_blocks: 0
+        disc_text_hidden_dim: 48
+        disc_hidden_dim: 288
+        residual_output_mode: identity_softplus_residual
+        learning_rate: 5.0e-7
+        use_reduce_lr_on_plateau: true
+        reduce_lr_factor: 0.5
+        reduce_lr_patience: 3
+        reduce_lr_min_lr: 5.0e-8
+        num_epochs: 100
+        batch_size: 16
+        beta_1: 0.5
+        beta_2: 0.9
+        lambda_recon: 10.0
+        lambda_calendar: 2.0
+        lambda_butterfly: 2.0
+        lambda_smooth: 0.1
+        lambda_delta_shrink: 0.0
+        use_calendar_constraint: true
+        use_butterfly_constraint: true
+        use_smooth_constraint: true
+        constraint_warmup_epochs: 0
+        best_checkpoint_metric: val_hybrid_score
+        evaluate_initial_checkpoint: true
+        baseline_penalty_weight: 2.0
+        use_early_stopping: true
+        early_stopping_patience: 12
+        early_stopping_min_epochs: 30
+        early_stopping_min_delta: 0.0
+        save_every: 1000000
+
+    wgan:
+      trainer_command: vol-xlsx
+      training:
+        train_ratio: 0.8
+        channels: 1
+        embedding_dim: 1024
+        noise_dim: 32
+        gen_base_channels: 12
+        gen_res_blocks: 0
+        gen_text_hidden_dim: 96
+        gen_text_out_dim: 48
+        gen_hidden_dim: 384
+        disc_base_channels: 12
+        disc_res_blocks: 0
+        disc_text_hidden_dim: 48
+        disc_hidden_dim: 288
+        residual_output_mode: identity_softplus_residual
+        learning_rate: 5.0e-7
+        use_reduce_lr_on_plateau: true
+        reduce_lr_factor: 0.5
+        reduce_lr_patience: 3
+        reduce_lr_min_lr: 5.0e-8
+        num_epochs: 100
+        batch_size: 16
+        beta_1: 0.5
+        beta_2: 0.9
+        discriminator_iter: 5
+        lambda_gp: 10.0
+        lambda_recon: 10.0
+        lambda_calendar: 2.0
+        lambda_butterfly: 2.0
+        lambda_smooth: 0.1
+        lambda_delta_shrink: 0.0
+        use_calendar_constraint: true
+        use_butterfly_constraint: true
+        use_smooth_constraint: true
+        constraint_warmup_epochs: 0
+        best_checkpoint_metric: val_hybrid_score
+        evaluate_initial_checkpoint: true
+        baseline_penalty_weight: 2.0
+        use_early_stopping: true
+        early_stopping_patience: 16
+        early_stopping_min_epochs: 30
+        early_stopping_min_delta: 0.0
+        save_every: 1000000
+
+  runtime:
+    python_executable: /home/haobin_cui/.conda/envs/py312/bin/python
+    gpu_ids: [0, 1]
+    gpu_numa_nodes: {0: 0, 1: 1}
+    # Regression benchmark winner: 24 workers/GPU (48 per wave).
+    slots_per_gpu: 24
+    # WGAN's independent benchmark also selected 24 workers/GPU. The explicit
+    # override preserves that stage-specific benchmark decision in lineage.
+    stage_slots_per_gpu:
+      stage_3_wgan_low_lr_capacity: 24
+    cpu_threads_per_job: 1
+    use_numa_binding: true
+    numa_memory_policy: preferred
+    numactl_executable: numactl
+    nvidia_smi_executable: nvidia-smi
+    resource_sample_interval_seconds: 2

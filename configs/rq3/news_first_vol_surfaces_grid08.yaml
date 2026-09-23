@@ -1,0 +1,76 @@
+news_first_vol_surfaces:
+  inputs:
+    market_index_sqlite: data/processed/raw-market-index/raw_2022_2023_london_itm5_relaxed_v2/market_surface_index.sqlite
+    pair_slice_metrics_csv: outputs/rq3/atm_skew_jumps_20260810_final/pair_slice_metrics.csv.gz
+    session_calendar_csv: data/reference/cme_treasury_globex_closures_2022_2023.csv
+    rate_curve_csv: data/reference/us_treasury_par_yield_curve_2022_2023.csv
+    news_xlsx: data/raw/text_embedding/news_with_openai_embeddings_large.xlsx
+    news_source_timezone: Europe/London
+
+  analysis:
+    tolerance_minutes: [5, 10, 15, 30]
+    horizon_minutes: 5
+    current_window_minutes: 5
+    atm_qualities: [A, B]
+    include_closed_in_training: false
+
+  grid:
+    strike_bins: 8
+    maturity_bins: 8
+    moneyness_min: 0.97
+    moneyness_max: 1.03
+    maturity_min_days: 7
+    maturity_max_days: 38
+    integer_maturity_days: true
+
+  quality:
+    pricing_model: black76
+    min_strikes_per_expiry: 2
+    min_expiries_per_surface: 2
+    max_rate_staleness_days: 7
+    max_underlying_staleness_seconds: 60
+    underlying_match_mode: last_prior_trade
+    option_filter_mode: otm_preferred_itm_fallback
+    max_itm_moneyness_distance: 0.05
+    iv_aggregation_mode: volume_weighted_median
+    interpolation_policy: linear_percent_strike_and_linear_total_variance_by_maturity
+
+  validation:
+    enforce_expected_counts: true
+    expected_news_rows: 14900
+    expected_parsed_news_rows: 14900
+    expected_market_pairs: 34450
+    expected_counts_basis: pair_slice_metrics_first_evaluable_pair_grid08_support_audit
+    reconciliation_note: >-
+      This is an independent 8x8 representation experiment. Eligibility before
+      raw-joint masking is inherited from the canonical narrow-grid pair
+      universe; all grid axes and post-mask counts are separately hashed.
+    expected_counts:
+      "5":
+        news_rows: 14900
+        surface_usable_pairs: 1283
+        support_audit_pairs: 1296
+        joint_strict_support_pairs: 798
+        joint_zero_support_pairs: 485
+        grid_fingerprint: e848c575a4ddd7b823042d53cb8be56186e4ba504729b5bdb721fc8459aca53d
+      "10":
+        news_rows: 14900
+        surface_usable_pairs: 1508
+        support_audit_pairs: 1523
+        joint_strict_support_pairs: 914
+        joint_zero_support_pairs: 594
+        grid_fingerprint: e848c575a4ddd7b823042d53cb8be56186e4ba504729b5bdb721fc8459aca53d
+      "15":
+        news_rows: 14900
+        surface_usable_pairs: 1654
+        support_audit_pairs: 1675
+        joint_strict_support_pairs: 977
+        joint_zero_support_pairs: 677
+        grid_fingerprint: e848c575a4ddd7b823042d53cb8be56186e4ba504729b5bdb721fc8459aca53d
+      "30":
+        news_rows: 14900
+        surface_usable_pairs: 1947
+        support_audit_pairs: 1969
+        joint_strict_support_pairs: 1120
+        joint_zero_support_pairs: 827
+        grid_fingerprint: e848c575a4ddd7b823042d53cb8be56186e4ba504729b5bdb721fc8459aca53d

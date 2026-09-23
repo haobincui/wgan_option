@@ -16,6 +16,7 @@ from wgan_option.config import Config, config_to_dict, default_config
 from wgan_option.config_parsing import load_yaml_mapping
 from wgan_option.models.gan_model import WGAN_GP
 from wgan_option.utils.dataloader import ForecastDataBundle, create_bond_option_forecast_dataloaders
+from wgan_option.utils.reproducibility import seed_everything
 
 
 def _load_generate_result_section(config_path: str | None) -> dict:
@@ -58,6 +59,7 @@ class WGANTrainer(BaseTrainer):
 
     def setup(self) -> None:
         """Prepare dataset bundle and model instance before training."""
+        seed_everything(self.config.seed)
         self._log_device_info()
 
         self.logger.info("*** Loading dataset ***")

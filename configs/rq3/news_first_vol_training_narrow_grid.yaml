@@ -1,0 +1,110 @@
+news_first_vol_training:
+  datasets:
+    root: data/processed/rq3/news_first_vol_surfaces_q097_103_ttm07_38_v1
+    workbook_template: tolerance_{tolerance02}m/merged_vol.xlsx
+    tolerances_minutes: [5, 10, 15, 30]
+    common_evaluation_tolerance_minutes: 5
+    sheet_name: gan_input_ready
+    text_embedding_mode: lp
+    seed: 42
+
+  split:
+    train_end_utc: "2023-07-01T00:00:00Z"
+    validation_end_utc: "2023-10-01T00:00:00Z"
+    validation_mc_samples: 16
+
+  # Wave 1 consumes all four WGAN jobs before Wave 2 starts the four
+  # deterministic-regression jobs. Within a wave every GPU owns two slots.
+  waves:
+    - name: wgan_all_tolerances
+      model: wgan
+    - name: regression_all_tolerances
+      model: regression
+
+  models:
+    wgan:
+      trainer_command: vol-xlsx
+      training:
+        train_ratio: 0.8
+        channels: 1
+        embedding_dim: 1024
+        noise_dim: 32
+        gen_hidden_dim: 1024
+        disc_hidden_dim: 786
+        learning_rate: 1.0e-4
+        use_reduce_lr_on_plateau: true
+        reduce_lr_factor: 0.5
+        reduce_lr_patience: 8
+        reduce_lr_min_lr: 1.0e-5
+        num_epochs: 100
+        batch_size: 16
+        beta_1: 0.5
+        beta_2: 0.9
+        discriminator_iter: 5
+        lambda_gp: 10.0
+        lambda_recon: 10.0
+        lambda_calendar: 2.0
+        lambda_butterfly: 2.0
+        lambda_smooth: 0.1
+        lambda_delta_shrink: 0.0
+        use_calendar_constraint: true
+        use_butterfly_constraint: true
+        use_smooth_constraint: true
+        best_checkpoint_metric: val_hybrid_score
+        baseline_penalty_weight: 2.0
+        use_early_stopping: true
+        early_stopping_patience: 12
+        early_stopping_min_delta: 0.0
+        # Larger than num_epochs: only best and final checkpoints are retained.
+        save_every: 1000000
+
+    regression:
+      trainer_command: vol-regression-xlsx
+      training:
+        train_ratio: 0.8
+        channels: 1
+        embedding_dim: 1024
+        gen_hidden_dim: 1024
+        gen_base_channels: 32
+        gen_res_blocks: 0
+        gen_text_hidden_dim: 256
+        gen_text_out_dim: 128
+        learning_rate: 1.0e-4
+        use_reduce_lr_on_plateau: true
+        reduce_lr_factor: 0.5
+        reduce_lr_patience: 8
+        reduce_lr_min_lr: 1.0e-5
+        num_epochs: 100
+        batch_size: 16
+        beta_1: 0.5
+        beta_2: 0.9
+        lambda_recon: 10.0
+        lambda_calendar: 2.0
+        lambda_butterfly: 2.0
+        lambda_smooth: 0.1
+        lambda_delta_shrink: 0.0
+        use_calendar_constraint: true
+        use_butterfly_constraint: true
+        use_smooth_constraint: true
+        constraint_warmup_epochs: 0
+        best_checkpoint_metric: val_hybrid_score
+        baseline_penalty_weight: 2.0
+        use_early_stopping: true
+        early_stopping_patience: 10
+        early_stopping_min_delta: 0.0
+        save_every: 1000000
+
+  runtime:
+    python_executable: /home/haobin_cui/.conda/envs/py312/bin/python
+    gpu_ids: [0, 1]
+    gpu_numa_nodes:
+      0: 0
+      1: 1
+    slots_per_gpu: 2
+    # Balances the observed sample counts: 5m+30m vs 10m+15m.
+    tolerance_slot_order: [5, 30, 10, 15]
+    cpu_threads_per_job: 8
+    use_numa_binding: true
+    numactl_executable: numactl
+    nvidia_smi_executable: nvidia-smi
+    resource_sample_interval_seconds: 2

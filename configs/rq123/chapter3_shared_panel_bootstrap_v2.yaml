@@ -1,0 +1,353 @@
+schema_version: 2
+kind: chapter3_shared_market_panel_bootstrap_v2
+
+# This is an analysis-only correction.  It must never be pointed at an existing
+# experiment root or used to trigger training/prediction lifecycle actions.
+output_root: outputs/analysis/chapter3_shared_market_panel_bootstrap_10000_v2
+
+scope:
+  included:
+    - rq1_direct_rolling
+    - rq2_direct_rolling
+    - rq3_common_parent
+    - rq3_validation_trajectory
+    - generator_architecture_robustness
+    - alignment_window_robustness
+    - displayed_descriptive_capacity_and_coverage_lineage
+  excluded:
+    - rq4
+
+bootstrap:
+  iterations: 10000
+  rng_seed: 20260904
+  confidence_level: 0.95
+  point_estimate: original_sample_plugin
+  seed_resampling: with_replacement
+  fold_resampling: with_replacement
+  session_resampling: with_replacement
+  market_weights: shared_across_all_sampled_seeds_and_paired_conditions
+  resampling_contract: crossed_seed_by_market_panel_shared_fold_session_weights_v2
+
+canonical_schema:
+  required_columns: [condition, seed, fold, pair_id, session_id, value]
+  optional_columns: [persistence_mae]
+  value_definition: pair_level_masked_mae
+  persistence_condition: persistence
+
+recipes:
+  folds: [f1_2023q1, f2_2023q2, f3_2023q3, f4_2023q4]
+  direct:
+    model_arms: [lp_matched, lp_shuffle, no_text, bow, sentiment]
+    rq1_focal: lp_matched
+    rq1_reference: no_text
+    rq2_references: [bow, sentiment]
+  rq3:
+    full_conditions:
+      - film_lp_matched
+      - film_zero_text
+      - film_lp_shuffle
+      - film_bow
+      - film_sentiment
+      - pure_cnn_continue_no_text
+      - pure_cnn_parent
+    branch_focal: film_lp_matched
+    branch_references: [film_lp_shuffle, film_zero_text]
+    intervention_focal: matched_input
+    intervention_references: [wrong_input, zero_input]
+    validation_arms:
+      - film_lp_matched
+      - film_zero_text
+      - film_lp_shuffle
+      - pure_cnn_continue_no_text
+    validation_checkpoints: [epoch_0, epoch_30, best]
+  architecture:
+    train_tolerance_minutes: 5
+    panel_role: common_5m_primary
+    formal_modes:
+      - crossattn_unet_mask_coords_v1
+      - transformer_tokens_mask_coords_v1
+      - stylemod_unet_mask_coords_v1
+    conditional_models:
+      - film_reference
+      - formal:crossattn_unet_mask_coords_v1
+      - formal:stylemod_unet_mask_coords_v1
+      - formal:transformer_tokens_mask_coords_v1
+      - scaled:film_reference_scaled
+      - scaled:validation_point_leader_scaled
+  alignment:
+    tolerances_minutes: [5, 10, 15, 20, 30]
+    own_panel_tolerances_minutes: [10, 15, 20, 30]
+    common_panel_role: common_5m_primary
+    own_panel_role: own_tolerance_secondary
+
+sources:
+  direct:
+    role: data
+    adapter: simple_condition
+    path: outputs/experiments/rq12_news_first_vol_text_10seed_composite_lr2p5e5_descriptive_no_bootstrap_exact_ttm_rolling_v1/analysis/text_10seed_composite_pair_metrics.csv
+    sha256: d832b3b057ea440845bdd97312744bf5f75e706c80c2057a44d8f88e64f38754
+    expected_rows: 25000
+    expected_canonical_rows: 30000
+    condition_column: arm
+    value_column: target_mae
+    persistence_column: persistence_mae
+    add_persistence_condition: true
+    panel_contract: shared
+    expected_condition_count: 6
+    expected_seed_count: 10
+    expected_fold_count: 4
+    expected_raw_values:
+      arm: [lp_matched, lp_shuffle, no_text, bow, sentiment]
+
+  rq3_full:
+    role: data
+    adapter: simple_condition
+    path: outputs/experiments/rq12_news_first_vol_film_unet_pure_cnn_backbone_text_effect_10seed_5m_v1/evaluation/standard_pair_metrics.csv.gz
+    sha256: 87e70dc0842c9fa99dcf98c40c9ec48c23ce1841a6e38f08559d5ea8e2db90e5
+    expected_rows: 35000
+    expected_canonical_rows: 40000
+    condition_column: arm
+    value_column: target_mae
+    persistence_column: persistence_mae
+    add_persistence_condition: true
+    panel_contract: shared
+    expected_condition_count: 8
+    expected_seed_count: 10
+    expected_fold_count: 4
+    expected_raw_values:
+      arm:
+        - film_bow
+        - film_lp_matched
+        - film_lp_shuffle
+        - film_sentiment
+        - film_zero_text
+        - pure_cnn_continue_no_text
+        - pure_cnn_parent
+
+  rq3_branch:
+    role: data
+    adapter: simple_condition
+    path: outputs/experiments/rq12_news_first_vol_film_unet_pure_cnn_backbone_text_effect_10seed_5m_v1/analysis/standard_primary_panel.csv.gz
+    sha256: 705783913e5252d8754cf9820ba9ca3c6a361dcc4fe6defec0fada40817cf041
+    expected_rows: 15000
+    expected_canonical_rows: 20000
+    condition_column: arm
+    condition_map: {matched: film_lp_matched}
+    value_column: target_mae
+    persistence_column: persistence_mae
+    add_persistence_condition: true
+    panel_contract: shared
+    expected_condition_count: 4
+    expected_seed_count: 10
+    expected_fold_count: 4
+    expected_raw_values:
+      arm: [matched, film_lp_shuffle, film_zero_text]
+
+  rq3_intervention:
+    role: data
+    adapter: simple_condition
+    path: outputs/experiments/rq12_news_first_vol_film_unet_pure_cnn_backbone_text_effect_10seed_5m_v1/analysis/intervention_primary_panel.csv.gz
+    sha256: 4898c79b51db2d7aacee8c749e14b2edf18e8920ce50c9c04d59375b4d77009b
+    expected_rows: 15000
+    expected_canonical_rows: 20000
+    condition_column: input_condition
+    value_column: target_mae
+    persistence_column: persistence_mae
+    add_persistence_condition: true
+    panel_contract: shared
+    expected_condition_count: 4
+    expected_seed_count: 10
+    expected_fold_count: 4
+    expected_raw_values:
+      input_condition: [matched_input, wrong_input, zero_input]
+
+  rq3_validation:
+    role: data
+    adapter: validation_checkpoint
+    path: outputs/experiments/rq12_news_first_vol_film_unet_pure_cnn_backbone_text_effect_10seed_5m_v1/evaluation/validation_trajectory_pair_metrics.csv.gz
+    sha256: d63ffda5865f1316fbf58662843cecfa8d3e3dfb7b189d68152dddc93434dbc9
+    expected_rows: 210420
+    expected_adapted_data_rows: 60120
+    expected_canonical_rows: 65130
+    value_column: target_mae
+    persistence_column: persistence_mae
+    add_persistence_condition: true
+    panel_contract: shared
+    expected_condition_count: 13
+    expected_seed_count: 10
+    expected_fold_count: 4
+    include:
+      arm:
+        - film_lp_matched
+        - film_zero_text
+        - film_lp_shuffle
+        - pure_cnn_continue_no_text
+      checkpoint_label: [epoch_0, epoch_30, best]
+
+  architecture:
+    role: data
+    adapter: study_selector
+    path: outputs/experiments/rq3_news_first_vol_generator_architecture_3seed_5m_exact_ttm_v1/predictions/pair_metrics.csv.gz
+    sha256: 2e4716fc87ab860b3408e307493ca25a7e59c3b4c88ae7872458d8404f754bce
+    expected_rows: 28500
+    expected_canonical_rows: 30000
+    value_column: target_mae
+    persistence_column: persistence_mae
+    add_persistence_condition: true
+    panel_contract: shared
+    expected_condition_count: 20
+    expected_seed_count: 3
+    expected_fold_count: 4
+    expected_raw_values:
+      train_tolerance_minutes: [5]
+      panel_role: [common_5m_primary]
+      text_condition: [matched, shuffle, zero]
+
+  alignment:
+    role: data
+    adapter: study_selector
+    path: outputs/experiments/rq3_news_first_vol_alignment_tolerance_3seed_exact_ttm_v1/predictions/pair_metrics.csv.gz
+    sha256: c75fb74aa1504d43f6f8cd0926fc31559c3e6f9bf15d56ec0f40bf4a4980cb4a
+    expected_rows: 46044
+    expected_canonical_rows: 46044
+    value_column: target_mae
+    persistence_column: persistence_mae
+    # This source contains multiple, nested own-tolerance panels.  Persistence
+    # is therefore materialized only after build_jobs selects a single panel.
+    add_persistence_condition: false
+    panel_contract: mixed
+    expected_condition_count: 27
+    expected_seed_count: 3
+    expected_fold_count: 4
+    expected_raw_values:
+      train_tolerance_minutes: [5, 10, 15, 20, 30]
+      panel_role: [common_5m_primary, own_tolerance_secondary]
+      text_condition: [matched, zero]
+
+# Legacy tables are read only to populate new-versus-old comparison columns.
+# Missing historical fields remain null; no values are transcribed from TeX.
+legacy_sources:
+  direct_fold_persistence:
+    role: legacy
+    path: outputs/reports/chapter3_q4_primary_rolling_robustness_v2/analysis/fold_model_vs_persistence_contrasts.csv
+    sha256: 5634f501652a5443fc8d88bf33e43885bd147d2faeb26c667a07311bdd1bfba0
+    expected_rows: 20
+  direct_overall_persistence:
+    role: legacy
+    path: outputs/reports/chapter3_q4_primary_rolling_robustness_v2/analysis/rolling_model_vs_persistence_contrasts.csv
+    sha256: 7aaf0ca91c5bdf595ea269449965f4279a247f4b44278122ae9599c2b2a73d3e
+    expected_rows: 5
+  direct_q4_primary:
+    role: legacy
+    path: outputs/reports/chapter3_q4_primary_rolling_robustness_v2/analysis/q4_primary_contrasts.csv
+    sha256: d986a6ef2a0c5151467add7f3145396f3a7d20657be16fbbf2511d27508c3bcb
+    expected_rows: 5
+  rq3_main:
+    role: legacy
+    path: outputs/experiments/rq12_news_first_vol_film_unet_pure_cnn_backbone_text_effect_10seed_5m_v1/analysis/results/main_comparisons.csv
+    sha256: 02245498b804aa7623cfbdfb6b28a43709d7b2253a2135a18b97ebeb66706642
+    expected_rows: 2
+  rq3_intervention:
+    role: legacy
+    path: outputs/experiments/rq12_news_first_vol_film_unet_pure_cnn_backbone_text_effect_10seed_5m_v1/analysis/results/intervention_comparisons.csv
+    sha256: 562c2ba9b508a1b102d2a74c940fbe33b5366f0c6807eaec4cd12a793b76d054
+    expected_rows: 2
+  architecture:
+    role: legacy
+    path: outputs/experiments/rq3_news_first_vol_generator_architecture_3seed_5m_exact_ttm_v1/analysis/bootstrap_results.csv
+    sha256: efaba57bee33f3330d9da6ba8d78d4ce16b53a0d0789fbab60e10c05a7f8cbef
+    expected_rows: 19
+  alignment:
+    role: legacy
+    path: outputs/experiments/rq3_news_first_vol_alignment_tolerance_3seed_exact_ttm_v1/analysis/bootstrap_results.csv
+    sha256: e5e6c15abec2a4cbd1523fc23fcb6a2999dde8295d2f924a4889a18a8a806663
+    expected_rows: 22
+
+qa_artifacts:
+  direct_terminal_qa:
+    role: qa
+    path: outputs/experiments/rq12_news_first_vol_text_10seed_composite_lr2p5e5_descriptive_no_bootstrap_exact_ttm_rolling_v1/text_10seed_composite_qa.json
+    sha256: d9e7aa5d3c78c5ed1895c3b9b3f91747c635e4831837128716f189703e65707d
+    json_require: {status: passed, pair_metric_rows: 25000}
+  direct_legacy_report_qa:
+    role: qa
+    path: outputs/reports/chapter3_q4_primary_rolling_robustness_v2/qa.json
+    sha256: 5d05680c3f7598cbeaff1553fd5356a1ac5d4c41ce0f90deadf722124b67a359
+    json_require: {status: passed, fold_persistence_comparison_count: 20}
+  rq3_analysis_inputs:
+    role: qa
+    path: outputs/experiments/rq12_news_first_vol_film_unet_pure_cnn_backbone_text_effect_10seed_5m_v1/analysis/analysis_inputs.json
+    sha256: abe82871d328394491088f9125db246c4ea20b9af268cd83f952a9f20fd88e51
+    json_require:
+      kind: pure_cnn_parent_film_text_effect_analysis_inputs_v1
+      standard_panel_rows: 15000
+      intervention_panel_rows: 15000
+      validation_trajectory_rows: 210420
+  rq3_analysis_manifest:
+    role: qa
+    path: outputs/experiments/rq12_news_first_vol_film_unet_pure_cnn_backbone_text_effect_10seed_5m_v1/analysis/results/analysis_manifest.json
+    sha256: 3b64ed42c3d7fd33a1fb4b55404375232dde8ea869e654c4b56037f1d46a9c65
+    json_require: {kind: film_unet_pure_cnn_backbone_text_effect_analysis_manifest_v1}
+  rq3_frozen_registry:
+    role: qa
+    path: outputs/experiments/rq12_news_first_vol_film_unet_pure_cnn_backbone_text_effect_10seed_5m_v1/registry/final_registry_snapshot.json
+    sha256: fd96e68e5690390b80dad5e5e5235b76eb75e521529fbb96fc0a704b4f52b0a0
+  architecture_analysis_manifest:
+    role: qa
+    path: outputs/experiments/rq3_news_first_vol_generator_architecture_3seed_5m_exact_ttm_v1/analysis/analysis_manifest.json
+    sha256: 62c92c93598b7a309b52698a818e881d8c99b12794dc130bc7aac0870ba5cc36
+    json_require:
+      kind: architecture_window_analysis_manifest_v1
+      pair_metric_rows: 28500
+      pair_metrics_sha256: 2e4716fc87ab860b3408e307493ca25a7e59c3b4c88ae7872458d8404f754bce
+  alignment_analysis_manifest:
+    role: qa
+    path: outputs/experiments/rq3_news_first_vol_alignment_tolerance_3seed_exact_ttm_v1/analysis/analysis_manifest.json
+    sha256: b6348dafd4eb870c97c89e8efc4760f99cb9864dcc7063829b78e4dd021c89f1
+    json_require:
+      kind: architecture_window_analysis_manifest_v1
+      pair_metric_rows: 46044
+      pair_metrics_sha256: c75fb74aa1504d43f6f8cd0926fc31559c3e6f9bf15d56ec0f40bf4a4980cb4a
+
+# These displayed robustness results are descriptive and do not create
+# bootstrap jobs.  Their hashes are still included in the new input manifest.
+passthrough_artifacts:
+  direct_training_summary:
+    role: passthrough_training_diagnostics
+    path: outputs/experiments/rq12_news_first_vol_text_10seed_composite_lr2p5e5_descriptive_no_bootstrap_exact_ttm_rolling_v1/analysis/text_10seed_composite_training_summary.csv
+    sha256: 17f15da3ad24f9c221f6297748a1800f7428858bef64b992315b5c742f64977b
+    expected_rows: 200
+  rq3_training_summary:
+    role: passthrough_training_diagnostics
+    path: outputs/experiments/rq12_news_first_vol_film_unet_pure_cnn_backbone_text_effect_10seed_5m_v1/analysis/training_summary.csv
+    sha256: af62a197d4a761f08810bd715a3085aac787d781a51b43198e02130a9e55c627
+    expected_rows: 280
+  capacity_q3_pair_metrics:
+    role: passthrough
+    path: outputs/experiments/rq3_news_first_vol_film_nolp_capacity_seed_exact_ttm_v1/analysis/film_nolp_capacity_q3_pair_metrics.csv.gz
+    sha256: 393b9ba1095cc5899bdbe8504deddb5884c2f3d982f87f1b0223b228800d9222
+    expected_rows: 4860
+  capacity_q4_pair_metrics:
+    role: passthrough
+    path: outputs/experiments/rq3_news_first_vol_film_nolp_capacity_seed_exact_ttm_v1/analysis/film_nolp_capacity_q4_pair_metrics.csv.gz
+    sha256: 6975426abd6178f64a25c6585272bf7cc3745e46bbcf54a6bbb3121a096370c6
+    expected_rows: 5148
+  capacity_terminal_qa:
+    role: passthrough_qa
+    path: outputs/experiments/rq3_news_first_vol_film_nolp_capacity_seed_exact_ttm_v1/qa.json
+    sha256: 9d64982e0209efcbaafc71458a2ea6b9ff6ee8e003f6e3379c266b63173fe68a
+    json_require: {status: passed}
+  alignment_pair_universe_summary:
+    role: passthrough
+    path: outputs/experiments/rq3_news_first_vol_alignment_tolerance_3seed_exact_ttm_v1/inputs/pair_universe_summary.csv
+    sha256: 4619626efd7df93744577aa12824acd6a2060dccb90286e2afdf8e89a9dea72a
+    expected_rows: 60
+  alignment_pair_universes:
+    role: passthrough
+    path: outputs/experiments/rq3_news_first_vol_alignment_tolerance_3seed_exact_ttm_v1/inputs/pair_universes.csv
+    sha256: 98393abd4bf56875c9c9e8c6ef854f86b3ce5fd8fc480087a0651f40ba518570
+    expected_rows: 20400
+  alignment_pair_universe_manifest:
+    role: passthrough_qa
+    path: outputs/experiments/rq3_news_first_vol_alignment_tolerance_3seed_exact_ttm_v1/inputs/pair_universe_manifest.json
+    sha256: 7321ac2cc3d2a24d1178f8f61026b15260d94f15622c7efe993901e931c7052f

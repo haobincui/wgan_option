@@ -1,0 +1,31 @@
+{
+  "schema_version": "atm_jump_rolling_skewness_screen_figure_v1",
+  "calculation_policy": "Read frozen rolling_jump_skew_60m and delta_rolling_jump_skew_60m; do not recompute.",
+  "grouping_policy": "One session_id x maturity_date x underlying_contract_id; break display lines when consecutive valid timestamps differ by >5 minutes.",
+  "selection_policy": "Frozen group with the largest number of broad rolling_jump_skew_change flags; illustrative only.",
+  "source": "/home/haobin_cui/research_files_space_2/wgan_option-rq123-london-timezone/outputs/rq3/atm_skew_jumps_20260810_final/pair_slice_metrics.csv.gz",
+  "source_sha256": "d7ad22f5e448176722ee17800e0799dfc654b61d99c129c7f5b5ef8ce0665694",
+  "rankings": "/home/haobin_cui/research_files_space_2/wgan_option-rq123-london-timezone/outputs/rq3/atm_skew_jumps_20260810_final/metric_rankings.csv.gz",
+  "rankings_sha256": "f747f5ae73c217c5021300dd970e2ee59dc7fc35f4855470ff085cd6bd4a0a1b",
+  "selection": {
+    "session_id": "cme_ty_20230712T2200Z",
+    "maturity_date": "2023-07-21",
+    "underlying_contract_id": "TYU3"
+  },
+  "global_rolling_skew_60m_n": 6801,
+  "global_adjacent_valid_change_n": 6553,
+  "global_broad_flag_n": 210,
+  "global_broad_flag_rate_among_valid_changes": 0.032046390965969784,
+  "selected_rows": 304,
+  "selected_rolling_skew_60m_n": 185,
+  "selected_adjacent_valid_change_n": 184,
+  "selected_broad_flag_n": 14,
+  "selected_time_min_utc": "2023-07-13 12:53:00+00:00",
+  "selected_time_max_utc": "2023-07-13 16:33:00+00:00",
+  "outputs": {
+    "png": "docs/figures/ch3_atm_jump_rolling_skewness_screen_v1.png",
+    "png_sha256": "cd48bfcd9bf8ad5a4565e5e4858499308e1042b6ed8283f6c3d1c7ca57349d19",
+    "svg": "docs/figures/ch3_atm_jump_rolling_skewness_screen_v1.svg",
+    "svg_sha256": "3bd0aa0c743b2b88fb9d3e40482ed4042af35439c82d6df69265699601b866ce"
+  }
+}

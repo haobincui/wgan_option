@@ -916,6 +916,8 @@ quality = read_csv('data_quality_summary.csv')
 coverage = read_csv('dataset_coverage.csv')
 exclusions = read_csv('exclusion_reason_summary.csv')
 fields = read_csv('field_dictionary.csv')
+atm_quality_rows = read_csv('atm_observations.csv.gz')
+pair_quality_rows = read_csv('pair_slice_metrics.csv.gz')
 episodes = read_csv('candidate_episodes.csv')
 candidate_pairs = read_csv('candidate_pairs.csv')
 official_bridge = read_csv('episode_official_event_bridge.csv')
@@ -982,19 +984,29 @@ else:
 
 
 def _evidence_cell_source() -> str:
-    return """display(Markdown('### Official releases'))
-if official_bridge.empty:
+    return """top_episode_ids = episodes.sort_values('episode_rank', kind='stable').head(20)['episode_id'].astype(str).tolist() if not episodes.empty else []
+episode_rank_map = episodes.set_index('episode_id')['episode_rank'].to_dict() if not episodes.empty else {}
+
+display(Markdown('### Official releases for the top 20 episodes'))
+official_top = official_bridge[official_bridge.get('episode_id', pd.Series(dtype=str)).astype(str).isin(top_episode_ids)].copy()
+if official_top.empty:
     display(Markdown('No official release fell in the configured evidence windows, or the optional bridge was not supplied.'))
 else:
-    preferred = ['episode_id', 'window_relation', 'event_id', 'event_name', 'event_type', 'release_time_utc']
-    display(official_bridge[[column for column in preferred if column in official_bridge.columns]].head(20))
+    official_top.insert(0, 'episode_rank', official_top['episode_id'].map(episode_rank_map))
+    official_top = official_top.sort_values(['episode_rank', 'release_time_utc'], kind='stable')
+    preferred = ['episode_rank', 'episode_id', 'window_relation', 'event_family', 'release_name', 'event_id', 'release_time_utc']
+    display(official_top[[column for column in preferred if column in official_top.columns]])
 
-display(Markdown('### Factiva availability'))
-if news_bridge.empty:
+display(Markdown('### Factiva availability for the top 20 episodes'))
+news_top = news_bridge[news_bridge.get('episode_id', pd.Series(dtype=str)).astype(str).isin(top_episode_ids)].copy()
+if news_top.empty:
     display(Markdown('No Factiva article fell in the configured evidence windows, or the optional bridge was not supplied.'))
 else:
-    preferred = ['episode_id', 'window_relation', 'news_available_time_utc', 'headline', 'article_id', 'alignment_match_method']
-    display(news_bridge[[column for column in preferred if column in news_bridge.columns]].head(20))
+    news_top.insert(0, 'episode_rank', news_top['episode_id'].map(episode_rank_map))
+    news_sort_columns = [column for column in ['episode_rank', 'news_available_time_utc', 'news_row_id'] if column in news_top.columns]
+    news_top = news_top.sort_values(news_sort_columns, kind='stable')
+    preferred = ['episode_rank', 'episode_id', 'window_relation', 'news_available_time_utc', 'headline', 'article_id', 'publication_collision_count', 'lp_text_group_size', 'alignment_match_method']
+    display(news_top[[column for column in preferred if column in news_top.columns]])
 """
 
 
@@ -1019,6 +1031,17 @@ official_ids = set(official_bridge.get('episode_id', pd.Series(dtype=str)).dropn
 news_ids = set(news_bridge.get('episode_id', pd.Series(dtype=str)).dropna().astype(str))
 episode_ids = set(episodes.get('episode_id', pd.Series(dtype=str)).dropna().astype(str))
 matched = len(episode_ids & (official_ids | news_ids))
+high_ids = set(episodes.loc[episodes.get('anomaly_tier', pd.Series(dtype=str)).astype(str).eq('high'), 'episode_id'].astype(str)) if not episodes.empty else set()
+high_matched = len(high_ids & (official_ids | news_ids))
+atm_total = len(atm_quality_rows)
+atm_a = int(atm_quality_rows.get('atm_quality', pd.Series(dtype=str)).astype(str).eq('A').sum())
+atm_abc = int(atm_quality_rows.get('atm_quality', pd.Series(dtype=str)).astype(str).isin(['A', 'B', 'C']).sum())
+exact_atm = int(atm_quality_rows.get('is_exact_atm', pd.Series(dtype=str)).astype(str).str.lower().eq('true').sum())
+skew_total = len(pair_quality_rows)
+skew_ok = int(pair_quality_rows.get('skew_status', pd.Series(dtype=str)).astype(str).eq('ok').sum())
+skew_ab = int(pair_quality_rows.get('skew_quality', pd.Series(dtype=str)).astype(str).isin(['A', 'B']).sum())
+factiva_coverage = coverage[coverage.get('dataset', pd.Series(dtype=str)).astype(str).eq('factiva_news_time_audit')]
+factiva_start = str(factiva_coverage.iloc[0]['min_timestamp_utc']) if not factiva_coverage.empty else 'unknown'
 if episode_ids:
     evidence_text = f'{matched:,} of {len(episode_ids):,} candidate episodes have at least one nearby official or Factiva item in the configured windows.'
 else:
@@ -1026,7 +1049,11 @@ else:
 validation_text = 'All frozen count checks passed.' if failed.empty else f'{len(failed)} frozen count check(s) require review before relying on the rankings.'
 display(Markdown(f'''- **Use the episode table as the investigation queue.** It is deduplicated at the market-pair level before news is joined.
 - **Treat evidence as temporal context only.** {evidence_text}
+- **High-tier context.** {high_matched:,} of {len(high_ids):,} high episodes have at least one time-associated evidence item; this is association, not attribution.
+- **Approximate ATM is necessary.** Exact K/F=1 occurs in {exact_atm:,} of {atm_total:,} slices; A-quality coverage is {atm_a / atm_total:.2%} and A/B/C coverage is {atm_abc / atm_total:.2%}.
+- **Smile skew is selective.** {skew_ok:,} of {skew_total:,} slice pairs have valid two-sided skew and {skew_ab:,} are A/B quality.
 - **Respect data-quality gates.** {validation_text}
+- **Factiva coverage starts later than the market index.** The first parsed availability is {factiva_start}; earlier market episodes do not have complete article-search coverage.
 - **Next step.** Review the highest-ranked case smiles together with all one-to-many news candidates; do not select a headline solely because it is convenient or prominent.'''))
 """
 
@@ -1102,7 +1129,7 @@ def build_companion_notebook(output_root: str | Path) -> Path:
             nbformat.v4.new_code_cell(_episode_cell_source()),
             nbformat.v4.new_markdown_cell(
                 "### Time-associated official and Factiva evidence\n\n"
-                "同一 episode 可以对应多条证据；下表有界展示前 20 条，不强制选择唯一解释。"
+                "同一 episode 可以对应多条证据；下表保留排名前 20 个 episode 的全部候选，不强制选择唯一解释。"
             ),
             nbformat.v4.new_code_cell(_evidence_cell_source()),
         ]

@@ -417,6 +417,7 @@ bash scripts/rq2/run_film_wgan_llm_sentiment.sh --set batch_size=64
 
 - `bow` 当前是 n-gram frequency baseline，不是 TF-IDF，也不是 TF-IDF + SVD。
 - `llm_sentiment` 当前是 OpenAI ChatGPT baseline，不是 HuggingFace LLaMA，也不是 Loughran-McDonald dictionary。
+- 独立的 `python -m scripts.lm_sentiment.main` 现在生成 Loughran-McDonald article/pair sentiment score；它不会覆盖现有 `bow` 或 `llm_sentiment` 工件，也尚未改变既有模型结果。
 - `sentiment_dictionary_source` 是为了兼容 workbook schema 保留的列名；当前它记录的是 OpenAI ChatGPT sentiment source。
 - BoW 和 `llm_sentiment` 都是 article-level text representations，最终通过 `news_row_id` 合并进 `merged_vol_rq2_text.xlsx`。
 - `merged_vol_rq2_text.xlsx` 是训练输入 artifact；不要把 feature generation 产物放进 `outputs/training/`。

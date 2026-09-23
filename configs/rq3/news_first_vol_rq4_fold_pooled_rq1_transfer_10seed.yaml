@@ -1,0 +1,135 @@
+experiment:
+  schema_version: 1
+  experiment_kind: rq4_fold_pooled_rq1_film_pure_transfer_10seed_t30_v1
+  interpretation: retrospective_fold_pooled_distribution_shift_evaluation
+  interface_stability: branch_local
+  output_root: outputs/experiments/rq4_fold_pooled_rq1_film_pure_transfer_10seed_t30_v1
+
+data:
+  alignment_tolerance_minutes: 30
+  forecast_horizon_minutes: 5
+  merged_vol_path: data/processed/rq3/news_first_vol_surfaces_q097_103_ttm01_38_exact_ttm_v1/tolerance_30m/merged_vol.xlsx
+  merged_vol_sha256: 01a29390d697d9910a7f5f7aecea69786e33588614505224a8436a729cec16bd
+  support_audit_path: data/processed/rq3/news_first_vol_surfaces_q097_103_ttm01_38_exact_ttm_v1/tolerance_30m/surface_support_audit.csv.gz
+  support_audit_sha256: 93ca54f6307b0444f6812fe67634dc5beada6efb9eb9f491169e24b430f1d8e6
+  pair_universes_path: outputs/experiments/rq123_news_first_vol_film_unet_text128_c32_nolp_10seed_parent30_cont240_exact_ttm_rolling_v1/inputs/pair_universes.csv
+  pair_universes_sha256: 03bdb7c147da5c788a8784d6841c16953dcffe1c883834a8f3d8c78533d3547a
+  frozen_scheduled_events_path: outputs/experiments/rq123_news_first_vol_film_unet_text128_c32_nolp_10seed_parent30_cont240_exact_ttm_rolling_v1/evaluation/frozen_scheduled_events.csv
+  frozen_scheduled_events_sha256: 92393e94ed79711c9bf690d37a0437070e0d366bf74bd014399019e076090f25
+  market_jump_pairs_path: outputs/rq3/atm_skew_jumps_20260810_final/candidate_pairs.csv
+  market_jump_pairs_sha256: a06bbc1cc37297e9cb2cb302e01cba57ed333deaf69c056f4d4ec1ef98a93364
+  surface_sheet_name: gan_input_ready
+  surface_grid_profile: exact_ttm_16x16_v1
+  surface_cell_count: 256
+  embedding_dimension: 1024
+  support_mask_mode: raw_joint
+  pair_sample_mode: pair_collapsed_v1
+
+special_time:
+  scheduled_window_minutes: [0, 30]
+  scheduled_window_closed: both
+  market_jump_join: exact_effective_origin_utc
+  market_jump_tiers: all
+  union_mode: pair_deduplicated_multilabel_v1
+
+models:
+  film_cnn:
+    source_root: outputs/experiments/rq12_news_first_vol_film_unet_text128_c32_nolp_direct_text_10seed_lr2p5e5_exact_ttm_rolling_v1
+    source_qa_path: outputs/experiments/rq12_news_first_vol_film_unet_text128_c32_nolp_direct_text_10seed_lr2p5e5_exact_ttm_rolling_v1/qa.json
+    source_qa_sha256: 36ac891b8734170d1769fad925e5ebc2d5a0392141b7d93b96efbd28a4e8f5f7
+    checkpoint_manifest_path: outputs/experiments/rq12_news_first_vol_film_unet_text128_c32_nolp_direct_text_10seed_lr2p5e5_exact_ttm_rolling_v1/analysis/checkpoint_manifest.csv
+    checkpoint_manifest_sha256: 5c97acb967f1ddc9dca395a1f05ae8d5901535aab39627beb40ff834d4626ae9
+    source_arm: lp_matched
+    generator_conditioning_mode: film_unet_mask_coords_v1
+    expected_generator_parameters: 827745
+    text_ablation_mode: real_text
+  pure_cnn:
+    source_root: outputs/experiments/rq12_news_first_vol_cnn_unet_c32_nolp_pure_no_text_10seed_exact_ttm_rolling_v1
+    source_qa_path: outputs/experiments/rq12_news_first_vol_cnn_unet_c32_nolp_pure_no_text_10seed_exact_ttm_rolling_v1/qa.json
+    source_qa_sha256: d236d8a9ef814d68c273af161904d0979fa9a27a861081a6246dc85d7b9fc98d
+    checkpoint_manifest_path: outputs/experiments/rq12_news_first_vol_cnn_unet_c32_nolp_pure_no_text_10seed_exact_ttm_rolling_v1/analysis/checkpoint_manifest.csv
+    checkpoint_manifest_sha256: 763d8407b59cdec986d4c9901887ec21a404f1049f4d59fac1c28af2bb3db1a3
+    source_arm: pure_cnn_no_text
+    generator_conditioning_mode: cnn_unet_mask_coords_v1
+    expected_generator_parameters: 416353
+    text_ablation_mode: real_text
+
+matrix:
+  seeds: [42, 202, 404, 382624741, 1607127774, 1662128673, 2041145538, 2014889368, 1343862330, 779214671]
+  folds: [f1_2023q1, f2_2023q2, f3_2023q3, f4_2023q4]
+  expected_checkpoint_count: 80
+  expected_prediction_tasks: 80
+  expected_prediction_rows: 11380
+
+expected_fold_counts:
+  f1_2023q1:
+    splits:
+      train: {pairs: 53, sessions: 25}
+      validation: {pairs: 37, sessions: 19}
+      test: {pairs: 12, sessions: 9}
+    pairs: 102
+    sessions: 53
+    scheduled: 72
+    jump: 43
+    both: 13
+  f2_2023q2:
+    splits:
+      train: {pairs: 90, sessions: 44}
+      validation: {pairs: 12, sessions: 9}
+      test: {pairs: 26, sessions: 11}
+    pairs: 128
+    sessions: 64
+    scheduled: 93
+    jump: 50
+    both: 15
+  f3_2023q3:
+    splits:
+      train: {pairs: 102, sessions: 53}
+      validation: {pairs: 26, sessions: 11}
+      test: {pairs: 26, sessions: 9}
+    pairs: 154
+    sessions: 73
+    scheduled: 111
+    jump: 60
+    both: 17
+  f4_2023q4:
+    splits:
+      train: {pairs: 128, sessions: 64}
+      validation: {pairs: 26, sessions: 9}
+      test: {pairs: 31, sessions: 15}
+    pairs: 185
+    sessions: 88
+    scheduled: 136
+    jump: 68
+    both: 19
+
+prediction:
+  mc_samples: 64
+  noise_dim: 32
+  noise_method: stable_noise_for_keys_v1
+  shared_noise_across_models: true
+  sample_batch_size: 32
+  draw_batch_size: 64
+  generator_current_input_mode: current_support_masked
+  save_individual_draws: false
+
+analysis:
+  combined_inference_enabled: false
+  combined_interpretation: retrospective_mixed_train_validation_test_diagnostic
+  oos_source_split: test
+  oos_interpretation: retrospective_rolling_out_of_sample_development_evidence
+  bootstrap_replicates: 10000
+  bootstrap_seed: 20260904
+  confidence_level: 0.95
+  resampling_hierarchy: seed_then_fold_then_paired_cme_session_v1
+  persistence_multiple_testing_method: holm
+  expected_oos_pairs: 95
+  expected_oos_sessions: 44
+
+runtime:
+  python_executable: /home/haobin_cui/.conda/envs/py312/bin/python
+  gpu_ids: [0, 1]
+  workers_per_gpu: 4
+  cpu_threads_per_worker: 1
+  fail_fast: true
+  resume_is_hash_bound: true

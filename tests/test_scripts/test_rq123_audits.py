@@ -72,16 +72,12 @@ class Rq123AuditTests(unittest.TestCase):
                 )
             )
             self.assertEqual(exit_code, 0)
-            manual = pd.read_csv(
-                output_dir / "sentiment_manual_annotation_sample.csv"
-            )
-            repeats = pd.read_csv(
-                output_dir / "sentiment_repeat_scoring_results.csv"
-            )
+            manual = pd.read_csv(output_dir / "sentiment_manual_annotation_sample.csv")
+            repeats = pd.read_csv(output_dir / "sentiment_repeat_scoring_results.csv")
             manifest = json.loads(
-                (
-                    output_dir / "sentiment_audit_manifest.json"
-                ).read_text(encoding="utf-8")
+                (output_dir / "sentiment_audit_manifest.json").read_text(
+                    encoding="utf-8"
+                )
             )
             self.assertEqual(len(manual), 3)
             self.assertFalse(manual["lp_text"].fillna("").eq("").any())
@@ -114,16 +110,13 @@ class Rq123AuditTests(unittest.TestCase):
             )
             self.assertEqual(exit_code, 0)
             snapshot = (
-                pipeline
-                / "inputs/source_snapshot/raw_option_data/nested/input.csv"
+                pipeline / "inputs/source_snapshot/raw_option_data/nested/input.csv"
             )
             self.assertEqual(
                 snapshot.read_text(encoding="utf-8"),
                 "a,b\n1,2\n",
             )
-            manifest = pd.read_csv(
-                pipeline / "inputs/source_manifest.csv"
-            )
+            manifest = pd.read_csv(pipeline / "inputs/source_manifest.csv")
             self.assertEqual(len(manifest), 1)
             self.assertEqual(
                 manifest.iloc[0]["category"],
@@ -142,14 +135,10 @@ class Rq123AuditTests(unittest.TestCase):
             snapshot_inputs(
                 Namespace(
                     pipeline_root=str(pipeline),
-                    input=[
-                        f"raw_option_data={source}/daily_*.csv.gz"
-                    ],
+                    input=[f"raw_option_data={source}/daily_*.csv.gz"],
                 )
             )
-            snapshot_root = (
-                pipeline / "inputs/source_snapshot/raw_option_data"
-            )
+            snapshot_root = pipeline / "inputs/source_snapshot/raw_option_data"
             self.assertTrue((snapshot_root / "daily_2022.csv.gz").is_file())
             self.assertFalse((snapshot_root / "merged.csv.gz").exists())
 
@@ -180,9 +169,7 @@ class Rq123AuditTests(unittest.TestCase):
                 expected_rate_curve_sha256="b" * 64,
             )
             self.assertTrue(matched["precalibration_corrected_inputs_ok"])
-            self.assertFalse(
-                mismatched["precalibration_corrected_inputs_ok"]
-            )
+            self.assertFalse(mismatched["precalibration_corrected_inputs_ok"])
 
     def test_precalibration_audit_accepts_bounded_anchored_itm_fallback(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -203,18 +190,13 @@ class Rq123AuditTests(unittest.TestCase):
                     "passes_precalib_filter": [True] * 4,
                     "weight": [3.0] * 4,
                     "rate_curve_sha256": [curve_sha] * 4,
-                    "calibration_datetime_utc": [
-                        "2023-01-01T12:00:00Z"
-                    ]
-                    * 4,
+                    "calibration_datetime_utc": ["2023-01-01T12:00:00Z"] * 4,
                     "business_days": [30, 30, 60, 60],
                     "strike": [95.0, 98.0, 105.0, 102.0],
                     "percent_strike": [0.95, 0.98, 1.05, 1.02],
                 }
             )
-            csv_path = (
-                root / "surface-raw-excel-precalib-points.csv"
-            )
+            csv_path = root / "surface-raw-excel-precalib-points.csv"
             frame.to_csv(csv_path, index=False)
 
             valid = _precalibration_audit_summary(
@@ -237,9 +219,7 @@ class Rq123AuditTests(unittest.TestCase):
                 option_filter_mode="otm_preferred_itm_fallback",
                 max_itm_moneyness_distance=0.05,
             )
-            self.assertFalse(
-                invalid["precalibration_corrected_inputs_ok"]
-            )
+            self.assertFalse(invalid["precalibration_corrected_inputs_ok"])
 
     def test_workbook_summary_separates_surface_and_text_lineage_counts(self):
         with tempfile.TemporaryDirectory() as temporary:

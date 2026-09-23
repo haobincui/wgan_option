@@ -16,7 +16,6 @@ from utils.postprocess_runtime import (
     save_payload_json,
     select_samples_from_split,
     split_metadata,
-    write_json,
     write_summary_csv,
 )
 from utils.result_config import (
@@ -28,13 +27,19 @@ from utils.training_paths import generate_result_config_path
 VALID_FALLBACK_MODES = {"none", "mc_uncertainty_to_current"}
 
 
-def build_result_arg_parser(*, description: str, default_config_path: str) -> argparse.ArgumentParser:
+def build_result_arg_parser(
+    *, description: str, default_config_path: str
+) -> argparse.ArgumentParser:
     """Create the standard result-generation parser."""
 
     parser = argparse.ArgumentParser(description=description)
     add_shared_sample_selection_args(parser, default_config_path=default_config_path)
-    parser.add_argument("--no-plot", action="store_true", help="Disable PNG plot generation.")
-    parser.add_argument("--no-json", action="store_true", help="Disable per-sample JSON payload output.")
+    parser.add_argument(
+        "--no-plot", action="store_true", help="Disable PNG plot generation."
+    )
+    parser.add_argument(
+        "--no-json", action="store_true", help="Disable per-sample JSON payload output."
+    )
     return parser
 
 
@@ -42,13 +47,17 @@ def validate_result_config(config: GenerateResultConfig) -> None:
     """Fail fast on invalid high-level generation config values."""
 
     if config.split not in VALID_SPLITS:
-        raise ValueError(f"split must be one of {sorted(VALID_SPLITS)}, got: {config.split}")
+        raise ValueError(
+            f"split must be one of {sorted(VALID_SPLITS)}, got: {config.split}"
+        )
     if config.selection_mode not in VALID_SELECTION_MODES:
         raise ValueError(
             f"selection_mode must be one of {sorted(VALID_SELECTION_MODES)}, got: {config.selection_mode}"
         )
     if str(config.plot_style).strip().lower() != "heatmap_diff":
-        raise ValueError(f"Only plot_style=heatmap_diff is currently supported, got: {config.plot_style}")
+        raise ValueError(
+            f"Only plot_style=heatmap_diff is currently supported, got: {config.plot_style}"
+        )
     if config.selection_mode == "sample_id" and not str(config.sample_id).strip():
         raise ValueError("sample_id must be provided when selection_mode=sample_id.")
     if config.selection_mode == "row_index" and int(config.row_index) < 0:
@@ -67,12 +76,40 @@ def validate_result_config(config: GenerateResultConfig) -> None:
         raise ValueError("mc_samples must be > 0.")
     if config.fallback_mode != "none" and int(config.mc_samples) < 2:
         raise ValueError("mc_samples must be >= 2 when fallback_mode is enabled.")
+    from wgan_option.models.common import (
+        CURRENT_SUPPORT_MASKED_GENERATOR_INPUT_MODE,
+        normalize_critic_conditioning_mode,
+        normalize_generator_conditioning_mode,
+        normalize_generator_current_input_mode,
+    )
+
+    support_mask_mode = str(config.support_mask_mode or "none").strip().lower()
+    if support_mask_mode not in {"none", "raw_joint"}:
+        raise ValueError(
+            "support_mask_mode must be one of ['none', 'raw_joint'], got: "
+            f"{support_mask_mode}"
+        )
+    current_input_mode = normalize_generator_current_input_mode(
+        config.generator_current_input_mode
+    )
+    normalize_generator_conditioning_mode(config.generator_conditioning_mode)
+    normalize_critic_conditioning_mode(config.critic_conditioning_mode)
+    if (
+        current_input_mode == CURRENT_SUPPORT_MASKED_GENERATOR_INPUT_MODE
+        and support_mask_mode != "raw_joint"
+    ):
+        raise ValueError(
+            "generator_current_input_mode='current_support_masked' requires "
+            "support_mask_mode='raw_joint' during result generation"
+        )
 
 
 def write_resolved_config(config: GenerateResultConfig, run_dir: str | Path) -> Path:
     """Persist the resolved runtime config into the run directory."""
 
-    return save_generate_result_config_yaml(config, generate_result_config_path(run_dir))
+    return save_generate_result_config_yaml(
+        config, generate_result_config_path(run_dir)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +124,13 @@ def generate_vol_result(config: GenerateResultConfig) -> Path:
     from typing import Optional as _Opt
 
     from utils.postprocess_runtime import resolve_metrics_artifact_path
+    from wgan_option.models.common import (
+        ZERO_GENERATOR_NOISE_MODE,
+        critic_conditioning_fingerprint,
+        generator_current_input_fingerprint,
+        generator_conditioning_fingerprint,
+        generator_noise_fingerprint,
+    )
     from wgan_option.utils.inference_helpers import (
         build_inference_device,
         ensure_matching_embedding_dim,
@@ -94,7 +138,10 @@ def generate_vol_result(config: GenerateResultConfig) -> Path:
         infer_vol_surface_mc,
         load_vol_generator,
     )
-    from wgan_option.utils.merged_xlsx import load_vol_surface_samples, select_ordered_split
+    from wgan_option.utils.merged_xlsx import (
+        load_vol_surface_samples,
+        select_ordered_split,
+    )
     from wgan_option.visualization.surface_plot import (
         extract_short_end_atm_band_value,
         plot_short_end_atm_band_timeseries,
@@ -102,7 +149,9 @@ def generate_vol_result(config: GenerateResultConfig) -> Path:
     )
 
     all_samples = load_vol_surface_samples(config)
-    split_selection = select_ordered_split(all_samples, train_ratio=config.train_ratio, split=config.split)
+    split_selection = select_ordered_split(
+        all_samples, train_ratio=config.train_ratio, split=config.split
+    )
     selected_samples = select_samples_from_split(split_selection, config)
 
     run_dir = Path(config.output_dir)
@@ -115,18 +164,75 @@ def generate_vol_result(config: GenerateResultConfig) -> Path:
     )
 
     device = build_inference_device(config.cuda)
-    model, train_config, embedding_dim = load_vol_generator(checkpoint_path, selected_samples[0], device)
+    model, train_config, embedding_dim = load_vol_generator(
+        checkpoint_path, selected_samples[0], device
+    )
+    news_first_refit_mode = str(train_config.news_first_refit_mode)
+    news_first_refit_recipe_path = str(train_config.news_first_refit_recipe_path)
+    news_first_refit_recipe_sha256 = str(train_config.news_first_refit_recipe_sha256)
+    generator_noise_mode = str(train_config.generator_noise_mode)
+    generator_noise_sha256 = generator_noise_fingerprint(
+        generator_noise_mode,
+        int(train_config.noise_dim),
+    )
+    generator_current_input_mode = str(train_config.generator_current_input_mode)
+    requested_current_input_mode = (
+        str(config.generator_current_input_mode).strip().lower()
+    )
+    if requested_current_input_mode != generator_current_input_mode:
+        raise ValueError(
+            "Result config/checkpoint generator_current_input_mode mismatch: "
+            f"config={requested_current_input_mode!r}, "
+            f"checkpoint={generator_current_input_mode!r}"
+        )
+    generator_current_input_sha256 = generator_current_input_fingerprint(
+        generator_current_input_mode
+    )
+    generator_conditioning_mode = str(train_config.generator_conditioning_mode)
+    requested_generator_conditioning_mode = (
+        str(config.generator_conditioning_mode).strip().lower()
+    )
+    if requested_generator_conditioning_mode != generator_conditioning_mode:
+        raise ValueError(
+            "Result config/checkpoint generator_conditioning_mode mismatch: "
+            f"config={requested_generator_conditioning_mode!r}, "
+            f"checkpoint={generator_conditioning_mode!r}"
+        )
+    generator_conditioning_sha256 = generator_conditioning_fingerprint(
+        generator_conditioning_mode
+    )
+    critic_conditioning_mode = str(train_config.critic_conditioning_mode)
+    requested_critic_conditioning_mode = (
+        str(config.critic_conditioning_mode).strip().lower()
+    )
+    if requested_critic_conditioning_mode != critic_conditioning_mode:
+        raise ValueError(
+            "Result config/checkpoint critic_conditioning_mode mismatch: "
+            f"config={requested_critic_conditioning_mode!r}, "
+            f"checkpoint={critic_conditioning_mode!r}"
+        )
+    critic_conditioning_sha256 = critic_conditioning_fingerprint(
+        critic_conditioning_mode
+    )
 
     fallback_threshold: _Opt[float] = None
     fallback_calibration_path: _Opt[Path] = None
     effective_mc_samples = int(config.mc_samples)
+    if generator_noise_mode == ZERO_GENERATOR_NOISE_MODE:
+        effective_mc_samples = 1
+        if str(config.fallback_mode).strip().lower() != "none":
+            raise ValueError(
+                "MC uncertainty fallback is unavailable for a zero-noise checkpoint."
+            )
     if str(config.fallback_mode).strip().lower() == "mc_uncertainty_to_current":
         if float(config.uncertainty_threshold) >= 0.0:
             fallback_threshold = float(config.uncertainty_threshold)
             effective_mc_samples = int(config.mc_samples)
         else:
             calibration_path = resolve_metrics_artifact_path(
-                config, filename="fallback_calibration.json", checkpoint_path=checkpoint_path,
+                config,
+                filename="fallback_calibration.json",
+                checkpoint_path=checkpoint_path,
             )
             with calibration_path.open("r", encoding="utf-8") as handle:
                 cal_payload = _json.load(handle)
@@ -155,21 +261,28 @@ def generate_vol_result(config: GenerateResultConfig) -> Path:
 
         if str(config.fallback_mode).strip().lower() == "mc_uncertainty_to_current":
             model_mean_surface, uncertainty_score, _ = infer_vol_surface_mc(
-                model, sample,
+                model,
+                sample,
                 noise_dim=int(train_config.noise_dim),
-                seed=int(config.seed), device=device,
+                seed=int(config.seed),
+                device=device,
                 mc_samples=effective_mc_samples,
             )
             used_fallback = bool(
-                fallback_threshold is not None and float(uncertainty_score) > float(fallback_threshold)
+                fallback_threshold is not None
+                and float(uncertainty_score) > float(fallback_threshold)
             )
-            generated_surface = current_surface.copy() if used_fallback else model_mean_surface
+            generated_surface = (
+                current_surface.copy() if used_fallback else model_mean_surface
+            )
             prediction_source = "current_fallback" if used_fallback else "model_mean"
         else:
             generated_surface = infer_vol_surface(
-                model, sample,
+                model,
+                sample,
                 noise_dim=int(train_config.noise_dim),
-                seed=int(config.seed), device=device,
+                seed=int(config.seed),
+                device=device,
             )
 
         metrics = compute_surface_metrics(generated_surface, real_surface)
@@ -211,66 +324,111 @@ def generate_vol_result(config: GenerateResultConfig) -> Path:
                 "news_timestamp_utc": sample.timestamp,
                 "current_snapshot_time_utc": sample.current_snapshot_time_utc,
                 "target_snapshot_time_utc": sample.target_snapshot_time_utc,
-                "pair_quality_label": str(sample.metadata.get("pair_quality_label", "")),
+                "pair_quality_label": str(
+                    sample.metadata.get("pair_quality_label", "")
+                ),
                 "current_weighted_iv_rmse": (
-                    None if sample.metadata.get("current_weighted_iv_rmse") is None
+                    None
+                    if sample.metadata.get("current_weighted_iv_rmse") is None
                     else float(sample.metadata["current_weighted_iv_rmse"])
                 ),
                 "target_weighted_iv_rmse": (
-                    None if sample.metadata.get("target_weighted_iv_rmse") is None
+                    None
+                    if sample.metadata.get("target_weighted_iv_rmse") is None
                     else float(sample.metadata["target_weighted_iv_rmse"])
                 ),
                 "selection_mode": config.selection_mode,
                 "fallback_mode": str(config.fallback_mode),
                 "mc_samples": int(effective_mc_samples),
+                "generator_noise_mode": generator_noise_mode,
+                "generator_noise_fingerprint": generator_noise_sha256,
+                "generator_current_input_mode": generator_current_input_mode,
+                "generator_current_input_fingerprint": (generator_current_input_sha256),
+                "generator_conditioning_mode": generator_conditioning_mode,
+                "generator_conditioning_fingerprint": (generator_conditioning_sha256),
+                "critic_conditioning_mode": critic_conditioning_mode,
+                "critic_conditioning_fingerprint": critic_conditioning_sha256,
+                "news_first_refit_mode": news_first_refit_mode,
+                "news_first_refit_recipe_path": news_first_refit_recipe_path,
+                "news_first_refit_recipe_sha256": news_first_refit_recipe_sha256,
                 "uncertainty_score": float(uncertainty_score),
-                "fallback_threshold": None if fallback_threshold is None else float(fallback_threshold),
+                "fallback_threshold": None
+                if fallback_threshold is None
+                else float(fallback_threshold),
                 "used_fallback": bool(used_fallback),
                 "prediction_source": prediction_source,
                 "fallback_calibration_path": (
-                    None if fallback_calibration_path is None else str(fallback_calibration_path)
+                    None
+                    if fallback_calibration_path is None
+                    else str(fallback_calibration_path)
                 ),
                 **split_meta,
             },
         }
 
-        output_stem = f"{sample.global_index:04d}_{safe_sample_filename(sample.sample_id)}"
+        output_stem = (
+            f"{sample.global_index:04d}_{safe_sample_filename(sample.sample_id)}"
+        )
         if config.save_json:
             save_payload_json(payload, sample_json_dir / f"{output_stem}.json")
         if config.save_plots:
             plot_surface_payload(payload, plot_dir / f"{output_stem}.png")
 
-        summary_rows.append({
-            "sample_id": sample.sample_id, "mode": "vol",
-            "global_index": int(sample.global_index),
-            "news_timestamp_utc": sample.timestamp,
-            "current_snapshot_time_utc": sample.current_snapshot_time_utc,
-            "target_snapshot_time_utc": sample.target_snapshot_time_utc,
-            "checkpoint_path": str(checkpoint_path),
-            "current_mae": float(current_metrics["mae"]),
-            "current_rmse": float(current_metrics["rmse"]),
-            "current_max_abs": float(current_metrics["max_abs"]),
-            "fallback_mode": str(config.fallback_mode),
-            "mc_samples": int(effective_mc_samples),
-            "uncertainty_score": float(uncertainty_score),
-            "fallback_threshold": "" if fallback_threshold is None else float(fallback_threshold),
-            "used_fallback": bool(used_fallback),
-            "prediction_source": prediction_source,
-            "short_atm_band_current_vol": float(current_band["value"]),
-            "short_atm_band_generated_future_vol": float(generated_band["value"]),
-            "short_atm_band_real_future_vol": float(real_band["value"]),
-            "short_atm_band_generated_abs_error": float(abs(generated_band["value"] - real_band["value"])),
-            "short_atm_band_current_abs_error": float(abs(current_band["value"] - real_band["value"])),
-            "short_atm_band_point_count": int(current_band["point_count"]),
-            "short_atm_band_selection": str(current_band["selection"]),
-            "short_atm_band_atm_range": float(config.timeseries_atm_range),
-            "short_atm_band_max_days": float(config.timeseries_short_end_max_days),
-            **split_meta, **metrics,
-        })
+        summary_rows.append(
+            {
+                "sample_id": sample.sample_id,
+                "mode": "vol",
+                "global_index": int(sample.global_index),
+                "news_timestamp_utc": sample.timestamp,
+                "current_snapshot_time_utc": sample.current_snapshot_time_utc,
+                "target_snapshot_time_utc": sample.target_snapshot_time_utc,
+                "checkpoint_path": str(checkpoint_path),
+                "current_mae": float(current_metrics["mae"]),
+                "current_rmse": float(current_metrics["rmse"]),
+                "current_max_abs": float(current_metrics["max_abs"]),
+                "fallback_mode": str(config.fallback_mode),
+                "mc_samples": int(effective_mc_samples),
+                "generator_noise_mode": generator_noise_mode,
+                "generator_noise_fingerprint": generator_noise_sha256,
+                "generator_current_input_mode": generator_current_input_mode,
+                "generator_current_input_fingerprint": (generator_current_input_sha256),
+                "generator_conditioning_mode": generator_conditioning_mode,
+                "generator_conditioning_fingerprint": (generator_conditioning_sha256),
+                "critic_conditioning_mode": critic_conditioning_mode,
+                "critic_conditioning_fingerprint": critic_conditioning_sha256,
+                "news_first_refit_mode": news_first_refit_mode,
+                "news_first_refit_recipe_path": news_first_refit_recipe_path,
+                "news_first_refit_recipe_sha256": news_first_refit_recipe_sha256,
+                "uncertainty_score": float(uncertainty_score),
+                "fallback_threshold": ""
+                if fallback_threshold is None
+                else float(fallback_threshold),
+                "used_fallback": bool(used_fallback),
+                "prediction_source": prediction_source,
+                "short_atm_band_current_vol": float(current_band["value"]),
+                "short_atm_band_generated_future_vol": float(generated_band["value"]),
+                "short_atm_band_real_future_vol": float(real_band["value"]),
+                "short_atm_band_generated_abs_error": float(
+                    abs(generated_band["value"] - real_band["value"])
+                ),
+                "short_atm_band_current_abs_error": float(
+                    abs(current_band["value"] - real_band["value"])
+                ),
+                "short_atm_band_point_count": int(current_band["point_count"]),
+                "short_atm_band_selection": str(current_band["selection"]),
+                "short_atm_band_atm_range": float(config.timeseries_atm_range),
+                "short_atm_band_max_days": float(config.timeseries_short_end_max_days),
+                **split_meta,
+                **metrics,
+            }
+        )
 
     summary_rows = sorted(
         summary_rows,
-        key=lambda row: (str(row.get("news_timestamp_utc", "")), int(row.get("global_index", -1))),
+        key=lambda row: (
+            str(row.get("news_timestamp_utc", "")),
+            int(row.get("global_index", -1)),
+        ),
     )
     write_summary_csv(summary_rows, run_dir / "summary.csv")
     if config.save_plots and len(summary_rows) >= 2:
@@ -282,6 +440,7 @@ def generate_vol_result(config: GenerateResultConfig) -> Path:
         )
     return run_dir
 
+
 def generate_svi_result(config: GenerateResultConfig) -> Path:
     """Generate future SVI params, reconstruct surfaces, and compare them."""
 
@@ -291,18 +450,24 @@ def generate_svi_result(config: GenerateResultConfig) -> Path:
         load_svi_regressor,
         reconstruct_svi_surface,
     )
-    from wgan_option.utils.merged_xlsx import load_svi_paired_samples, select_ordered_split
+    from wgan_option.utils.merged_xlsx import (
+        load_svi_paired_samples,
+        select_ordered_split,
+    )
     from wgan_option.visualization.surface_plot import plot_surface_payload
 
     all_samples = load_svi_paired_samples(config)
-    split_selection = select_ordered_split(all_samples, train_ratio=config.train_ratio, split=config.split)
+    split_selection = select_ordered_split(
+        all_samples, train_ratio=config.train_ratio, split=config.split
+    )
     selected_samples = select_samples_from_split(split_selection, config)
 
     run_dir = Path(config.output_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     write_resolved_config(config, run_dir)
     checkpoint_path = resolve_checkpoint_path(
-        config, artifact_key="model",
+        config,
+        artifact_key="model",
         fallback_filenames=("svi_regressor_best.pt", "svi_regressor.pt"),
     )
 
@@ -320,18 +485,34 @@ def generate_svi_result(config: GenerateResultConfig) -> Path:
 
     for sample in selected_samples:
         predicted_svi, current_count, predicted_count = infer_future_svi(
-            model, sample,
-            embedding_dim=embedding_dim, max_slices=max_slices,
-            normalization_stats=normalization_stats, device=device,
+            model,
+            sample,
+            embedding_dim=embedding_dim,
+            max_slices=max_slices,
+            normalization_stats=normalization_stats,
+            device=device,
         )
 
-        current_surface = reconstruct_svi_surface(sample.current_svi, strike_grid=strike_grid, maturity_days_grid=maturity_days_grid)
-        generated_surface = reconstruct_svi_surface(predicted_svi, strike_grid=strike_grid, maturity_days_grid=maturity_days_grid)
-        real_surface = reconstruct_svi_surface(sample.future_svi, strike_grid=strike_grid, maturity_days_grid=maturity_days_grid)
+        current_surface = reconstruct_svi_surface(
+            sample.current_svi,
+            strike_grid=strike_grid,
+            maturity_days_grid=maturity_days_grid,
+        )
+        generated_surface = reconstruct_svi_surface(
+            predicted_svi,
+            strike_grid=strike_grid,
+            maturity_days_grid=maturity_days_grid,
+        )
+        real_surface = reconstruct_svi_surface(
+            sample.future_svi,
+            strike_grid=strike_grid,
+            maturity_days_grid=maturity_days_grid,
+        )
         metrics = compute_surface_metrics(generated_surface, real_surface)
 
         payload = {
-            "sample_id": sample.sample_id, "mode": "svi",
+            "sample_id": sample.sample_id,
+            "mode": "svi",
             "strike_grid": strike_grid.astype(float).tolist(),
             "maturity_days_grid": maturity_days_grid.astype(float).tolist(),
             "current_surface": current_surface.astype(float).tolist(),
@@ -356,27 +537,34 @@ def generate_svi_result(config: GenerateResultConfig) -> Path:
             },
         }
 
-        output_stem = f"{sample.global_index:04d}_{safe_sample_filename(sample.sample_id)}"
+        output_stem = (
+            f"{sample.global_index:04d}_{safe_sample_filename(sample.sample_id)}"
+        )
         if config.save_json:
             save_payload_json(payload, sample_json_dir / f"{output_stem}.json")
         if config.save_plots:
             plot_surface_payload(payload, plot_dir / f"{output_stem}.png")
 
-        summary_rows.append({
-            "sample_id": sample.sample_id, "mode": "svi",
-            "global_index": int(sample.global_index),
-            "news_row_id": int(sample.news_row_id),
-            "news_timestamp_utc": sample.timestamp,
-            "current_timestamp_utc": sample.current_timestamp_utc,
-            "future_timestamp_utc": sample.future_timestamp_utc,
-            "checkpoint_path": str(checkpoint_path),
-            "predicted_slice_count": int(predicted_count),
-            "real_future_slice_count": int(len(sample.future_svi["business_days"])),
-            **split_meta, **metrics,
-        })
+        summary_rows.append(
+            {
+                "sample_id": sample.sample_id,
+                "mode": "svi",
+                "global_index": int(sample.global_index),
+                "news_row_id": int(sample.news_row_id),
+                "news_timestamp_utc": sample.timestamp,
+                "current_timestamp_utc": sample.current_timestamp_utc,
+                "future_timestamp_utc": sample.future_timestamp_utc,
+                "checkpoint_path": str(checkpoint_path),
+                "predicted_slice_count": int(predicted_count),
+                "real_future_slice_count": int(len(sample.future_svi["business_days"])),
+                **split_meta,
+                **metrics,
+            }
+        )
 
     write_summary_csv(summary_rows, run_dir / "summary.csv")
     return run_dir
+
 
 def generate_vol_regression_result(config: GenerateResultConfig) -> Path:
     """Generate future vol surfaces from a deterministic regression checkpoint."""
@@ -387,23 +575,31 @@ def generate_vol_regression_result(config: GenerateResultConfig) -> Path:
         infer_vol_regression_surface,
         load_vol_regressor,
     )
-    from wgan_option.utils.merged_xlsx import load_vol_surface_samples, select_ordered_split
+    from wgan_option.utils.merged_xlsx import (
+        load_vol_surface_samples,
+        select_ordered_split,
+    )
     from wgan_option.visualization.surface_plot import plot_surface_payload
 
     all_samples = load_vol_surface_samples(config)
-    split_selection = select_ordered_split(all_samples, train_ratio=config.train_ratio, split=config.split)
+    split_selection = select_ordered_split(
+        all_samples, train_ratio=config.train_ratio, split=config.split
+    )
     selected_samples = select_samples_from_split(split_selection, config)
 
     run_dir = Path(config.output_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     write_resolved_config(config, run_dir)
     checkpoint_path = resolve_checkpoint_path(
-        config, artifact_key="model",
+        config,
+        artifact_key="model",
         fallback_filenames=("vol_regressor_best.pt", "vol_regressor.pt"),
     )
 
     device = build_inference_device(config.cuda)
-    model, _, embedding_dim = load_vol_regressor(checkpoint_path, selected_samples[0], device)
+    model, _, embedding_dim = load_vol_regressor(
+        checkpoint_path, selected_samples[0], device
+    )
 
     sample_json_dir = run_dir / "samples"
     plot_dir = run_dir / "plots"
@@ -423,43 +619,53 @@ def generate_vol_regression_result(config: GenerateResultConfig) -> Path:
         current_metrics = compute_surface_metrics(current_surface, real_surface)
 
         payload = {
-            "sample_id": sample.sample_id, "mode": "vol-regression",
+            "sample_id": sample.sample_id,
+            "mode": "vol-regression",
             "strike_grid": sample.strike_grid.astype(float).tolist(),
             "maturity_days_grid": sample.maturity_grid_days.astype(float).tolist(),
             "current_surface": current_surface.astype(float).tolist(),
             "generated_surface": generated_surface.astype(float).tolist(),
             "real_surface": real_surface.astype(float).tolist(),
-            "metrics": metrics, "current_metrics": current_metrics,
+            "metrics": metrics,
+            "current_metrics": current_metrics,
             "metadata": {
                 "checkpoint_path": str(checkpoint_path),
                 "global_index": int(sample.global_index),
                 "news_timestamp_utc": sample.timestamp,
                 "current_snapshot_time_utc": sample.current_snapshot_time_utc,
                 "target_snapshot_time_utc": sample.target_snapshot_time_utc,
-                "pair_quality_label": str(sample.metadata.get("pair_quality_label", "")),
+                "pair_quality_label": str(
+                    sample.metadata.get("pair_quality_label", "")
+                ),
                 "selection_mode": config.selection_mode,
                 **split_meta,
             },
         }
 
-        output_stem = f"{sample.global_index:04d}_{safe_sample_filename(sample.sample_id)}"
+        output_stem = (
+            f"{sample.global_index:04d}_{safe_sample_filename(sample.sample_id)}"
+        )
         if config.save_json:
             save_payload_json(payload, sample_json_dir / f"{output_stem}.json")
         if config.save_plots:
             plot_surface_payload(payload, plot_dir / f"{output_stem}.png")
 
-        summary_rows.append({
-            "sample_id": sample.sample_id, "mode": "vol-regression",
-            "global_index": int(sample.global_index),
-            "news_timestamp_utc": sample.timestamp,
-            "current_snapshot_time_utc": sample.current_snapshot_time_utc,
-            "target_snapshot_time_utc": sample.target_snapshot_time_utc,
-            "checkpoint_path": str(checkpoint_path),
-            "current_mae": float(current_metrics["mae"]),
-            "current_rmse": float(current_metrics["rmse"]),
-            "current_max_abs": float(current_metrics["max_abs"]),
-            **split_meta, **metrics,
-        })
+        summary_rows.append(
+            {
+                "sample_id": sample.sample_id,
+                "mode": "vol-regression",
+                "global_index": int(sample.global_index),
+                "news_timestamp_utc": sample.timestamp,
+                "current_snapshot_time_utc": sample.current_snapshot_time_utc,
+                "target_snapshot_time_utc": sample.target_snapshot_time_utc,
+                "checkpoint_path": str(checkpoint_path),
+                "current_mae": float(current_metrics["mae"]),
+                "current_rmse": float(current_metrics["rmse"]),
+                "current_max_abs": float(current_metrics["max_abs"]),
+                **split_meta,
+                **metrics,
+            }
+        )
 
     write_summary_csv(summary_rows, run_dir / "summary.csv")
     return run_dir

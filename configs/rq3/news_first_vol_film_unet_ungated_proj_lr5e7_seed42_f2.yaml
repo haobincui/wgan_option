@@ -1,0 +1,99 @@
+experiment:
+  schema_version: 1
+  experiment_kind: film_unet_ungated_proj_lr5e7_seed42_f2_5m_probe_v1
+  interpretation: single_seed_mechanism_validation
+  output_root: outputs/experiments/rq3_news_first_vol_film_unet_ungated_proj_lr5e7_seed42_f2_5m_v1
+
+source_probe:
+  root: outputs/experiments/rq3_news_first_vol_film_unet_text_signal_seed42_f2_5m_v1
+  input_manifest_path: outputs/experiments/rq3_news_first_vol_film_unet_text_signal_seed42_f2_5m_v1/inputs/probe_input_manifest.json
+  input_manifest_sha256: ce6ed4b3cd4013a8ddf63c2e60130ff1e1363f5b4cc61f6861db09aeb7baed87
+  resolved_config_path: outputs/experiments/rq3_news_first_vol_film_unet_text_signal_seed42_f2_5m_v1/contracts/resolved_config.json
+  resolved_config_sha256: 8f17f39ea3cfbf684390fafcd981abf06fca3787260f0db2876cbd8b23b63188
+  terminal_qa_path: outputs/experiments/rq3_news_first_vol_film_unet_text_signal_seed42_f2_5m_v1/qa/terminal_qa.json
+  terminal_qa_sha256: c483bace384377d93ff8276e1ac9a588db75e37f405571111e79ea4b6fe16c9c
+
+frozen_comparators:
+  experiment_root: outputs/experiments/rq3_news_first_vol_film_unet_gated_global_lr_seed42_f2_5m_v1
+  task_registry:
+    path: outputs/experiments/rq3_news_first_vol_film_unet_gated_global_lr_seed42_f2_5m_v1/registry/task_registry.json
+    sha256: ca5c265d811da44c26f76c775fb327be0f356e29d568ee034f9d32492d87b576
+  terminal_qa:
+    path: outputs/experiments/rq3_news_first_vol_film_unet_gated_global_lr_seed42_f2_5m_v1/qa/terminal_qa.json
+    sha256: 6b9ab0c8600b1c7946ae80b64b13205511bffdf6ec8f101d15532a159c7675d2
+  output_hashes:
+    path: outputs/experiments/rq3_news_first_vol_film_unet_gated_global_lr_seed42_f2_5m_v1/qa/output_hashes.csv
+    sha256: bd39d79fe551f7d41ef9a4c078e6e0698ed46e85028d579a076ec8fcf8624686
+  control:
+    job_id: control_1000_uniform_2p5e6
+    result_path: outputs/experiments/rq3_news_first_vol_film_unet_gated_global_lr_seed42_f2_5m_v1/runs/screen/control_1000_uniform_2p5e6/result.json
+    result_sha256: bcd74f3d635b2410dd741e2a6197b2ceadd4a076592482c5d12393eb801fb764
+    metrics_path: outputs/experiments/rq3_news_first_vol_film_unet_gated_global_lr_seed42_f2_5m_v1/runs/screen/control_1000_uniform_2p5e6/validation_pair_metrics.csv
+    metrics_sha256: 7aca456a0310ccd0cef1b38fad409f4d2749e5e3867329e2244072f1b6954870
+    diagnostics_path: outputs/experiments/rq3_news_first_vol_film_unet_gated_global_lr_seed42_f2_5m_v1/runs/screen/control_1000_uniform_2p5e6/diagnostics.json
+    diagnostics_sha256: 81a7bf893c3829ed56e6d379697d1aa86a6aa6c79dd1578beee1ef064863158c
+  gated_lr5e7:
+    job_id: gated_global_proj_lr5e7
+    result_path: outputs/experiments/rq3_news_first_vol_film_unet_gated_global_lr_seed42_f2_5m_v1/runs/screen/gated_global_proj_lr5e7/result.json
+    result_sha256: a8cf51179f2462d17ea020320fc24708dc1f564defc7e8c5c639ed1e6c84b3b9
+    metrics_path: outputs/experiments/rq3_news_first_vol_film_unet_gated_global_lr_seed42_f2_5m_v1/runs/screen/gated_global_proj_lr5e7/validation_pair_metrics.csv
+    metrics_sha256: 4c113978d747ebdc539e1dbcb4aa4a68ff306ff80311137e5991c5b60ccb54bd
+    diagnostics_path: outputs/experiments/rq3_news_first_vol_film_unet_gated_global_lr_seed42_f2_5m_v1/runs/screen/gated_global_proj_lr5e7/diagnostics.json
+    diagnostics_sha256: 53c67291aa2519af435947e203e690b7909c76e10cb939ab480dd7fb5261a484
+
+data_contract:
+  tolerance_minutes: 5
+  fold_id: f2_2023q2
+  seed: 42
+  train_pairs: 526
+  train_sessions: 133
+  validation_pairs: 110
+  validation_sessions: 34
+  allowed_partitions: [train, validation]
+  test_loader_count: 0
+  q3_q4_input_rows: 0
+
+model_contract:
+  generator_conditioning_mode: film_unet_mask_coords_v1
+  critic_conditioning_mode: lp_disabled_same_shape_v1
+  capacity_profile: c32_text128
+  factor_code: "1000"
+  spatial_rank: 0
+  gate_enabled: false
+  generator_parameters: 827745
+  critic_parameters: 729157
+
+training:
+  job_id: ungated_global_proj_lr5e7
+  epochs: 60
+  physical_gpu_id: 0
+  text_encoder_learning_rate: 2.5e-6
+  global_film_learning_rate: 5.0e-7
+  early_stopping: false
+  scheduler: false
+  checkpoint_selection: final_epoch
+  shared_initialization: true
+  shared_batch_order: true
+  shared_noise_bank: true
+
+analysis:
+  bootstrap_replicates: 10000
+  confidence_level: 0.95
+  bootstrap_seed: 20260831
+  primary_metric: log_mae_matched_over_zero
+  secondary_metric: log_mae_matched_over_wrong
+  retention_metric: positive_maximin_magnitude_relative_to_control_v1
+  gate_dominant_minimum_retention: 0.5
+  low_lr_dominant_maximum_retention: 0.1
+  interpretation: single_seed_mechanism_validation
+
+runtime:
+  python_executable: /home/haobin_cui/.conda/envs/py312/bin/python
+  gpu_ids: [0]
+  workers_per_gpu: 1
+  cpu_threads_per_job: 1
+  poll_interval_seconds: 1
+  resource_sample_interval_seconds: 2
+  maximum_peak_gpu_memory_gib: 20.0
+  maximum_host_ram_fraction: 0.85
+  canary_epochs: 1

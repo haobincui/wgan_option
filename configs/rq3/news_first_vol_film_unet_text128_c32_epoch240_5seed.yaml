@@ -1,0 +1,48 @@
+# Independent Q3-only five-seed epoch extension for the selected Text128 arm.
+film_unet_text128_c32_epoch240_5seed:
+  schema_version: 1
+  experiment_kind: film_unet_mask_coords_text128_c32_epoch240_5seed_q3_v1
+  base_training_config: configs/rq3/news_first_vol_film_lp_critic_capacity_seed42_lr2p5e7.yaml
+  seeds: [42, 202, 404, 382624741, 1607127774]
+  capacity_profiles: [c32]
+  learning_rate: 5.0e-7
+  max_epochs: 240
+  lr_warmup_epochs: 0
+  early_stopping_min_epochs: 30
+  early_stopping_patience: 20
+  validation_mc_samples: 16
+
+  arms:
+    film_unet_mask_coords_text128:
+      label: FiLM U-Net mask+coordinates, LP1024-256-128 + LP critic
+      generator_conditioning_mode: film_unet_mask_coords_v1
+      critic_conditioning_mode: lp_concat_v1
+      gen_text_hidden_dim: 256
+      gen_text_out_dim: 128
+
+  profiles:
+    c32:
+      gen_base_channels: 32
+      gen_res_blocks: 0
+      gen_hidden_dim: 1024
+      disc_base_channels: 32
+      disc_res_blocks: 0
+      disc_text_hidden_dim: 128
+      disc_hidden_dim: 786
+
+  comparison:
+    epoch60_job_summary: outputs/experiments/rq3_news_first_vol_film_unet_capacity_epoch60_3seed_exact_ttm_v1/analysis/job_summary.csv
+    epoch60_job_summary_sha256: 5f5f25b5f60a4dc232ee861181881bb728e6bf3910cdb050925250e46e6fb863
+    epoch120_ranking: outputs/experiments/rq3_news_first_vol_film_unet_c32_epoch120_seed42_exact_ttm_v1/analysis/architecture_ranking.csv
+    epoch120_ranking_sha256: 6a02fb56cd5ab63d77d36a491196c874580bc6315cad222f74352cdcf7e0cf74
+
+  runtime:
+    python_executable: /home/haobin_cui/.conda/envs/py312/bin/python
+    gpu_ids: [0, 1]
+    workers_per_gpu: 3
+    benchmark_workers_per_gpu: 3
+    cpu_threads_per_job: 1
+    poll_interval_seconds: 2
+    resource_sample_interval_seconds: 2
+    max_peak_gpu_memory_gib: 20.0
+    max_host_ram_fraction: 0.85

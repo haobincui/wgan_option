@@ -29,18 +29,18 @@ for path in (ROOT, SRC):
 
 from film_wgan.config import load_train_config  # noqa: E402
 from film_wgan.data import create_train_val_bundle  # noqa: E402
-from film_wgan.text_transform import FilmWGANTextTransform, sha256_file  # noqa: E402
+from film_wgan.text_transform import sha256_file  # noqa: E402
 from scripts.rq2_pair.pair_features import (  # noqa: E402
+    PAIR_FEATURE_SCHEMA_VERSION,
     PairFeatureArtifacts,
     build_fold_pair_features,
+    build_pair_feature_coverage_lineage,
 )
 
 
 DEFAULT_CONFIG = ROOT / "configs/film_wgan/train_rq2_pair_textbase.yaml"
 DEFAULT_SOURCE_RQ1 = ""
-DEFAULT_FEATURE_ROOT = (
-    ROOT / "data/processed/text_features/rq2/20260625-075653"
-)
+DEFAULT_FEATURE_ROOT = ROOT / "data/processed/text_features/rq2/20260625-075653"
 EXPERIMENT_PREFIX = "rq2_pair_representation_raw_vol_continuation_"
 
 SEEDS = (42, 202, 404)
@@ -49,6 +49,12 @@ FOLDS = {
     "2023Q2": {"counts": (2046, 521, 333)},
     "2023Q3": {"counts": (2567, 333, 365)},
     "2023Q4": {"counts": (2900, 365, 378)},
+}
+EXPECTED_PAIR_UNIVERSE_COUNTS = {
+    "2023Q1": {"coverage": (483, 172, 153), "fit": (339, 133, 103)},
+    "2023Q2": {"coverage": (655, 153, 143), "fit": (479, 107, 101)},
+    "2023Q3": {"coverage": (808, 143, 161), "fit": (575, 101, 111)},
+    "2023Q4": {"coverage": (951, 161, 170), "fit": (674, 107, 127)},
 }
 
 SOURCE_PARENT = "pair_pca_no_text_residual"
@@ -142,13 +148,10 @@ def _write_results_pipeline_status(
         "status": status,
         "phase": phase,
         "started_at_utc": (
-            started_at_utc
-            or str(existing.get("started_at_utc") or now)
+            started_at_utc or str(existing.get("started_at_utc") or now)
         ),
         "updated_at_utc": now,
-        "finished_at_utc": (
-            now if status in {"completed", "failed"} else None
-        ),
+        "finished_at_utc": (now if status in {"completed", "failed"} else None),
         "error_type": type(error).__name__ if error is not None else "",
         "error": str(error) if error is not None else "",
     }
@@ -157,9 +160,7 @@ def _write_results_pipeline_status(
 
 
 def _latest_experiment() -> Path:
-    candidates = sorted(
-        (ROOT / "outputs/experiments").glob(f"{EXPERIMENT_PREFIX}*")
-    )
+    candidates = sorted((ROOT / "outputs/experiments").glob(f"{EXPERIMENT_PREFIX}*"))
     if not candidates:
         raise FileNotFoundError("No prepared RQ2 pair experiment exists.")
     return candidates[-1]
@@ -167,9 +168,7 @@ def _latest_experiment() -> Path:
 
 def _latest_rq1_experiment() -> Path:
     candidates = sorted(
-        (ROOT / "outputs/experiments").glob(
-            "rq1_pair_text_raw_vol_continuation_*"
-        )
+        (ROOT / "outputs/experiments").glob("rq1_pair_text_raw_vol_continuation_*")
     )
     if not candidates:
         raise FileNotFoundError(
@@ -183,11 +182,7 @@ def _resolve_root(value: str | None, *, create: bool = False) -> Path:
         path = Path(value).expanduser()
         return path if path.is_absolute() else ROOT / path
     if create:
-        return (
-            ROOT
-            / "outputs/experiments"
-            / f"{EXPERIMENT_PREFIX}{_utc_timestamp()}"
-        )
+        return ROOT / "outputs/experiments" / f"{EXPERIMENT_PREFIX}{_utc_timestamp()}"
     return _latest_experiment()
 
 
@@ -252,7 +247,9 @@ def _link_or_copy(
         source_sha = sha256_file(source)
         target_sha = sha256_file(target)
         if source_sha != target_sha:
-            raise ValueError(f"Existing imported artifact differs from source: {target}")
+            raise ValueError(
+                f"Existing imported artifact differs from source: {target}"
+            )
         method = (
             "hardlink"
             if source.stat().st_dev == target.stat().st_dev
@@ -396,45 +393,218 @@ def _fold_counts(root: Path, fold: str) -> tuple[int, int, int]:
 
 def _existing_pair_feature_artifacts(
     output_dir: Path,
+    *,
+    feature_coverage_lineage_path: Path,
+    fit_lineage_path: Path,
 ) -> PairFeatureArtifacts | None:
     paths = {
         "bow_feature_path": output_dir / "bow_pair_features.csv",
         "bow_vocabulary_path": output_dir / "bow_vocabulary.json",
         "bow_transform_path": output_dir / "bow_text_transform.npz",
-        "sentiment_feature_path": output_dir
-        / "llm_sentiment_pair_features.csv",
-        "sentiment_transform_path": output_dir
-        / "llm_sentiment_text_transform.npz",
+        "sentiment_feature_path": output_dir / "llm_sentiment_pair_features.csv",
+        "sentiment_transform_path": output_dir / "llm_sentiment_text_transform.npz",
         "audit_path": output_dir / "pair_feature_audit.csv",
     }
+    auxiliary_paths = {
+        "bow_transform_metadata_path": output_dir / "bow_text_transform_metadata.json",
+        "sentiment_transform_metadata_path": output_dir
+        / "llm_sentiment_text_transform_metadata.json",
+    }
     manifest_path = output_dir / "feature_manifest.json"
-    if not manifest_path.is_file() or not all(
-        path.is_file() for path in paths.values()
-    ):
+    if not output_dir.exists() or not any(output_dir.iterdir()):
         return None
+    if not manifest_path.is_file():
+        raise ValueError(
+            f"Cannot reuse partial pair feature directory without a manifest: {output_dir}"
+        )
+    missing_artifacts = [
+        str(path)
+        for path in (*paths.values(), *auxiliary_paths.values())
+        if not path.is_file()
+    ]
+    if missing_artifacts:
+        raise ValueError(
+            f"Cannot reuse incomplete pair feature artifacts: {missing_artifacts}"
+        )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("schema_version") != PAIR_FEATURE_SCHEMA_VERSION:
+        raise ValueError(
+            "Existing pair feature manifest uses an unsupported pre-dual-universe "
+            f"schema: {manifest_path}"
+        )
     if (
         manifest.get("sentiment_model_id") != "gpt-5.4-mini"
-        or manifest.get("sentiment_prompt_version")
-        != "sun2026_zero_shot_chatgpt_v1"
+        or manifest.get("sentiment_prompt_version") != "sun2026_zero_shot_chatgpt_v1"
     ):
-        return None
+        raise ValueError(
+            f"Existing pair feature sentiment contract differs: {manifest_path}"
+        )
+    expected_lineage_hashes = {
+        "feature_coverage_lineage_sha256": sha256_file(feature_coverage_lineage_path),
+        "fit_lineage_sha256": sha256_file(fit_lineage_path),
+    }
+    lineage_errors = {
+        key: {
+            "expected": expected,
+            "found": str(manifest.get(key, "")),
+        }
+        for key, expected in expected_lineage_hashes.items()
+        if str(manifest.get(key, "")) != expected
+    }
+    if lineage_errors:
+        raise ValueError(
+            f"Existing pair feature lineage SHA validation failed: {lineage_errors}"
+        )
     expected_hashes = {
         "bow_feature_path": str(manifest.get("bow_feature_sha256", "")),
+        "bow_vocabulary_path": str(manifest.get("bow_vocabulary_sha256", "")),
         "bow_transform_path": str(manifest.get("bow_transform_sha256", "")),
-        "sentiment_feature_path": str(
-            manifest.get("sentiment_feature_sha256", "")
+        "sentiment_feature_path": str(manifest.get("sentiment_feature_sha256", "")),
+        "sentiment_transform_path": str(manifest.get("sentiment_transform_sha256", "")),
+        "audit_path": str(manifest.get("audit_sha256", "")),
+        "bow_transform_metadata_path": str(
+            manifest.get("bow_transform_metadata_sha256", "")
         ),
-        "sentiment_transform_path": str(
-            manifest.get("sentiment_transform_sha256", "")
+        "sentiment_transform_metadata_path": str(
+            manifest.get("sentiment_transform_metadata_sha256", "")
         ),
     }
+    all_paths = {**paths, **auxiliary_paths}
     for key, expected in expected_hashes.items():
-        if not expected or sha256_file(paths[key]) != expected:
+        if not expected or sha256_file(all_paths[key]) != expected:
             raise ValueError(
-                f"Existing pair feature artifact failed SHA validation: {paths[key]}"
+                "Existing pair feature artifact failed SHA validation: "
+                f"{all_paths[key]}"
+            )
+    coverage_ids = (
+        pd.read_csv(feature_coverage_lineage_path)["surface_pair_id"]
+        .astype(str)
+        .tolist()
+    )
+    for feature_path in (
+        paths["bow_feature_path"],
+        paths["sentiment_feature_path"],
+    ):
+        feature_ids = pd.read_csv(feature_path)["surface_pair_id"].astype(str).tolist()
+        if feature_ids != coverage_ids:
+            raise ValueError(
+                "Existing feature artifact ordered IDs do not equal the coverage "
+                f"lineage: {feature_path}"
+            )
+    fit_lineage = pd.read_csv(fit_lineage_path)
+    fit_pair_ids = fit_lineage["surface_pair_id"].astype(str).tolist()
+    train_pair_ids = (
+        fit_lineage.loc[
+            fit_lineage["split"].astype(str) == "train",
+            "surface_pair_id",
+        ]
+        .astype(str)
+        .tolist()
+    )
+
+    def ordered_hash(values: Sequence[str]) -> str:
+        return hashlib.sha256("\n".join(values).encode("utf-8")).hexdigest()
+
+    manifest_id_hashes = {
+        "fit_ordered_pair_ids_sha256": ordered_hash(fit_pair_ids),
+        "fit_train_ordered_pair_ids_sha256": ordered_hash(train_pair_ids),
+    }
+    for key, expected in manifest_id_hashes.items():
+        if str(manifest.get(key, "")) != expected:
+            raise ValueError(f"Existing pair feature manifest has invalid {key}.")
+    for metadata_path in auxiliary_paths.values():
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if int(metadata.get("train_pair_count", -1)) != len(train_pair_ids) or str(
+            metadata.get("train_pair_ids_sha256", "")
+        ) != ordered_hash(train_pair_ids):
+            raise ValueError(
+                "Existing text transform was not fitted on the frozen post-support "
+                f"training pair universe: {metadata_path}"
             )
     return PairFeatureArtifacts(**paths)
+
+
+def _assert_loader_pair_ids_match_lineage(
+    *,
+    fold: str,
+    variant: str,
+    bundle: Any,
+    fit_lineage: pd.DataFrame,
+) -> None:
+    for split, items in (
+        ("train", bundle.train_items),
+        ("val", bundle.val_items),
+        ("test", bundle.test_items),
+    ):
+        expected = (
+            fit_lineage.loc[
+                fit_lineage["split"].astype(str) == split,
+                "surface_pair_id",
+            ]
+            .astype(str)
+            .tolist()
+        )
+        actual = [str(item.surface_pair_id) for item in items]
+        if actual != expected:
+            raise ValueError(
+                f"Loader pair ID order differs from post-support fit lineage for "
+                f"{fold}/{variant}/{split}: expected={len(expected)}, actual={len(actual)}."
+            )
+
+
+def _freeze_pair_feature_split_manifest(
+    *,
+    source_split_manifest_path: Path,
+    feature_coverage_lineage_path: Path,
+    output_path: Path,
+) -> Path:
+    """Exclude wholly strict-text-invalid pairs without altering the source split."""
+
+    frame = pd.read_csv(source_split_manifest_path).sort_values(
+        "global_index", kind="stable"
+    )
+    coverage = pd.read_csv(feature_coverage_lineage_path)
+    coverage_pair_ids = coverage["surface_pair_id"].astype(str).tolist()
+    coverage_pair_id_set = set(coverage_pair_ids)
+    frame["source_split"] = frame["split"].astype(str)
+    active = frame["split"].astype(str).isin({"train", "val", "test"})
+    absent_from_coverage = ~frame["surface_pair_id"].astype(str).isin(
+        coverage_pair_id_set
+    )
+    frame.loc[active & absent_from_coverage, "split"] = "excluded"
+    frame["pair_feature_coverage_schema_version"] = PAIR_FEATURE_SCHEMA_VERSION
+
+    active_pair_ids = list(
+        dict.fromkeys(
+            frame.loc[
+                frame["split"].astype(str).isin({"train", "val", "test"}),
+                "surface_pair_id",
+            ].astype(str)
+        )
+    )
+    if active_pair_ids != coverage_pair_ids:
+        raise ValueError(
+            "Derived pair-feature split manifest does not resolve to the ordered "
+            "feature coverage universe."
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_name(f".{output_path.name}.tmp-{os.getpid()}")
+    frame.to_csv(temporary, index=False)
+    try:
+        if output_path.exists():
+            if sha256_file(output_path) != sha256_file(temporary):
+                raise ValueError(
+                    "Existing derived pair-feature split manifest differs from its "
+                    f"deterministic rebuild: {output_path}"
+                )
+            temporary.unlink()
+        else:
+            os.replace(temporary, output_path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return output_path
 
 
 def _representation_settings(
@@ -466,11 +636,46 @@ def _representation_settings(
     raise ValueError(f"Unsupported RQ2 variant: {variant}")
 
 
+def _preflight_reuse_root(root: Path) -> None:
+    """Reject legacy/partial feature schemas before touching an existing root."""
+
+    for fold in FOLDS:
+        feature_dir = _fold_feature_dir(root, fold)
+        if not feature_dir.is_dir() or not any(feature_dir.iterdir()):
+            continue
+        manifest_path = feature_dir / "feature_manifest.json"
+        if not manifest_path.is_file():
+            raise ValueError(
+                f"Cannot reuse partial pair feature directory: {feature_dir}"
+            )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("schema_version") != PAIR_FEATURE_SCHEMA_VERSION:
+            raise ValueError(
+                "Refusing to mutate an existing pre-dual-universe experiment root; "
+                f"create a new root instead: {root}"
+            )
+        fold_dir = root / "inputs/folds" / fold
+        coverage_path = fold_dir / "pair_feature_coverage_lineage.csv"
+        fit_path = fold_dir / "pair_lineage_audit.csv"
+        if not coverage_path.is_file() or not fit_path.is_file():
+            raise ValueError(
+                "Cannot reuse a dual-universe feature directory without both frozen "
+                f"lineages: {feature_dir}"
+            )
+        _existing_pair_feature_artifacts(
+            feature_dir,
+            feature_coverage_lineage_path=coverage_path,
+            fit_lineage_path=fit_path,
+        )
+
+
 def prepare_experiment(args: argparse.Namespace) -> Path:
     _assert_py312()
     root = _resolve_root(args.experiment_root, create=True)
     if root.exists() and any(root.iterdir()) and not args.reuse:
         raise FileExistsError(f"Experiment directory is not empty: {root}")
+    if root.exists() and any(root.iterdir()) and args.reuse:
+        _preflight_reuse_root(root)
     for relative in (
         "inputs/configs",
         "inputs/data",
@@ -511,13 +716,15 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
     import_rows: list[dict[str, Any]] = []
 
     source_workbook = source_root / "inputs/data/merged_vol_rq2_text.xlsx"
-    source_news = (
-        source_root / "inputs/data/news_with_openai_embeddings_large.xlsx"
-    )
+    source_news = source_root / "inputs/data/news_with_openai_embeddings_large.xlsx"
     copied_workbook = root / "inputs/data/merged_vol_rq2_text.xlsx"
     copied_news = root / "inputs/data/news_with_openai_embeddings_large.xlsx"
     for source, target, category in (
-        (source_config, root / "inputs/configs/train_rq2_pair_textbase_source.yaml", "config"),
+        (
+            source_config,
+            root / "inputs/configs/train_rq2_pair_textbase_source.yaml",
+            "config",
+        ),
         (source_workbook, copied_workbook, "raw_vol_workbook"),
         (source_news, copied_news, "news_workbook"),
         (
@@ -571,9 +778,9 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             category=category,
         )
     sentiment_manifest = json.loads(
-        (
-            root / "inputs/text_features/llm_sentiment_manifest.json"
-        ).read_text(encoding="utf-8")
+        (root / "inputs/text_features/llm_sentiment_manifest.json").read_text(
+            encoding="utf-8"
+        )
     )
     expected_sentiment_manifest = {
         "model_id": "gpt-5.4-mini",
@@ -592,8 +799,7 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
     }
     if sentiment_manifest_errors:
         raise ValueError(
-            "Frozen ChatGPT sentiment manifest mismatch: "
-            f"{sentiment_manifest_errors}"
+            f"Frozen ChatGPT sentiment manifest mismatch: {sentiment_manifest_errors}"
         )
 
     imported_checkpoint_rows: list[dict[str, Any]] = []
@@ -697,20 +903,43 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
         ):
             _link_or_copy(
                 source_fold / filename,
-                target_fold / ("lp_" + filename if filename.startswith("text_transform") else filename),
+                target_fold
+                / (
+                    "lp_" + filename
+                    if filename.startswith("text_transform")
+                    else filename
+                ),
                 manifest_rows=import_rows,
                 experiment_root=root,
                 category="rq1_fold_artifact",
             )
+        fit_lineage_path = target_fold / "pair_lineage_audit.csv"
+        feature_coverage_lineage_path = build_pair_feature_coverage_lineage(
+            fold=fold,
+            split_manifest_path=target_fold / "split_manifest.csv",
+            news_workbook_path=copied_news,
+            fit_lineage_path=fit_lineage_path,
+            output_path=target_fold / "pair_feature_coverage_lineage.csv",
+        )
+        pair_feature_split_manifest_path = _freeze_pair_feature_split_manifest(
+            source_split_manifest_path=target_fold / "split_manifest.csv",
+            feature_coverage_lineage_path=feature_coverage_lineage_path,
+            output_path=target_fold / "pair_feature_split_manifest.csv",
+        )
         artifacts = (
-            _existing_pair_feature_artifacts(_fold_feature_dir(root, fold))
+            _existing_pair_feature_artifacts(
+                _fold_feature_dir(root, fold),
+                feature_coverage_lineage_path=feature_coverage_lineage_path,
+                fit_lineage_path=fit_lineage_path,
+            )
             if args.reuse
             else None
         )
         if artifacts is None:
             artifacts = build_fold_pair_features(
                 fold=fold,
-                lineage_path=target_fold / "pair_lineage_audit.csv",
+                feature_coverage_lineage_path=feature_coverage_lineage_path,
+                fit_lineage_path=fit_lineage_path,
                 news_workbook_path=copied_news,
                 sentiment_feature_path=sentiment_path,
                 output_dir=_fold_feature_dir(root, fold),
@@ -718,7 +947,8 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
                 vocabulary_size=1024,
                 output_dim=128,
             )
-        lineage = pd.read_csv(target_fold / "pair_lineage_audit.csv")
+        lineage = pd.read_csv(fit_lineage_path)
+        coverage_lineage = pd.read_csv(feature_coverage_lineage_path)
         actual_counts = tuple(
             int((lineage["split"].astype(str) == split).sum())
             for split in ("train", "val", "test")
@@ -727,10 +957,24 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             raise ValueError(
                 f"Fold {fold} has an empty train/validation/test split: {actual_counts}."
             )
+        coverage_counts = tuple(
+            int((coverage_lineage["split"].astype(str) == split).sum())
+            for split in ("train", "val", "test")
+        )
+        expected_counts = EXPECTED_PAIR_UNIVERSE_COUNTS.get(fold)
+        if expected_counts is not None and (
+            coverage_counts != tuple(expected_counts["coverage"])
+            or actual_counts != tuple(expected_counts["fit"])
+        ):
+            raise ValueError(
+                f"Fold {fold} pair-universe count contract failed: "
+                f"coverage={coverage_counts}, fit={actual_counts}, "
+                f"expected={expected_counts}."
+            )
         for variant in NEW_VARIANTS:
             fold_training = dict(training_base)
             fold_training.update(
-                split_manifest_path=str(target_fold / "split_manifest.csv"),
+                split_manifest_path=str(pair_feature_split_manifest_path),
                 surface_support_path=str(target_fold / "raw_surface_support.json"),
                 **_representation_settings(root, fold, variant),
             )
@@ -751,17 +995,36 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
                         f"Loader validation failed for {fold}/{variant}: "
                         f"counts={bundle_counts}, embedding_dim={bundle.embedding_dim}."
                     )
+                _assert_loader_pair_ids_match_lineage(
+                    fold=fold,
+                    variant=variant,
+                    bundle=bundle,
+                    fit_lineage=lineage,
+                )
         fold_summary[fold] = {
             "train_pairs": actual_counts[0],
             "validation_pairs": actual_counts[1],
             "test_pairs": actual_counts[2],
+            "feature_coverage_pairs": int(len(coverage_lineage)),
+            "feature_coverage_pair_counts_by_split": {
+                split: count
+                for split, count in zip(("train", "val", "test"), coverage_counts)
+            },
+            "feature_coverage_lineage_path": str(feature_coverage_lineage_path),
+            "feature_coverage_lineage_sha256": sha256_file(
+                feature_coverage_lineage_path
+            ),
+            "pair_feature_split_manifest_path": str(pair_feature_split_manifest_path),
+            "pair_feature_split_manifest_sha256": sha256_file(
+                pair_feature_split_manifest_path
+            ),
+            "fit_lineage_path": str(fit_lineage_path),
+            "fit_lineage_sha256": sha256_file(fit_lineage_path),
             "bow_feature_path": str(artifacts.bow_feature_path),
             "bow_feature_sha256": sha256_file(artifacts.bow_feature_path),
             "bow_transform_sha256": sha256_file(artifacts.bow_transform_path),
             "sentiment_feature_path": str(artifacts.sentiment_feature_path),
-            "sentiment_feature_sha256": sha256_file(
-                artifacts.sentiment_feature_path
-            ),
+            "sentiment_feature_sha256": sha256_file(artifacts.sentiment_feature_path),
             "sentiment_transform_sha256": sha256_file(
                 artifacts.sentiment_transform_path
             ),
@@ -804,6 +1067,9 @@ def prepare_experiment(args: argparse.Namespace) -> Path:
             "expected_new_training_runs": len(FOLDS) * len(SEEDS) * len(NEW_VARIANTS),
             "input_dimension": 128,
             "full_sample_bow_usage": "audit_only_not_training",
+            "pair_feature_schema_version": PAIR_FEATURE_SCHEMA_VERSION,
+            "feature_coverage_stage": "strict_text_valid_pre_surface_support",
+            "transform_fit_stage": "post_surface_support_train_pairs_only",
         },
     )
     print(root)
@@ -823,9 +1089,7 @@ def _training_overrides(
     return {
         **_representation_settings(root, fold, variant),
         "seed": int(seed),
-        "output_root": str(
-            root / "training_runs" / variant / fold / f"seed_{seed}"
-        ),
+        "output_root": str(root / "training_runs" / variant / fold / f"seed_{seed}"),
         "checkpoints_path": "",
         "metrics_path": "",
         "initial_generator_checkpoint_path": str(parent),
@@ -838,7 +1102,9 @@ def train_matrix(args: argparse.Namespace) -> Path:
     _assert_py312()
     root = _resolve_root(args.experiment_root)
     selected_folds = [args.fold] if getattr(args, "fold", "") else list(FOLDS)
-    selected_seeds = [int(args.seed)] if getattr(args, "seed", None) is not None else list(SEEDS)
+    selected_seeds = (
+        [int(args.seed)] if getattr(args, "seed", None) is not None else list(SEEDS)
+    )
     selected_variants = (
         [args.variant] if getattr(args, "variant", "") else list(NEW_VARIANTS)
     )
@@ -846,9 +1112,7 @@ def train_matrix(args: argparse.Namespace) -> Path:
     for fold in selected_folds:
         for seed in selected_seeds:
             for variant in selected_variants:
-                output_root = (
-                    root / "training_runs" / variant / fold / f"seed_{seed}"
-                )
+                output_root = root / "training_runs" / variant / fold / f"seed_{seed}"
                 completed = _completed_run(output_root)
                 status = "reused" if completed is not None else "pending"
                 if completed is None:
@@ -931,9 +1195,7 @@ def monitor(args: argparse.Namespace) -> Path:
     for fold in FOLDS:
         for seed in SEEDS:
             for variant in NEW_VARIANTS:
-                output_root = (
-                    root / "training_runs" / variant / fold / f"seed_{seed}"
-                )
+                output_root = root / "training_runs" / variant / fold / f"seed_{seed}"
                 runs = _run_dirs(output_root)
                 latest = runs[-1] if runs else None
                 status = "pending"
@@ -962,18 +1224,16 @@ def monitor(args: argparse.Namespace) -> Path:
     active = frame[frame["status"] == "running_or_incomplete"]
     if not active.empty:
         print(
-            active[
-                ["fold", "seed", "variant", "latest_epoch", "run_dir"]
-            ].to_string(index=False)
+            active[["fold", "seed", "variant", "latest_epoch", "run_dir"]].to_string(
+                index=False
+            )
         )
     return root
 
 
 def collect_checkpoints(args: argparse.Namespace) -> Path:
     root = _resolve_root(args.experiment_root)
-    source = pd.read_csv(
-        root / "inputs/imported_rq1/imported_checkpoints.csv"
-    )
+    source = pd.read_csv(root / "inputs/imported_rq1/imported_checkpoints.csv")
     source_lookup = source.set_index(["fold", "seed", "variant"])
     source_stage_audit = pd.read_csv(
         root / "inputs/imported_rq1/paired_stage_validation_source.csv"
@@ -987,9 +1247,7 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
             expected_parent_sha = str(parent["imported_checkpoint_sha256"])
             pair_initialization: list[dict[str, str]] = []
             for variant in NEW_VARIANTS:
-                run_root = (
-                    root / "training_runs" / variant / fold / f"seed_{seed}"
-                )
+                run_root = root / "training_runs" / variant / fold / f"seed_{seed}"
                 run_dir = _completed_run(run_root)
                 if run_dir is None:
                     raise FileNotFoundError(
@@ -1013,17 +1271,13 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
                 resolved_path = run_dir / "metrics/training_resolved_config.yaml"
                 payload = _read_yaml(resolved_path)
                 training = dict(payload.get("training") or payload)
-                expected_settings = _representation_settings(
-                    root, fold, variant
-                )
+                expected_settings = _representation_settings(root, fold, variant)
                 errors = [
                     f"config:{key}"
                     for key, expected in expected_settings.items()
                     if str(training.get(key)) != str(expected)
                 ]
-                parent_path = Path(
-                    str(training["initial_generator_checkpoint_path"])
-                )
+                parent_path = Path(str(training["initial_generator_checkpoint_path"]))
                 parent_sha = sha256_file(parent_path)
                 if parent_sha != expected_parent_sha:
                     errors.append("parent_checkpoint_sha256")
@@ -1058,9 +1312,7 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
                     "run_dir": str(run_dir),
                     "parent_checkpoint_path": str(parent_path),
                     "parent_checkpoint_sha256": parent_sha,
-                    "pair_text_feature_path": str(
-                        training["pair_text_feature_path"]
-                    ),
+                    "pair_text_feature_path": str(training["pair_text_feature_path"]),
                     "pair_text_feature_sha256": sha256_file(
                         training["pair_text_feature_path"]
                     ),
@@ -1079,18 +1331,14 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
                 pair_initialization.append(
                     {
                         "variant": variant,
-                        "generator": row[
-                            "initial_generator_state_sha256"
-                        ],
+                        "generator": row["initial_generator_state_sha256"],
                         "critic": row["initial_critic_state_sha256"],
                     }
                 )
-            generator_equal = len(
-                {row["generator"] for row in pair_initialization}
-            ) == 1
-            critic_equal = len(
-                {row["critic"] for row in pair_initialization}
-            ) == 1
+            generator_equal = (
+                len({row["generator"] for row in pair_initialization}) == 1
+            )
+            critic_equal = len({row["critic"] for row in pair_initialization}) == 1
             initialization_rows.append(
                 {
                     "fold": fold,
@@ -1098,9 +1346,7 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
                     "parent_checkpoint_sha256": expected_parent_sha,
                     "generator_initialization_equal": generator_equal,
                     "critic_initialization_equal": critic_equal,
-                    "status": (
-                        "ok" if generator_equal and critic_equal else "failed"
-                    ),
+                    "status": ("ok" if generator_equal and critic_equal else "failed"),
                     "details": json.dumps(pair_initialization),
                 }
             )
@@ -1114,10 +1360,7 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
                 audit = source_stage_audit[
                     (source_stage_audit["fold"].astype(str) == fold)
                     & (source_stage_audit["seed"].astype(int) == seed)
-                    & (
-                        source_stage_audit["variant"].astype(str)
-                        == source_variant
-                    )
+                    & (source_stage_audit["variant"].astype(str) == source_variant)
                 ]
                 errors: list[str] = []
                 if len(audit) != 1 or str(audit.iloc[0]["status"]) != "ok":
@@ -1135,9 +1378,7 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
                     / f"seed_{seed}/training_resolved_config.yaml"
                 )
                 source_payload = _read_yaml(source_config_path)
-                source_training = dict(
-                    source_payload.get("training") or source_payload
-                )
+                source_training = dict(source_payload.get("training") or source_payload)
                 expected_source_fields = {
                     "seed": seed,
                     "conditioning_mode": "residual_film",
@@ -1179,12 +1420,8 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
                         "seed": seed,
                         "variant": actual["variant"],
                         "parent_checkpoint_sha256": expected_parent_sha,
-                        "expected_initial_generator_state_sha256": actual[
-                            "generator"
-                        ],
-                        "expected_initial_critic_state_sha256": actual[
-                            "critic"
-                        ],
+                        "expected_initial_generator_state_sha256": actual["generator"],
+                        "expected_initial_critic_state_sha256": actual["critic"],
                         "runtime_initialization_hash_observed": True,
                         "evidence": "runtime_initialization_audit_json",
                         "status": "ok",
@@ -1203,10 +1440,7 @@ def collect_checkpoints(args: argparse.Namespace) -> Path:
         index=False,
     )
     four_branch = pd.DataFrame(four_branch_rows)
-    if (
-        len(four_branch) != 48
-        or set(four_branch["status"].astype(str)) != {"ok"}
-    ):
+    if len(four_branch) != 48 or set(four_branch["status"].astype(str)) != {"ok"}:
         raise ValueError("Four-branch initialization audit is incomplete.")
     four_branch.to_csv(
         root / "checkpoint_selection/four_branch_initialization_audit.csv",
@@ -1231,10 +1465,7 @@ def generate_matrix(args: argparse.Namespace) -> Path:
                 ("continued_no_text", SOURCE_NO_TEXT),
                 ("lp", SOURCE_LP),
             ):
-                summary = (
-                    _imported_result(root, fold, seed, variant)
-                    / "summary.csv"
-                )
+                summary = _imported_result(root, fold, seed, variant) / "summary.csv"
                 if not summary.is_file() or len(pd.read_csv(summary)) != expected:
                     raise ValueError(
                         f"Imported test result mismatch: {variant}/{fold}/seed_{seed}"
@@ -1310,7 +1541,9 @@ def generate_matrix(args: argparse.Namespace) -> Path:
             index=False,
         )
     if len(registry_rows) != 48:
-        raise ValueError(f"Expected 48 model/fold/seed results, found {len(registry_rows)}.")
+        raise ValueError(
+            f"Expected 48 model/fold/seed results, found {len(registry_rows)}."
+        )
     return root
 
 
@@ -1352,12 +1585,8 @@ def _cluster_bootstrap(
         draw = np.concatenate([clusters[int(item)] for item in selected])
         draws[index] = float(draw.mean())
     ci_low, ci_high = np.quantile(draws, [0.025, 0.975])
-    p_lower = (float(np.sum(draws <= 0.0)) + 1.0) / (
-        float(iterations) + 1.0
-    )
-    p_upper = (float(np.sum(draws >= 0.0)) + 1.0) / (
-        float(iterations) + 1.0
-    )
+    p_lower = (float(np.sum(draws <= 0.0)) + 1.0) / (float(iterations) + 1.0)
+    p_upper = (float(np.sum(draws >= 0.0)) + 1.0) / (float(iterations) + 1.0)
     return {
         "mean_difference": observed,
         "ci_95_lower": float(ci_low),
@@ -1393,9 +1622,7 @@ def _dm_hac_daily(
     gamma_zero = float(np.dot(centered, centered) / count)
     long_run_variance = gamma_zero
     for lag in range(1, lag_limit + 1):
-        covariance = float(
-            np.dot(centered[lag:], centered[:-lag]) / count
-        )
+        covariance = float(np.dot(centered[lag:], centered[:-lag]) / count)
         bartlett_weight = 1.0 - lag / float(lag_limit + 1)
         long_run_variance += 2.0 * bartlett_weight * covariance
     variance_mean = max(long_run_variance, 0.0) / count
@@ -1403,8 +1630,10 @@ def _dm_hac_daily(
     statistic = (
         float(daily.mean()) / standard_error
         if standard_error > 0.0
-        else float("inf") if float(daily.mean()) > 0.0
-        else float("-inf") if float(daily.mean()) < 0.0
+        else float("inf")
+        if float(daily.mean()) > 0.0
+        else float("-inf")
+        if float(daily.mean()) < 0.0
         else 0.0
     )
     distribution = stats.t(df=count - 1)
@@ -1434,9 +1663,7 @@ def _validate_model_matching(samples: pd.DataFrame) -> None:
         "current_supported_shortest_atm_abs_err",
     ]
     for model in MODEL_VARIANTS:
-        frame = samples[samples["model"] == model].sort_values(
-            key_columns
-        )
+        frame = samples[samples["model"] == model].sort_values(key_columns)
         if frame.duplicated(key_columns).any():
             raise ValueError(f"Duplicate test pair rows for model={model}.")
         keys = frame[key_columns].reset_index(drop=True)
@@ -1493,16 +1720,10 @@ def _build_pairwise_differences(samples: pd.DataFrame) -> pd.DataFrame:
             suffixes=("_focal", "_baseline"),
             validate="one_to_one",
         )
-        if len(merged) != len(focal_frame) or len(merged) != len(
-            baseline_frame
-        ):
+        if len(merged) != len(focal_frame) or len(merged) != len(baseline_frame):
             raise ValueError(f"Incomplete pair matching for {contrast}.")
-        if not merged["alignment_type_focal"].equals(
-            merged["alignment_type_baseline"]
-        ):
-            raise ValueError(
-                f"Alignment-stratum matching failed for {contrast}."
-            )
+        if not merged["alignment_type_focal"].equals(merged["alignment_type_baseline"]):
+            raise ValueError(f"Alignment-stratum matching failed for {contrast}.")
         for metric in POINT_METRICS:
             frame = merged[
                 [
@@ -1524,9 +1745,7 @@ def _build_pairwise_differences(samples: pd.DataFrame) -> pd.DataFrame:
             frame["focal_model"] = focal
             frame["baseline_model"] = baseline
             frame["metric"] = metric
-            frame["difference"] = (
-                frame["baseline_error"] - frame["focal_error"]
-            )
+            frame["difference"] = frame["baseline_error"] - frame["focal_error"]
             frame["difference_direction"] = "baseline_minus_focal"
             frame["positive_means_focal_better"] = True
             rows.append(frame)
@@ -1539,39 +1758,31 @@ def _build_pairwise_differences(samples: pd.DataFrame) -> pd.DataFrame:
 
 
 def _build_seed_tests(differences: pd.DataFrame) -> pd.DataFrame:
-    seed_means = (
-        differences.groupby(
-            ["contrast", "focal_model", "baseline_model", "seed", "metric"],
-            as_index=False,
-        )
-        .agg(
-            mean_difference=("difference", "mean"),
-            pair_count=("difference", "size"),
-        )
+    seed_means = differences.groupby(
+        ["contrast", "focal_model", "baseline_model", "seed", "metric"],
+        as_index=False,
+    ).agg(
+        mean_difference=("difference", "mean"),
+        pair_count=("difference", "size"),
     )
-    fold_seed = (
-        differences.groupby(
-            [
-                "contrast",
-                "focal_model",
-                "baseline_model",
-                "fold",
-                "seed",
-                "metric",
-            ],
-            as_index=False,
-        )
-        .agg(mean_difference=("difference", "mean"))
-    )
+    fold_seed = differences.groupby(
+        [
+            "contrast",
+            "focal_model",
+            "baseline_model",
+            "fold",
+            "seed",
+            "metric",
+        ],
+        as_index=False,
+    ).agg(mean_difference=("difference", "mean"))
     rows: list[dict[str, Any]] = []
     for keys, group in seed_means.groupby(
         ["contrast", "focal_model", "baseline_model", "metric"],
         sort=True,
     ):
         contrast, focal, baseline, metric = keys
-        values = group.sort_values("seed")["mean_difference"].to_numpy(
-            dtype=np.float64
-        )
+        values = group.sort_values("seed")["mean_difference"].to_numpy(dtype=np.float64)
         t_test = stats.ttest_1samp(values, popmean=0.0)
         if np.allclose(values, 0.0):
             wilcoxon_statistic, wilcoxon_p = 0.0, 1.0
@@ -1586,8 +1797,7 @@ def _build_seed_tests(differences: pd.DataFrame) -> pd.DataFrame:
             wilcoxon_statistic = float(wilcoxon.statistic)
             wilcoxon_p = float(wilcoxon.pvalue)
         matching_folds = fold_seed[
-            (fold_seed["contrast"] == contrast)
-            & (fold_seed["metric"] == metric)
+            (fold_seed["contrast"] == contrast) & (fold_seed["metric"] == metric)
         ]
         rows.append(
             {
@@ -1602,9 +1812,7 @@ def _build_seed_tests(differences: pd.DataFrame) -> pd.DataFrame:
                 "fold_seed_count": int(len(matching_folds)),
                 "positive_fold_seed_count": int(
                     np.sum(
-                        matching_folds["mean_difference"].to_numpy(
-                            dtype=np.float64
-                        )
+                        matching_folds["mean_difference"].to_numpy(dtype=np.float64)
                         > 0.0
                     )
                 ),
@@ -1636,18 +1844,15 @@ def _build_inference_tables(
         sort=True,
     ):
         contrast, focal, baseline, metric = keys
-        seed_average = (
-            group.groupby(
-                [
-                    "fold",
-                    "surface_pair_id",
-                    "current_snapshot_time_utc",
-                    "trading_day",
-                ],
-                as_index=False,
-            )["difference"]
-            .mean()
-        )
+        seed_average = group.groupby(
+            [
+                "fold",
+                "surface_pair_id",
+                "current_snapshot_time_utc",
+                "trading_day",
+            ],
+            as_index=False,
+        )["difference"].mean()
         stable_offset = int(
             hashlib.sha256(f"{contrast}|{metric}".encode()).hexdigest()[:8],
             16,
@@ -1666,9 +1871,7 @@ def _build_inference_tables(
                 "difference_direction": "baseline_minus_focal",
                 "positive_means_focal_better": True,
                 "pair_count": int(len(seed_average)),
-                "trading_day_clusters": int(
-                    seed_average["trading_day"].nunique()
-                ),
+                "trading_day_clusters": int(seed_average["trading_day"].nunique()),
                 **inference,
                 "bootstrap_iterations": int(bootstrap_iterations),
                 "bootstrap_seed": int(bootstrap_seed),
@@ -1688,13 +1891,12 @@ def _build_inference_tables(
     bootstrap = pd.DataFrame(bootstrap_rows)
     bootstrap["holm_family"] = ""
     bootstrap["p_holm_two_sided"] = np.nan
-    primary_mask = (
-        bootstrap["contrast"].isin(
-            [contrast for _focal, _baseline, contrast in PRIMARY_CONTRASTS]
-        )
-        & (bootstrap["metric"] == "surface_mae")
+    primary_mask = bootstrap["contrast"].isin(
+        [contrast for _focal, _baseline, contrast in PRIMARY_CONTRASTS]
+    ) & (bootstrap["metric"] == "surface_mae")
+    bootstrap.loc[primary_mask, "holm_family"] = (
+        "primary_surface_lp_vs_two_representations"
     )
-    bootstrap.loc[primary_mask, "holm_family"] = "primary_surface_lp_vs_two_representations"
     bootstrap.loc[primary_mask, "p_holm_two_sided"] = _holm_adjust(
         bootstrap.loc[primary_mask, "p_two_sided"].tolist()
     )
@@ -1704,10 +1906,7 @@ def _build_inference_tables(
         bootstrap.loc[mask, "p_holm_two_sided"] = _holm_adjust(
             bootstrap.loc[mask, "p_two_sided"].tolist()
         )
-    context_mask = (
-        (bootstrap["metric"] == "surface_mae")
-        & ~primary_mask
-    )
+    context_mask = (bootstrap["metric"] == "surface_mae") & ~primary_mask
     bootstrap.loc[context_mask, "holm_family"] = "context_surface_secondary_contrasts"
     bootstrap.loc[context_mask, "p_holm_two_sided"] = _holm_adjust(
         bootstrap.loc[context_mask, "p_two_sided"].tolist()
@@ -1736,29 +1935,24 @@ def _build_persistence_context(
                     current_metric,
                 ]
             ].copy()
-            working["difference"] = (
-                working[current_metric] - working[metric]
-            )
+            working["difference"] = working[current_metric] - working[metric]
             working["trading_day"] = pd.to_datetime(
                 working["current_snapshot_time_utc"],
                 utc=True,
             ).dt.date.astype(str)
-            seed_average = (
-                working.groupby(
-                    [
-                        "fold",
-                        "surface_pair_id",
-                        "current_snapshot_time_utc",
-                        "trading_day",
-                    ],
-                    as_index=False,
-                )["difference"]
-                .mean()
-            )
+            seed_average = working.groupby(
+                [
+                    "fold",
+                    "surface_pair_id",
+                    "current_snapshot_time_utc",
+                    "trading_day",
+                ],
+                as_index=False,
+            )["difference"].mean()
             stable_offset = int(
-                hashlib.sha256(
-                    f"persistence|{model}|{metric}".encode()
-                ).hexdigest()[:8],
+                hashlib.sha256(f"persistence|{model}|{metric}".encode()).hexdigest()[
+                    :8
+                ],
                 16,
             )
             rows.append(
@@ -1780,9 +1974,9 @@ def _build_persistence_context(
     output["p_holm_two_sided_within_metric"] = np.nan
     for _metric, indexes in output.groupby("metric").groups.items():
         index_list = list(indexes)
-        output.loc[
-            index_list, "p_holm_two_sided_within_metric"
-        ] = _holm_adjust(output.loc[index_list, "p_two_sided"].tolist())
+        output.loc[index_list, "p_holm_two_sided_within_metric"] = _holm_adjust(
+            output.loc[index_list, "p_two_sided"].tolist()
+        )
     return output
 
 
@@ -1821,9 +2015,7 @@ def build_comparison(args: argparse.Namespace) -> Path:
     samples = pd.concat(rows, ignore_index=True)
     if "alignment_type" not in samples.columns:
         samples["alignment_type"] = "exact"
-    samples["alignment_type"] = (
-        samples["alignment_type"].fillna("exact").astype(str)
-    )
+    samples["alignment_type"] = samples["alignment_type"].fillna("exact").astype(str)
     expected = (
         len(MODEL_VARIANTS)
         * len(SEEDS)
@@ -1839,42 +2031,38 @@ def build_comparison(args: argparse.Namespace) -> Path:
         index=False,
     )
 
-    model_overall = (
-        samples.groupby(["model", "variant", "fold", "seed"], as_index=False)
-        .agg(
-            n_pairs=("surface_pair_id", "size"),
-            surface_mae=("surface_mae", "mean"),
-            short_atm_mae=("short_atm_mae", "mean"),
-            supported_shortest_atm_abs_err=(
-                "supported_shortest_atm_abs_err",
-                "mean",
-            ),
-            current_surface_mae=("current_mae", "mean"),
-            current_short_atm_mae=("current_atm_short_pure_mae", "mean"),
-            current_supported_shortest_atm_abs_err=(
-                "current_supported_shortest_atm_abs_err",
-                "mean",
-            ),
-        )
+    model_overall = samples.groupby(
+        ["model", "variant", "fold", "seed"], as_index=False
+    ).agg(
+        n_pairs=("surface_pair_id", "size"),
+        surface_mae=("surface_mae", "mean"),
+        short_atm_mae=("short_atm_mae", "mean"),
+        supported_shortest_atm_abs_err=(
+            "supported_shortest_atm_abs_err",
+            "mean",
+        ),
+        current_surface_mae=("current_mae", "mean"),
+        current_short_atm_mae=("current_atm_short_pure_mae", "mean"),
+        current_supported_shortest_atm_abs_err=(
+            "current_supported_shortest_atm_abs_err",
+            "mean",
+        ),
     )
     model_overall.to_csv(
         root / "final_tables/development_rq2_model_overall_metrics.csv",
         index=False,
     )
-    alignment_model_overall = (
-        samples.groupby(
-            ["model", "variant", "fold", "seed", "alignment_type"],
-            as_index=False,
-        )
-        .agg(
-            n_pairs=("surface_pair_id", "size"),
-            surface_mae=("surface_mae", "mean"),
-            short_atm_mae=("short_atm_mae", "mean"),
-            supported_shortest_atm_abs_err=(
-                "supported_shortest_atm_abs_err",
-                "mean",
-            ),
-        )
+    alignment_model_overall = samples.groupby(
+        ["model", "variant", "fold", "seed", "alignment_type"],
+        as_index=False,
+    ).agg(
+        n_pairs=("surface_pair_id", "size"),
+        surface_mae=("surface_mae", "mean"),
+        short_atm_mae=("short_atm_mae", "mean"),
+        supported_shortest_atm_abs_err=(
+            "supported_shortest_atm_abs_err",
+            "mean",
+        ),
     )
     alignment_model_overall.to_csv(
         root / "comparisons/development_rq2_alignment_stratum_metrics.csv",
@@ -1912,18 +2100,15 @@ def build_comparison(args: argparse.Namespace) -> Path:
         sort=True,
     ):
         contrast, focal, baseline, metric, alignment_type = keys
-        seed_average = (
-            group.groupby(
-                [
-                    "fold",
-                    "surface_pair_id",
-                    "current_snapshot_time_utc",
-                    "trading_day",
-                ],
-                as_index=False,
-            )["difference"]
-            .mean()
-        )
+        seed_average = group.groupby(
+            [
+                "fold",
+                "surface_pair_id",
+                "current_snapshot_time_utc",
+                "trading_day",
+            ],
+            as_index=False,
+        )["difference"].mean()
         stable_offset = int(
             hashlib.sha256(
                 f"{contrast}|{metric}|{alignment_type}".encode()
@@ -1945,16 +2130,13 @@ def build_comparison(args: argparse.Namespace) -> Path:
                 "difference_direction": "baseline_minus_focal",
                 "positive_means_focal_better": True,
                 "pair_count": int(len(seed_average)),
-                "trading_day_clusters": int(
-                    seed_average["trading_day"].nunique()
-                ),
+                "trading_day_clusters": int(seed_average["trading_day"].nunique()),
                 **inference,
             }
         )
     alignment_inference = pd.DataFrame(alignment_rows)
     alignment_inference.to_csv(
-        root
-        / "comparisons/development_rq2_alignment_stratum_contrasts.csv",
+        root / "comparisons/development_rq2_alignment_stratum_contrasts.csv",
         index=False,
     )
     alignment_inference.to_csv(
@@ -1971,9 +2153,7 @@ def build_comparison(args: argparse.Namespace) -> Path:
         bootstrap_seed=int(args.bootstrap_seed),
     )
 
-    primary_names = {
-        contrast for _focal, _baseline, contrast in PRIMARY_CONTRASTS
-    }
+    primary_names = {contrast for _focal, _baseline, contrast in PRIMARY_CONTRASTS}
     primary = bootstrap[
         bootstrap["contrast"].isin(primary_names)
         & (bootstrap["metric"] == "surface_mae")
@@ -1989,9 +2169,7 @@ def build_comparison(args: argparse.Namespace) -> Path:
         "bow_vs_continued_no_text",
         "llm_sentiment_vs_continued_no_text",
     }
-    bootstrap[
-        bootstrap["contrast"].isin(incremental_names)
-    ].to_csv(
+    bootstrap[bootstrap["contrast"].isin(incremental_names)].to_csv(
         root / "final_tables/development_rq2_incremental_value_vs_no_text.csv",
         index=False,
     )
@@ -2048,12 +2226,7 @@ def build_comparison(args: argparse.Namespace) -> Path:
         {
             **result_summary,
             "selected_checkpoint_count": int(
-                len(
-                    pd.read_csv(
-                        root
-                        / "checkpoint_selection/selected_checkpoints.csv"
-                    )
-                )
+                len(pd.read_csv(root / "checkpoint_selection/selected_checkpoints.csv"))
             ),
             "generate_registry_rows": int(len(registry)),
             "input_dimension": 128,
@@ -2161,13 +2334,9 @@ def monitor_results(args: argparse.Namespace) -> Path:
     root = _resolve_root(args.experiment_root)
     selected_path = root / "checkpoint_selection/selected_checkpoints.csv"
     registry_path = root / "registry/generate_registry.csv"
-    result_path = (
-        root / "final_tables/development_rq2_result_summary.json"
-    )
+    result_path = root / "final_tables/development_rq2_result_summary.json"
     pipeline_status_path = root / "registry/results_pipeline_status.json"
-    selected_count = (
-        len(pd.read_csv(selected_path)) if selected_path.is_file() else 0
-    )
+    selected_count = len(pd.read_csv(selected_path)) if selected_path.is_file() else 0
     generated_count = 0
     generated_samples = 0
     if registry_path.is_file():
@@ -2198,17 +2367,13 @@ def monitor_results(args: argparse.Namespace) -> Path:
         "manifest.csv",
     )
     missing_outputs = [
-        relative
-        for relative in required_outputs
-        if not (root / relative).is_file()
+        relative for relative in required_outputs if not (root / relative).is_file()
     ]
     payload = {
         "experiment_root": str(root),
         "pipeline_status": pipeline_status.get("status", "not_started"),
         "pipeline_phase": pipeline_status.get("phase", "not_started"),
-        "pipeline_updated_at_utc": pipeline_status.get(
-            "updated_at_utc", ""
-        ),
+        "pipeline_updated_at_utc": pipeline_status.get("updated_at_utc", ""),
         "pipeline_error": pipeline_status.get("error", ""),
         "selected_new_checkpoints": selected_count,
         "expected_selected_new_checkpoints": 24,

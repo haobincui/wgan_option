@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -13,7 +13,6 @@ from wgan_option.merge_support import (
     DEFAULT_DAYS_IN_YEAR as _DEFAULT_DAYS_IN_YEAR,
     DEFAULT_NEWS_XLSX_PATH,
     DEFAULT_OFFSET_MINUTES,
-    DEFAULT_SOURCE_TIMEZONE,
     build_surface_from_params,
     coerce_optional_numeric,
     evaluate_raw_row_against_surface,
@@ -36,7 +35,6 @@ from wgan_option.merge_support import (
     serialize_list,
     weighted_mae,
     weighted_rmse,
-    write_workbook,
 )
 from wgan_option.surface_grid import (
     DEFAULT_MATURITY_BINS,
@@ -224,7 +222,9 @@ def _grid_definition(
     moneyness_max: float = DEFAULT_MONEYNESS_MAX,
     maturity_min_days: int = DEFAULT_MATURITY_MIN_DAYS,
     maturity_max_days: int = DEFAULT_MATURITY_MAX_DAYS,
-) -> Tuple[List[float], List[float], str]:
+    integer_maturity_days: bool = False,
+    maturity_days_nodes: Sequence[float] | None = None,
+) -> Tuple[List[float], List[float | int], str]:
     strike_grid, maturity_days_grid = build_surface_grids(
         strike_bins=strike_bins,
         maturity_bins=maturity_bins,
@@ -232,12 +232,21 @@ def _grid_definition(
         moneyness_max=moneyness_max,
         maturity_min_days=maturity_min_days,
         maturity_max_days=maturity_max_days,
+        integer_maturity_days=integer_maturity_days,
+        maturity_days_nodes=maturity_days_nodes,
         dtype=np.float64,
     )
+    serialized_maturities: List[float | int]
+    if integer_maturity_days:
+        serialized_maturities = [int(value) for value in maturity_days_grid]
+    else:
+        serialized_maturities = [float(value) for value in maturity_days_grid.tolist()]
     return (
         [float(value) for value in strike_grid.tolist()],
-        [float(value) for value in maturity_days_grid.tolist()],
-        serialize_list(surface_shape(strike_bins=strike_bins, maturity_bins=maturity_bins)),
+        serialized_maturities,
+        serialize_list(
+            surface_shape(strike_bins=strike_bins, maturity_bins=maturity_bins)
+        ),
     )
 
 
@@ -251,18 +260,21 @@ def _reconstruct_surface_flat(
         business_days=[int(round(value)) for value in maturity_days_grid],
         forward=1.0,
     )
-    return [
-        float(value)
-        for row in surface_grid
-        for value in row
-    ]
+    return [float(value) for row in surface_grid for value in row]
 
 
-def _surface_stats(surface_flat: Sequence[float]) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+def _surface_stats(
+    surface_flat: Sequence[float],
+) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
     if not surface_flat:
         return None, None, None, None
     surface = np.asarray(surface_flat, dtype=np.float64)
-    return float(surface.min()), float(surface.max()), float(surface.mean()), float(surface.std())
+    return (
+        float(surface.min()),
+        float(surface.max()),
+        float(surface.mean()),
+        float(surface.std()),
+    )
 
 
 def _side_quality_label(
@@ -292,7 +304,9 @@ def _missing_surface_label(prefix: str, surface_model: str) -> str:
     return f"no_{prefix}_{suffix}"
 
 
-def _pair_quality_label(current_metrics: Mapping[str, Any], target_metrics: Mapping[str, Any]) -> Tuple[str, str]:
+def _pair_quality_label(
+    current_metrics: Mapping[str, Any], target_metrics: Mapping[str, Any]
+) -> Tuple[str, str]:
     current_model = str(current_metrics.get("surface_model") or "svi")
     target_model = str(target_metrics.get("surface_model") or current_model or "svi")
     if not bool(current_metrics["has_surface"]):
@@ -353,11 +367,11 @@ def _base_pair_fields(
         "publication_availability_lag_minutes": int(
             news_row.get("publication_availability_lag_minutes", 0)
         ),
-        "news_timestamp_utc": normalize_optional_text(news_row.get("timestamp_utc", "")),
+        "news_timestamp_utc": normalize_optional_text(
+            news_row.get("timestamp_utc", "")
+        ),
         "news_alignment_mode": (
-            normalize_optional_text(
-                alignment.get("news_alignment_mode", "")
-            )
+            normalize_optional_text(alignment.get("news_alignment_mode", ""))
             or ("forward_valid_pair" if has_alignment else "exact")
         ),
         "news_available_time_utc": normalize_optional_text(
@@ -409,9 +423,7 @@ def _base_pair_fields(
             alignment.get("scheduled_origin_utc", "")
         ),
         "origin_tolerance_minutes_used": coerce_optional_numeric(
-            safe_float(
-                alignment.get("origin_tolerance_minutes_used")
-            )
+            safe_float(alignment.get("origin_tolerance_minutes_used"))
         ),
         "session_shift_minutes": coerce_optional_numeric(
             safe_float(alignment.get("session_shift_minutes"))
@@ -419,9 +431,7 @@ def _base_pair_fields(
         "session_shift_reason": normalize_optional_text(
             alignment.get("session_shift_reason", "")
         ),
-        "session_id": normalize_optional_text(
-            alignment.get("session_id", "")
-        ),
+        "session_id": normalize_optional_text(alignment.get("session_id", "")),
         "session_open_utc": normalize_optional_text(
             alignment.get("session_open_utc", "")
         ),
@@ -457,14 +467,20 @@ def _evaluate_side(
     surface_params: Optional[Mapping[str, Any]] = None
     has_surface = False
     if json_entry is not None:
-        json_target_timestamp = normalize_optional_text(json_entry.get("json_target_timestamp_utc", ""))
-        surface_model = normalize_optional_text(json_entry.get("surface_model", "svi")) or "svi"
+        json_target_timestamp = normalize_optional_text(
+            json_entry.get("json_target_timestamp_utc", "")
+        )
+        surface_model = (
+            normalize_optional_text(json_entry.get("surface_model", "svi")) or "svi"
+        )
         surface_params = json_entry.get("surface_params")
         slices = list(json_entry.get("slices", []))
         has_surface = bool(json_entry.get("has_surface_params", False))
 
     raw_point_count = len(raw_rows)
-    raw_pass_rows = [row for row in raw_rows if normalize_bool(row.get("passes_precalib_filter"))]
+    raw_pass_rows = [
+        row for row in raw_rows if normalize_bool(row.get("passes_precalib_filter"))
+    ]
     raw_point_pass_count = len(raw_pass_rows)
 
     surface = None
@@ -500,8 +516,14 @@ def _evaluate_side(
             )
             if assignment is not None
         ]
-    exact_slice_point_count = sum(1 for assignment in pass_assignments if assignment["is_exact"])
-    exact_slice_point_ratio = float(exact_slice_point_count / raw_point_pass_count) if raw_point_pass_count else 0.0
+    exact_slice_point_count = sum(
+        1 for assignment in pass_assignments if assignment["is_exact"]
+    )
+    exact_slice_point_ratio = (
+        float(exact_slice_point_count / raw_point_pass_count)
+        if raw_point_pass_count
+        else 0.0
+    )
 
     iv_errors = [
         float(assignment["iv_error"])
@@ -529,8 +551,19 @@ def _evaluate_side(
     max_abs_iv_err = max_abs_error(iv_errors)
     w_total_var_rmse = weighted_rmse(total_var_errors, total_var_weights)
 
-    placeholder_flag = int(bool(slices) and all(is_placeholder_surface_slice(surface_model, slice_row) for slice_row in slices))
-    boundary_flag = int(bool(slices) and any(is_boundary_surface_slice(surface_model, slice_row) for slice_row in slices))
+    placeholder_flag = int(
+        bool(slices)
+        and all(
+            is_placeholder_surface_slice(surface_model, slice_row)
+            for slice_row in slices
+        )
+    )
+    boundary_flag = int(
+        bool(slices)
+        and any(
+            is_boundary_surface_slice(surface_model, slice_row) for slice_row in slices
+        )
+    )
     side_ql = _side_quality_label(
         surface_model=surface_model,
         has_surface=has_surface,
@@ -540,7 +573,11 @@ def _evaluate_side(
         weighted_iv_rmse=w_iv_rmse,
     )
 
-    surface_flat = _reconstruct_surface_flat(surface, strike_grid, maturity_days_grid) if surface is not None else []
+    surface_flat = (
+        _reconstruct_surface_flat(surface, strike_grid, maturity_days_grid)
+        if surface is not None
+        else []
+    )
     surface_min, surface_max, surface_mean, surface_std = _surface_stats(surface_flat)
     surface_business_days = [slice_row["business_days"] for slice_row in slices]
     svi_fields = {
@@ -556,7 +593,9 @@ def _evaluate_side(
             "svi_b_list": serialize_list([slice_row["b"] for slice_row in slices]),
             "svi_rho_list": serialize_list([slice_row["rho"] for slice_row in slices]),
             "svi_m_list": serialize_list([slice_row["m"] for slice_row in slices]),
-            "svi_sigma_list": serialize_list([slice_row["sigma"] for slice_row in slices]),
+            "svi_sigma_list": serialize_list(
+                [slice_row["sigma"] for slice_row in slices]
+            ),
         }
 
     side_row = {
@@ -571,9 +610,13 @@ def _evaluate_side(
         "surface_slice_count": len(slices),
         "has_svi": has_surface,
         "svi_slice_count": len(slices),
-        "svi_business_days_list": serialize_list(surface_business_days) if slices else "",
+        "svi_business_days_list": serialize_list(surface_business_days)
+        if slices
+        else "",
         **svi_fields,
-        "surface_param_json": serialize_json(surface_params) if surface_params is not None else "",
+        "surface_param_json": serialize_json(surface_params)
+        if surface_params is not None
+        else "",
         "strike_grid": strike_grid_text,
         "maturity_days_grid": maturity_grid_text,
         "surface_flat": serialize_list(surface_flat) if surface_flat else "",
@@ -630,6 +673,8 @@ def build_vol_workbook_frames(
     moneyness_max: float = DEFAULT_MONEYNESS_MAX,
     maturity_min_days: int = DEFAULT_MATURITY_MIN_DAYS,
     maturity_max_days: int = DEFAULT_MATURITY_MAX_DAYS,
+    integer_maturity_days: bool = False,
+    maturity_days_nodes: Sequence[float] | None = None,
     alignment_csv_path: Optional[Path] = None,
 ) -> Dict[str, pd.DataFrame]:
     """Build the three-sheet paired vol-surface workbook from raw surface results."""
@@ -716,6 +761,8 @@ def build_vol_workbook_frames(
         moneyness_max=moneyness_max,
         maturity_min_days=maturity_min_days,
         maturity_max_days=maturity_max_days,
+        integer_maturity_days=integer_maturity_days,
+        maturity_days_nodes=maturity_days_nodes,
     )
     strike_grid_text = serialize_list(strike_grid)
     maturity_grid_text = serialize_list(maturity_days_grid)
@@ -758,8 +805,12 @@ def build_vol_workbook_frames(
             side="current_back",
             source_direction="backward",
             matched_snapshot=current_snapshot,
-            raw_rows=list(csv_groups.get(current_snapshot, [])) if current_snapshot else [],
-            json_entry=json_direction_map.get((current_snapshot, "backward")) if current_snapshot else None,
+            raw_rows=list(csv_groups.get(current_snapshot, []))
+            if current_snapshot
+            else [],
+            json_entry=json_direction_map.get((current_snapshot, "backward"))
+            if current_snapshot
+            else None,
             strike_grid=strike_grid,
             maturity_days_grid=maturity_days_grid,
             strike_grid_text=strike_grid_text,
@@ -771,24 +822,37 @@ def build_vol_workbook_frames(
             side="target_forward",
             source_direction="forward",
             matched_snapshot=target_snapshot,
-            raw_rows=list(csv_groups.get(target_snapshot, [])) if target_snapshot else [],
-            json_entry=json_direction_map.get((target_snapshot, "forward")) if target_snapshot else None,
+            raw_rows=list(csv_groups.get(target_snapshot, []))
+            if target_snapshot
+            else [],
+            json_entry=json_direction_map.get((target_snapshot, "forward"))
+            if target_snapshot
+            else None,
             strike_grid=strike_grid,
             maturity_days_grid=maturity_days_grid,
             strike_grid_text=strike_grid_text,
             maturity_grid_text=maturity_grid_text,
         )
-        pair_quality, exclude_reason = _pair_quality_label(current_metrics, target_metrics)
+        pair_quality, exclude_reason = _pair_quality_label(
+            current_metrics, target_metrics
+        )
         training_candidate_flag = int(pair_quality == "usable")
 
         pair_rows.append(
             {
                 **base,
-                "current_snapshot_time_utc": current_metrics["matched_snapshot_time_utc"],
+                "current_snapshot_time_utc": current_metrics[
+                    "matched_snapshot_time_utc"
+                ],
                 "target_snapshot_time_utc": target_metrics["matched_snapshot_time_utc"],
-                "current_json_target_timestamp_utc": current_metrics["json_target_timestamp_utc"],
-                "target_json_target_timestamp_utc": target_metrics["json_target_timestamp_utc"],
-                "surface_model": current_metrics["surface_model"] or target_metrics["surface_model"],
+                "current_json_target_timestamp_utc": current_metrics[
+                    "json_target_timestamp_utc"
+                ],
+                "target_json_target_timestamp_utc": target_metrics[
+                    "json_target_timestamp_utc"
+                ],
+                "surface_model": current_metrics["surface_model"]
+                or target_metrics["surface_model"],
                 "current_has_surface": current_metrics["has_surface"],
                 "target_has_surface": target_metrics["has_surface"],
                 "current_surface_slice_count": current_metrics["surface_slice_count"],
@@ -808,16 +872,24 @@ def build_vol_workbook_frames(
                 "target_raw_point_count": target_metrics["raw_point_count"],
                 "current_raw_point_pass_count": current_metrics["raw_point_pass_count"],
                 "target_raw_point_pass_count": target_metrics["raw_point_pass_count"],
-                "current_exact_slice_point_ratio": current_metrics["exact_slice_point_ratio"],
-                "target_exact_slice_point_ratio": target_metrics["exact_slice_point_ratio"],
+                "current_exact_slice_point_ratio": current_metrics[
+                    "exact_slice_point_ratio"
+                ],
+                "target_exact_slice_point_ratio": target_metrics[
+                    "exact_slice_point_ratio"
+                ],
                 "current_weighted_iv_rmse": current_metrics["weighted_iv_rmse"],
                 "target_weighted_iv_rmse": target_metrics["weighted_iv_rmse"],
                 "current_weighted_iv_mae": current_metrics["weighted_iv_mae"],
                 "target_weighted_iv_mae": target_metrics["weighted_iv_mae"],
                 "current_max_abs_iv_error": current_metrics["max_abs_iv_error"],
                 "target_max_abs_iv_error": target_metrics["max_abs_iv_error"],
-                "current_weighted_total_var_rmse": current_metrics["weighted_total_var_rmse"],
-                "target_weighted_total_var_rmse": target_metrics["weighted_total_var_rmse"],
+                "current_weighted_total_var_rmse": current_metrics[
+                    "weighted_total_var_rmse"
+                ],
+                "target_weighted_total_var_rmse": target_metrics[
+                    "weighted_total_var_rmse"
+                ],
                 "current_boundary_flag": current_metrics["boundary_flag"],
                 "target_boundary_flag": target_metrics["boundary_flag"],
                 "current_placeholder_flag": current_metrics["placeholder_flag"],
@@ -831,7 +903,9 @@ def build_vol_workbook_frames(
 
     pair_df = pd.DataFrame(pair_rows, columns=PAIR_AUDIT_HEADERS)
     side_df = pd.DataFrame(side_rows, columns=SIDE_DETAIL_HEADERS)
-    gan_df = pair_df.loc[pair_df["training_candidate_flag"] == 1, GAN_HEADERS].reset_index(drop=True)
+    gan_df = pair_df.loc[
+        pair_df["training_candidate_flag"] == 1, GAN_HEADERS
+    ].reset_index(drop=True)
     return {
         PAIR_AUDIT_SHEET: pair_df,
         SIDE_DETAIL_SHEET: side_df,

@@ -1,0 +1,163 @@
+study:
+  schema_version: 1
+  study_kind: generator_architecture_3seed_5m_v1
+  line: architecture
+  interface_stability: branch_local
+  interpretation: retrospective_rolling_development_3seed
+  study_scope: generator_architecture_selection
+  output_root: outputs/experiments/rq3_news_first_vol_generator_architecture_3seed_5m_exact_ttm_v1
+
+data:
+  root: data/processed/rq3/news_first_vol_surfaces_q097_103_ttm01_38_exact_ttm_v1
+  workbook_template: tolerance_{tolerance02}m/merged_vol.xlsx
+  support_template: tolerance_{tolerance02}m/surface_support_audit.csv.gz
+  validation_template: tolerance_{tolerance02}m/validation_summary.json
+  tolerances_minutes: [5]
+  surface_grid_profile: exact_ttm_16x16_v1
+  support_mask_mode: raw_joint
+  target_horizon_minutes: 5
+
+folds:
+  - {id: f1_2023q1, train_end_utc: "2022-10-01T00:00:00Z", validation_end_utc: "2023-01-01T00:00:00Z", test_end_utc: "2023-04-01T00:00:00Z"}
+  - {id: f2_2023q2, train_end_utc: "2023-01-01T00:00:00Z", validation_end_utc: "2023-04-01T00:00:00Z", test_end_utc: "2023-07-01T00:00:00Z"}
+  - {id: f3_2023q3, train_end_utc: "2023-04-01T00:00:00Z", validation_end_utc: "2023-07-01T00:00:00Z", test_end_utc: "2023-10-01T00:00:00Z"}
+  - {id: f4_2023q4, train_end_utc: "2023-07-01T00:00:00Z", validation_end_utc: "2023-10-01T00:00:00Z", test_end_utc: "2024-01-01T00:00:00Z"}
+
+matrix:
+  seeds: [42, 202, 404]
+  modes:
+    - crossattn_unet_mask_coords_v1
+    - transformer_tokens_mask_coords_v1
+    - stylemod_unet_mask_coords_v1
+  matched_capacity:
+    target_generator_parameters: 827745
+    maximum_relative_deviation: 0.05
+    profile_selection: closest_executable_parameter_count_then_smallest_base_channels_v1
+    expected_winner_generator_parameters:
+      crossattn_unet_mask_coords_v1: 824644
+      transformer_tokens_mask_coords_v1: 834561
+      stylemod_unet_mask_coords_v1: 829635
+    deterministic_search_grid:
+      crossattn_unet_mask_coords_v1:
+        gen_base_channels: {minimum: 28, maximum: 36}
+        gen_crossattn_dim: [64]
+        gen_crossattn_heads: [4]
+        gen_crossattn_text_tokens: [4]
+      transformer_tokens_mask_coords_v1:
+        gen_base_channels: [32]
+        gen_transformer_model_dim: [128]
+        gen_transformer_layers: [3]
+        gen_transformer_heads: [4]
+        gen_transformer_ffn_dim: [256, 320, 384, 448, 512]
+        gen_transformer_dropout: [0.0]
+      stylemod_unet_mask_coords_v1:
+        gen_base_channels: {minimum: 26, maximum: 34}
+        gen_style_dim: [256]
+        gen_style_demodulate: [true]
+  screen:
+    seed: 42
+    fold: f2_2023q2
+    num_epochs: 60
+    conditioning_learning_rates: [1.0e-5, 2.5e-5, 5.0e-5]
+    expected_training_jobs: 9
+    selection_rule: lowest_validation_mae_at_best_hybrid_checkpoint_per_mode_v1
+  formal:
+    expected_training_jobs: 36
+    learning_rate_source: frozen_screen_per_mode
+  scaled:
+    target_generator_parameters: 1655490
+    maximum_relative_deviation: 0.05
+    deterministic_search_grid:
+      film_unet_mask_coords_v1:
+        gen_base_channels: {minimum: 16, maximum: 96}
+      crossattn_unet_mask_coords_v1:
+        gen_base_channels: [24, 28, 30, 32, 36, 40, 42, 44, 48, 54, 55, 60, 64]
+        gen_crossattn_dim: [32, 64, 96, 128, 160, 192, 256]
+        gen_crossattn_heads: [4]
+        gen_crossattn_text_tokens: [4]
+      transformer_tokens_mask_coords_v1:
+        gen_base_channels: [24, 28, 30, 32, 36, 40, 44, 48, 54, 55, 60, 64]
+        gen_transformer_model_dim: [96, 128, 160, 192, 256]
+        gen_transformer_layers: [2, 3, 4, 5, 6]
+        gen_transformer_heads: [4]
+        gen_transformer_ffn_dim: [256, 384, 512, 640, 768]
+        gen_transformer_dropout: [0.0]
+      stylemod_unet_mask_coords_v1:
+        gen_base_channels: [24, 28, 30, 32, 36, 40, 44, 48, 54, 55, 56, 60, 64]
+        gen_style_dim: [128, 192, 256, 320, 384, 512]
+        gen_style_demodulate: [true]
+    conditioning_reference_learning_rate: 2.5e-5
+    profile_selection: closest_executable_parameter_count_then_smallest_base_channels_v1
+    variants:
+      - {id: validation_point_leader_scaled, generator_mode_source: frozen_formal_point_leader, capacity_profile_source: deterministic_parameter_search}
+      - {id: film_reference_scaled, generator_mode: film_unet_mask_coords_v1, capacity_profile_source: deterministic_parameter_search}
+    expected_training_jobs: 24
+  expected_new_training_jobs: 69
+  expected_reused_baseline_cells: 24
+
+baselines:
+  film_reference:
+    root: outputs/experiments/rq12_news_first_vol_film_unet_text128_c32_nolp_direct_text_10seed_lr2p5e5_exact_ttm_rolling_v1
+    arm: lp_matched
+    generator_mode: film_unet_mask_coords_v1
+    capacity_profile: c32
+    qa_sha256: 36ac891b8734170d1769fad925e5ebc2d5a0392141b7d93b96efbd28a4e8f5f7
+    registry_sha256: a91ee26a7baff15acea602cefe22e01288f8cc0fdc76f484165596ef95534cbf
+    checkpoint_allowlist_sha256: 8917bc368965a6f7ec6736e4aaf8ab866dacf698382a1b3c18ab841c0ed3c391
+  pure_cnn_reference:
+    root: outputs/experiments/rq12_news_first_vol_cnn_unet_c32_nolp_pure_no_text_10seed_exact_ttm_rolling_v1
+    arm: pure_cnn_no_text
+    generator_mode: cnn_unet_mask_coords_v1
+    capacity_profile: c32
+    qa_sha256: d236d8a9ef814d68c273af161904d0979fa9a27a861081a6246dc85d7b9fc98d
+    registry_sha256: fb5589bc3a088e9ce237fbc9fbb5097b0afa1ef8e236a4dfadc73b9e7f2b3633
+    checkpoint_allowlist_sha256: 1a0200330ecd976285d0d619870cbaa728545011a1013cc92e8514cdd27bcd25
+
+training:
+  protocol: independent_random_init_best_validation_v1
+  critic_conditioning_mode: lp_disabled_same_shape_v1
+  capacity_profile: c32
+  backbone_learning_rate: 5.0e-7
+  text_learning_rate: 2.5e-6
+  critic_learning_rate: 5.0e-7
+  generator_optimizer_profile: conditioning_split_lr_v2
+  conditioning_learning_rate_source: matrix_or_frozen_selection
+  num_epochs: 240
+  early_stopping_min_epochs: 30
+  early_stopping_patience: 20
+  batch_size: 16
+  discriminator_steps: 5
+  validation_mc_samples: 16
+  prediction_mc_samples: 64
+  materialize_test_loader_during_training: false
+
+analysis:
+  bootstrap_replicates: 10000
+  bootstrap_seed: 20260905
+  confidence_level: 0.95
+  resampling_hierarchy: seed_then_fold_then_paired_cme_session_v1
+  selection_metric: validation_mae
+  test_based_selection_permitted: false
+  primary_holm_family:
+    id: three_new_architectures_vs_film_reference
+    size: 3
+    contrasts: [formal_mode_vs_film_reference]
+  secondary_descriptive_contrasts:
+    - formal_mode_vs_pure_cnn_reference
+    - scaled_point_leader_vs_scaled_film
+  required_diagnostics: [persistence_skill, calendar_violation_rate, butterfly_violation_rate]
+  required_text_interventions: [matched, zero, shuffle]
+
+runtime:
+  python_executable: /home/haobin_cui/.conda/envs/py312/bin/python
+  gpu_ids: [0, 1]
+  gpu_fold_assignment: {f1_2023q1: 0, f2_2023q2: 1, f3_2023q3: 0, f4_2023q4: 1}
+  workers_per_gpu: 10
+  benchmark_worker_candidates_per_gpu: [4, 8, 12, 18]
+  benchmark_epochs: 1
+  preflight_max_peak_gpu_memory_gib: 20.0
+  preflight_max_host_ram_fraction: 0.85
+  cpu_threads_per_job: 1
+  poll_interval_seconds: 2
+  training_entrypoint: scripts/train/train_vol.py
+  worker_materialization_contract: train_vol_xlsx_job_config_v1

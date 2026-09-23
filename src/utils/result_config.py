@@ -22,6 +22,10 @@ _CONFIG_FIELD_NAMES = {
     "data_path",
     "sheet_name",
     "text_embedding_mode",
+    "support_mask_mode",
+    "generator_current_input_mode",
+    "generator_conditioning_mode",
+    "critic_conditioning_mode",
     "train_ratio",
     "cuda",
     "seed",
@@ -44,6 +48,10 @@ class GenerateResultConfig:
     data_path: str = ""
     sheet_name: str = "gan_input_ready"
     text_embedding_mode: str = "hd"
+    support_mask_mode: str = "none"
+    generator_current_input_mode: str = "full_current"
+    generator_conditioning_mode: str = "bottleneck_concat_v1"
+    critic_conditioning_mode: str = "lp_concat_v1"
     train_ratio: float = 0.8
 
     # Runtime
@@ -133,11 +141,19 @@ def build_generate_result_config(
 
     return GenerateResultConfig(**loaded_values)
 
-def save_generate_result_config_yaml(config: GenerateResultConfig, output_path: str | Path) -> Path:
+
+def save_generate_result_config_yaml(
+    config: GenerateResultConfig, output_path: str | Path
+) -> Path:
     """Persist resolved runtime config for reproducible result-generation runs."""
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
-        yaml.safe_dump(generate_result_config_to_dict(config), handle, sort_keys=False, allow_unicode=False)
+        yaml.safe_dump(
+            generate_result_config_to_dict(config),
+            handle,
+            sort_keys=False,
+            allow_unicode=False,
+        )
     return path

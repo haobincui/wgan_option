@@ -1,0 +1,62 @@
+# Exact critic-only counterpart to the completed Text128+c32 LP-Critic run.
+film_unet_text128_c32_epoch240_nolp_5seed:
+  schema_version: 1
+  experiment_kind: film_unet_mask_coords_text128_c32_epoch240_nolp_5seed_q3_v1
+  base_training_config: configs/rq3/news_first_vol_film_lp_critic_capacity_seed42_lr2p5e7.yaml
+  seeds: [42, 202, 404, 382624741, 1607127774]
+  capacity_profiles: [c32]
+  learning_rate: 5.0e-7
+  max_epochs: 240
+  lr_warmup_epochs: 0
+  early_stopping_min_epochs: 30
+  early_stopping_patience: 20
+  validation_mc_samples: 16
+
+  data_contract:
+    training_workbook: outputs/experiments/rq3_news_first_vol_legacy_architecture_seed_exact_ttm_v1/data_windows/tolerance_05m_pre_q4.xlsx
+    training_workbook_sha256: f5bc18a974b2b884cdce4deee48a730e4aa7aec349bef1c04a1e7706c8e2070f
+
+  arms:
+    film_unet_mask_coords_text128_nolp:
+      label: FiLM U-Net mask+coordinates, LP1024-256-128 + NoLP same-shape critic
+      generator_conditioning_mode: film_unet_mask_coords_v1
+      critic_conditioning_mode: lp_disabled_same_shape_v1
+      gen_text_hidden_dim: 256
+      gen_text_out_dim: 128
+
+  profiles:
+    c32:
+      gen_base_channels: 32
+      gen_res_blocks: 0
+      gen_hidden_dim: 1024
+      disc_base_channels: 32
+      disc_res_blocks: 0
+      disc_text_hidden_dim: 128
+      disc_hidden_dim: 786
+
+  comparison:
+    lp_registry: outputs/experiments/rq3_news_first_vol_film_unet_text128_c32_epoch240_5seed_exact_ttm_v1/registry/jobs.json
+    lp_registry_sha256: 70375e13a32d48cfeb51dae9a75fee4cbc0b8a4d5786b9ca55a7c8d893b18fba
+    lp_initial_state_fairness: outputs/experiments/rq3_news_first_vol_film_unet_text128_c32_epoch240_5seed_exact_ttm_v1/registry/initial_state_fairness.json
+    lp_initial_state_fairness_sha256: f41a163241ef3669a7a61c1a9c3c424f5c85939b8c655aed596676765e818daf
+    lp_job_summary: outputs/experiments/rq3_news_first_vol_film_unet_text128_c32_epoch240_5seed_exact_ttm_v1/analysis/job_summary.csv
+    lp_job_summary_sha256: 5d7f6b41cced2fdb4666287cd18e1a001245f9110981909289b766b5e0e7cb4c
+    lp_five_seed_summary: outputs/experiments/rq3_news_first_vol_film_unet_text128_c32_epoch240_5seed_exact_ttm_v1/analysis/five_seed_summary.json
+    lp_five_seed_summary_sha256: dd2899b92ea908057cd832c6cb6afa0992b130bae4eb3f707c9ee3b0db97118b
+    lp_status_sha256_by_seed:
+      "42": 6754257489db65d7f9143a7f4fb0aa5abf4fa670149459d7092e2a3db5a2f2f0
+      "202": 146f2abc94c183e67f75e63773de8da90bb39f77338eda4f390968d40969d781
+      "404": f05ef1f6d9acfb82a811c521ec4140402c42a1f6e691ac7880c22622a841ffc0
+      "382624741": 5b6d611a451c2762e4015553b82b31d75606f72c6310be65d345924b84dd4bba
+      "1607127774": b2bbf23e8b3e25f979eecc8daa95db094e0f2c20c84556410dd77a10aa186b20
+
+  runtime:
+    python_executable: /home/haobin_cui/.conda/envs/py312/bin/python
+    gpu_ids: [0, 1]
+    workers_per_gpu: 3
+    benchmark_workers_per_gpu: 3
+    cpu_threads_per_job: 1
+    poll_interval_seconds: 2
+    resource_sample_interval_seconds: 2
+    max_peak_gpu_memory_gib: 20.0
+    max_host_ram_fraction: 0.85

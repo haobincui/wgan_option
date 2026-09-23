@@ -1,0 +1,26 @@
+{
+  "schema_version": "frozen_rolling_skew_filter_figure_v1",
+  "artifact_type": "exact_copy_of_frozen_report_figure",
+  "source_root": "outputs/rq3/atm_skew_jumps_20260810_final",
+  "source_png": "outputs/rq3/atm_skew_jumps_20260810_final/figures/06_rolling_skew_diagnostic.png",
+  "source_png_sha256": "5c7e3129aa0f54151ee6a77ee052d851d09fa594a38baa1b32bfe3863e4f3f8c",
+  "source_svg": "outputs/rq3/atm_skew_jumps_20260810_final/figures/06_rolling_skew_diagnostic.svg",
+  "source_svg_sha256": "b584b38dce135ed039a072acf362233ae1784362d422b519ccee88d3ce8d4441",
+  "data_sources": [
+    "outputs/rq3/atm_skew_jumps_20260810_final/pair_slice_metrics.csv.gz",
+    "outputs/rq3/atm_skew_jumps_20260810_final/metric_rankings.csv.gz"
+  ],
+  "metric_level": "rolling_jump_skew_60m",
+  "screening_change": "delta_rolling_jump_skew_60m",
+  "definition": "Bias-corrected Fisher-Pearson skewness of A/B-quality signed five-minute ATM-IV changes within maturity_date x underlying_contract_id x CME session; 60 clock minutes with at least 30 observations; reset after a gap longer than five minutes.",
+  "rolling_level_rows": 6801,
+  "flagged_slice_metric_rows": 210,
+  "flagged_unique_market_pairs": 209,
+  "flagged_tiers": {
+    "high": 0,
+    "primary": 0,
+    "broad": 210
+  },
+  "histogram_display_policy": "The rolling-skew level is clipped to its 0.5th-99.5th percentile only for the left-panel histogram display; screening uses the untrimmed formal values.",
+  "research_role": "Auxiliary market-first anomaly label for exploratory conditional analysis; not a filter for the primary news-first training sample."
+}

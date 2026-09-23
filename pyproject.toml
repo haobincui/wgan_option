@@ -15,7 +15,7 @@ dependencies = [
   "nbformat>=5.9,<6.0",
   "nbconvert>=7.0,<8.0",
   "ipykernel>=6.0,<7.0",
-  "openpyxl>=3.0,<4.0",
+  "openpyxl>=3.1,<4.0",
   "PyYAML>=6.0,<7.0",
   "scipy>=1.10,<1.12",
   "python-dateutil>=2.8,<3.0",
@@ -31,4 +31,4 @@ py-modules = ["trainer"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["wgan_option*", "quantlib*", "market_data*", "volgan*", "film_wgan*", "utils*", "generate_result*", "cnn_wgan*", "transformer_wgan*", "stylemod_wgan*", "bow*", "llm_sentiment*"]
+include = ["wgan_option*", "quantlib*", "market_data*", "volgan*", "film_wgan*", "utils*", "generate_result*", "cnn_wgan*", "transformer_wgan*", "stylemod_wgan*", "bow*", "llm_sentiment*", "lm_sentiment*"]

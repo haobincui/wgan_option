@@ -1,0 +1,85 @@
+film_lp_capacity_lr_seed_sweep:
+  schema_version: 1
+  experiment_kind: film_lp_capacity_lr_seed_q3_development_v1
+  base_training_config: configs/rq3/news_first_vol_film_lp_critic_capacity_seed42_lr2p5e7.yaml
+  capacities: [micro, tiny, small, medium, large, legacy]
+  learning_rates: [5.0e-7, 2.5e-7, 1.25e-7]
+  seeds: [42, 202, 404]
+  max_epochs: 30
+  early_stopping_min_epochs: 15
+  early_stopping_patience: 16
+  validation_mc_samples: 16
+  profiles:
+    micro:
+      gen_base_channels: 1
+      gen_text_hidden_dim: 8
+      gen_text_out_dim: 4
+      gen_hidden_dim: 32
+      disc_base_channels: 1
+      disc_text_hidden_dim: 4
+      disc_hidden_dim: 24
+      expected_generator_parameters: 21164
+      expected_critic_parameters: 4756
+      expected_wgan_parameters: 25920
+    tiny:
+      gen_base_channels: 2
+      gen_text_hidden_dim: 16
+      gen_text_out_dim: 8
+      gen_hidden_dim: 64
+      disc_base_channels: 2
+      disc_text_hidden_dim: 8
+      disc_hidden_dim: 48
+      expected_generator_parameters: 48828
+      expected_critic_parameters: 10651
+      expected_wgan_parameters: 59479
+    small:
+      gen_base_channels: 4
+      gen_text_hidden_dim: 32
+      gen_text_out_dim: 16
+      gen_hidden_dim: 128
+      disc_base_channels: 4
+      disc_text_hidden_dim: 16
+      disc_hidden_dim: 96
+      expected_generator_parameters: 124424
+      expected_critic_parameters: 25861
+      expected_wgan_parameters: 150285
+    medium:
+      gen_base_channels: 8
+      gen_text_hidden_dim: 64
+      gen_text_out_dim: 32
+      gen_hidden_dim: 256
+      disc_base_channels: 8
+      disc_text_hidden_dim: 32
+      disc_hidden_dim: 192
+      expected_generator_parameters: 356688
+      expected_critic_parameters: 69961
+      expected_wgan_parameters: 426649
+    large:
+      gen_base_channels: 12
+      gen_text_hidden_dim: 96
+      gen_text_out_dim: 48
+      gen_hidden_dim: 384
+      disc_base_channels: 12
+      disc_text_hidden_dim: 48
+      disc_hidden_dim: 288
+      expected_generator_parameters: 697048
+      expected_critic_parameters: 132301
+      expected_wgan_parameters: 829349
+    legacy:
+      gen_base_channels: 32
+      gen_text_hidden_dim: 256
+      gen_text_out_dim: 128
+      gen_hidden_dim: 1024
+      disc_base_channels: 32
+      disc_text_hidden_dim: 128
+      disc_hidden_dim: 786
+      expected_generator_parameters: 4020288
+      expected_critic_parameters: 729157
+      expected_wgan_parameters: 4749445
+  runtime:
+    python_executable: /home/haobin_cui/.conda/envs/py312/bin/python
+    gpu_ids: [0, 1]
+    workers_per_gpu: 12
+    cpu_threads_per_job: 1
+    poll_interval_seconds: 2
+    resource_sample_interval_seconds: 10

@@ -11,8 +11,18 @@ from torch.utils.data import DataLoader, TensorDataset
 from wgan_option.config import Config
 
 from .merged_xlsx_parsing import _align_embeddings, _split_index
-from .merged_xlsx_samples import load_svi_paired_samples, load_vol_surface_samples
-from .merged_xlsx_types import SVI_FEATURE_ORDER, SviPairedSample, SviXlsxBundle, VolSurfaceXlsxBundle
+from .merged_xlsx_samples import (
+    load_svi_paired_samples,
+    load_vol_surface_samples_with_diagnostics,
+)
+from .merged_xlsx_types import (
+    SVI_FEATURE_ORDER,
+    SviPairedSample,
+    SviXlsxBundle,
+    VolSurfaceXlsxBundle,
+)
+from .reproducibility import seeded_torch_generator
+from .weighted_training import stable_key_to_int64
 
 
 def _build_svi_matrix_from_params(
@@ -20,7 +30,10 @@ def _build_svi_matrix_from_params(
     max_slices: int,
     sample_label: str,
 ) -> Tuple[np.ndarray, np.ndarray, int]:
-    feature_lists = [np.asarray(svi_params[feature], dtype=np.float32) for feature in SVI_FEATURE_ORDER]
+    feature_lists = [
+        np.asarray(svi_params[feature], dtype=np.float32)
+        for feature in SVI_FEATURE_ORDER
+    ]
     lengths = {int(values.size) for values in feature_lists}
     if len(lengths) != 1:
         raise ValueError(f"SVI feature list lengths must match for {sample_label}")
@@ -48,7 +61,11 @@ def _build_data_loaders(
     train_ratio: float,
     target_counts: Optional[np.ndarray] = None,
     target_masks: Optional[np.ndarray] = None,
+    surface_masks: Optional[np.ndarray] = None,
+    current_surface_masks: Optional[np.ndarray] = None,
+    stable_keys: Optional[np.ndarray] = None,
     timestamps: Optional[Sequence[str]] = None,
+    seed: int = 0,
 ) -> Tuple[DataLoader, Optional[DataLoader], int, int, List[str], List[str]]:
     total = int(inputs.shape[0])
     split_idx = _split_index(total, train_ratio)
@@ -61,18 +78,61 @@ def _build_data_loaders(
     tensor_targets = torch.tensor(targets, dtype=torch.float32)
 
     if target_counts is None:
-        train_ds = TensorDataset(
-            tensor_inputs[:split_idx],
-            tensor_embeddings[:split_idx],
-            tensor_targets[:split_idx],
-        )
+        if surface_masks is None:
+            if current_surface_masks is not None:
+                raise ValueError(
+                    "current_surface_masks require joint surface_masks so the "
+                    "legacy tuple positions remain unambiguous."
+                )
+            train_ds = TensorDataset(
+                tensor_inputs[:split_idx],
+                tensor_embeddings[:split_idx],
+                tensor_targets[:split_idx],
+            )
+        else:
+            if stable_keys is None:
+                raise ValueError(
+                    "stable_keys are required when surface_masks are enabled."
+                )
+            tensor_surface_masks = torch.tensor(surface_masks, dtype=torch.float32)
+            tensor_current_surface_masks = (
+                torch.tensor(current_surface_masks, dtype=torch.float32)
+                if current_surface_masks is not None
+                else None
+            )
+            tensor_weights = torch.ones(total, dtype=torch.float32)
+            tensor_stable_keys = torch.tensor(stable_keys, dtype=torch.int64)
+            train_tensors = [
+                tensor_inputs[:split_idx],
+                tensor_embeddings[:split_idx],
+                tensor_targets[:split_idx],
+                tensor_weights[:split_idx],
+                tensor_stable_keys[:split_idx],
+                tensor_surface_masks[:split_idx],
+            ]
+            if tensor_current_surface_masks is not None:
+                train_tensors.append(tensor_current_surface_masks[:split_idx])
+            train_ds = TensorDataset(*train_tensors)
         val_ds = None
         if split_idx < total:
-            val_ds = TensorDataset(
-                tensor_inputs[split_idx:],
-                tensor_embeddings[split_idx:],
-                tensor_targets[split_idx:],
-            )
+            if surface_masks is None:
+                val_ds = TensorDataset(
+                    tensor_inputs[split_idx:],
+                    tensor_embeddings[split_idx:],
+                    tensor_targets[split_idx:],
+                )
+            else:
+                val_tensors = [
+                    tensor_inputs[split_idx:],
+                    tensor_embeddings[split_idx:],
+                    tensor_targets[split_idx:],
+                    tensor_weights[split_idx:],
+                    tensor_stable_keys[split_idx:],
+                    tensor_surface_masks[split_idx:],
+                ]
+                if tensor_current_surface_masks is not None:
+                    val_tensors.append(tensor_current_surface_masks[split_idx:])
+                val_ds = TensorDataset(*val_tensors)
     else:
         tensor_target_counts = torch.tensor(target_counts, dtype=torch.long)
         tensor_target_masks = torch.tensor(target_masks, dtype=torch.float32)
@@ -98,6 +158,7 @@ def _build_data_loaders(
         batch_size=min(int(batch_size), max(1, len(train_ds))),
         shuffle=True,
         num_workers=int(num_workers),
+        generator=seeded_torch_generator(seed),
     )
     val_loader = None
     if val_ds is not None and len(val_ds) > 0:
@@ -108,31 +169,68 @@ def _build_data_loaders(
             num_workers=int(num_workers),
         )
 
-    return train_loader, val_loader, len(train_ds), 0 if val_ds is None else len(val_ds), train_timestamps, val_timestamps
+    return (
+        train_loader,
+        val_loader,
+        len(train_ds),
+        0 if val_ds is None else len(val_ds),
+        train_timestamps,
+        val_timestamps,
+    )
 
 
 def create_vol_surface_xlsx_dataloaders(config: Config) -> VolSurfaceXlsxBundle:
     """Create train/validation dataloaders from merged vol-surface xlsx rows."""
 
-    samples = load_vol_surface_samples(config)
+    samples, support_diagnostics = load_vol_surface_samples_with_diagnostics(config)
     strike_grid = samples[0].strike_grid.copy()
     maturity_grid_days = samples[0].maturity_grid_days.copy()
     current_surfaces = [sample.current_surface for sample in samples]
     target_surfaces = [sample.target_surface for sample in samples]
     embeddings = [sample.text_embedding for sample in samples]
     timestamps = [sample.timestamp for sample in samples]
+    surface_masks = None
+    current_surface_masks = None
+    stable_keys = None
+    if bool(support_diagnostics["support_mask_applied"]):
+        surface_masks = np.stack(
+            [sample.support_mask for sample in samples], axis=0
+        ).astype(np.float32)
+        current_surface_masks = np.stack(
+            [sample.current_support_mask for sample in samples], axis=0
+        ).astype(np.float32)
+        stable_keys = np.asarray(
+            [
+                stable_key_to_int64(sample.stable_sample_key or sample.sample_id)
+                for sample in samples
+            ],
+            dtype=np.int64,
+        )
 
-    aligned_embeddings, embedding_dim = _align_embeddings(embeddings, fallback_dim=config.embedding_dim)
+    aligned_embeddings, embedding_dim = _align_embeddings(
+        embeddings, fallback_dim=config.embedding_dim
+    )
     current_array = np.stack(current_surfaces, axis=0).astype(np.float32)
     target_array = np.stack(target_surfaces, axis=0).astype(np.float32)
-    train_loader, val_loader, train_samples, val_samples, train_timestamps, val_timestamps = _build_data_loaders(
+    (
+        train_loader,
+        val_loader,
+        train_samples,
+        val_samples,
+        train_timestamps,
+        val_timestamps,
+    ) = _build_data_loaders(
         current_array,
         aligned_embeddings,
         target_array,
         batch_size=config.batch_size,
         num_workers=config.num_workers,
         train_ratio=config.train_ratio,
+        surface_masks=surface_masks,
+        current_surface_masks=current_surface_masks,
+        stable_keys=stable_keys,
         timestamps=timestamps,
+        seed=config.seed,
     )
 
     return VolSurfaceXlsxBundle(
@@ -149,10 +247,15 @@ def create_vol_surface_xlsx_dataloaders(config: Config) -> VolSurfaceXlsxBundle:
         all_items=list(samples),
         train_items=list(samples[:train_samples]),
         val_items=list(samples[train_samples:]),
+        uses_support_masks=bool(support_diagnostics["support_mask_applied"]),
+        uses_current_support_masks=bool(support_diagnostics["support_mask_applied"]),
+        split_metadata={"surface_support": support_diagnostics},
     )
 
 
-def _fit_svi_normalization(train_samples: Sequence[SviPairedSample], max_slices: int) -> Dict[str, Any]:
+def _fit_svi_normalization(
+    train_samples: Sequence[SviPairedSample], max_slices: int
+) -> Dict[str, Any]:
     valid_rows: List[np.ndarray] = []
     for sample in train_samples:
         current_matrix, current_mask, _ = _build_svi_matrix_from_params(
@@ -165,12 +268,17 @@ def _fit_svi_normalization(train_samples: Sequence[SviPairedSample], max_slices:
             max_slices,
             sample_label=f"{sample.sample_id}:future",
         )
-        for matrix, mask in ((current_matrix, current_mask), (future_matrix, future_mask)):
+        for matrix, mask in (
+            (current_matrix, current_mask),
+            (future_matrix, future_mask),
+        ):
             mask_bool = mask.astype(bool)
             if mask_bool.any():
                 valid_rows.append(matrix[mask_bool])
     if not valid_rows:
-        raise ValueError("Cannot fit SVI normalization stats without valid train slices.")
+        raise ValueError(
+            "Cannot fit SVI normalization stats without valid train slices."
+        )
     stacked = np.concatenate(valid_rows, axis=0)
     mean = stacked.mean(axis=0).astype(np.float32)
     std = stacked.std(axis=0).astype(np.float32)
@@ -182,7 +290,9 @@ def _fit_svi_normalization(train_samples: Sequence[SviPairedSample], max_slices:
     }
 
 
-def _normalize_svi_matrix(matrix: np.ndarray, mask: np.ndarray, stats: Dict[str, Any]) -> np.ndarray:
+def _normalize_svi_matrix(
+    matrix: np.ndarray, mask: np.ndarray, stats: Dict[str, Any]
+) -> np.ndarray:
     mean = np.asarray(stats["mean"], dtype=np.float32)
     std = np.asarray(stats["std"], dtype=np.float32)
     normalized = np.zeros_like(matrix, dtype=np.float32)
@@ -196,7 +306,9 @@ def create_svi_xlsx_dataloaders(config: Config) -> SviXlsxBundle:
 
     paired_samples = load_svi_paired_samples(config)
     split_idx = _split_index(len(paired_samples), config.train_ratio)
-    normalization_stats = _fit_svi_normalization(paired_samples[:split_idx], int(config.max_slices))
+    normalization_stats = _fit_svi_normalization(
+        paired_samples[:split_idx], int(config.max_slices)
+    )
 
     current_vectors: List[np.ndarray] = []
     text_vectors: List[np.ndarray] = []
@@ -216,13 +328,19 @@ def create_svi_xlsx_dataloaders(config: Config) -> SviXlsxBundle:
             int(config.max_slices),
             sample_label=f"{sample.sample_id}:future",
         )
-        normalized_current = _normalize_svi_matrix(current_matrix, current_mask, normalization_stats)
-        normalized_future = _normalize_svi_matrix(future_matrix, future_mask, normalization_stats)
+        normalized_current = _normalize_svi_matrix(
+            current_matrix, current_mask, normalization_stats
+        )
+        normalized_future = _normalize_svi_matrix(
+            future_matrix, future_mask, normalization_stats
+        )
         current_vector = np.concatenate(
             [
                 normalized_current.reshape(-1),
                 current_mask.astype(np.float32),
-                np.asarray([float(current_count) / float(config.max_slices)], dtype=np.float32),
+                np.asarray(
+                    [float(current_count) / float(config.max_slices)], dtype=np.float32
+                ),
             ],
             axis=0,
         )
@@ -233,13 +351,22 @@ def create_svi_xlsx_dataloaders(config: Config) -> SviXlsxBundle:
         future_counts.append(int(future_count) - 1)
         timestamps.append(sample.timestamp)
 
-    aligned_embeddings, embedding_dim = _align_embeddings(text_vectors, fallback_dim=config.embedding_dim)
+    aligned_embeddings, embedding_dim = _align_embeddings(
+        text_vectors, fallback_dim=config.embedding_dim
+    )
     current_array = np.stack(current_vectors, axis=0).astype(np.float32)
     future_array = np.stack(future_vectors, axis=0).astype(np.float32)
     future_mask_array = np.stack(future_masks, axis=0).astype(np.float32)
     future_count_array = np.asarray(future_counts, dtype=np.int64)
 
-    train_loader, val_loader, train_samples, val_samples, train_timestamps, val_timestamps = _build_data_loaders(
+    (
+        train_loader,
+        val_loader,
+        train_samples,
+        val_samples,
+        train_timestamps,
+        val_timestamps,
+    ) = _build_data_loaders(
         current_array,
         aligned_embeddings,
         future_array,
@@ -249,6 +376,7 @@ def create_svi_xlsx_dataloaders(config: Config) -> SviXlsxBundle:
         target_counts=future_count_array,
         target_masks=future_mask_array,
         timestamps=timestamps,
+        seed=config.seed,
     )
 
     return SviXlsxBundle(

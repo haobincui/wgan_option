@@ -1,0 +1,32 @@
+# Frozen retrospective Q4 evaluation for the completed five-seed Text128 run.
+film_unet_text128_c32_epoch240_5seed_q4:
+  schema_version: 1
+  experiment_kind: film_unet_mask_coords_text128_c32_epoch240_5seed_q4_v1
+  confirmation_label: retrospective_frozen_exploratory
+  training_root: outputs/experiments/rq3_news_first_vol_film_unet_text128_c32_epoch240_5seed_exact_ttm_v1
+  training_registry_sha256: 70375e13a32d48cfeb51dae9a75fee4cbc0b8a4d5786b9ca55a7c8d893b18fba
+  training_summary_sha256: dd2899b92ea908057cd832c6cb6afa0992b130bae4eb3f707c9ee3b0db97118b
+  seeds: [42, 202, 404, 382624741, 1607127774]
+  checkpoint_role: best_learned
+  q4_mc_samples: 64
+  bootstrap_iterations: 10000
+  bootstrap_seed: 20260828
+
+  q4_panel:
+    source_workbook: outputs/experiments/rq3_news_first_vol_generator_film_critic_factorial_exact_ttm_seed42_v1/data_windows/q4/common_05m_q4.xlsx
+    source_workbook_sha256: 90a4b4616eb20dde5367faf9f252110913eff825f7dd7add9751569f2fbd46fd
+    source_lineage_manifest: outputs/experiments/rq3_news_first_vol_generator_film_critic_factorial_exact_ttm_seed42_v1/data_windows/q4/q4_window_manifest.json
+    source_lineage_manifest_sha256: 22b16fdeb855eabf436c10a7c9f70f840fca81d0db07a0dbda630ba2d955f176
+    sheet_name: gan_input_ready
+    start_utc_inclusive: "2023-10-01T00:00:00Z"
+    end_utc_exclusive: "2024-01-01T00:00:00Z"
+    tolerance_minutes: 5
+    expected_counts: {rows: 167, pairs: 143, sessions: 45}
+    support_mask_mode: raw_joint
+    surface_grid_profile: exact_ttm_16x16_v1
+    surface_grid_sha256: 7b72f2d3d12a55999415351ba071f8d87863ed57445f1bbf03543e39f9f186b8
+
+  runtime:
+    device: cuda:0
+    sample_batch_size: 32
+    draw_batch_size: 64

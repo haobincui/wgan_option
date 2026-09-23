@@ -167,15 +167,35 @@ uncertainty, litigious, constraining, and superfluous.
 
 **How to use it in this thesis**
 
-Use this as the main citation if a dictionary sentiment baseline is restored or
-reported separately. The local reference file is:
+Use this as the main citation for the separately generated dictionary-sentiment
+baseline. The local reference file is:
 
 ```text
 data/reference/Loughran-McDonald_MasterDictionary_1993-2025.csv
 ```
 
-This baseline should be described as a finance-domain dictionary sentiment
-representation, not as the current `llm_sentiment` pipeline.
+The standalone builder is `python -m scripts.lm_sentiment.main`.  It preserves
+the original LM negative-word share,
+
+```text
+negative_count / LM-valid_word_count
+```
+
+and also reports the signed derived net-tone score
+
+```text
+(negation-adjusted_positive_count - negative_count) / LM-valid_word_count.
+```
+
+Pair scores pool category and valid-word counts across deduplicated articles
+before taking ratios.  This avoids giving a very short article the same weight
+as a long article.  The signed score must be described as an LM-dictionary-based
+derived net tone, not as the only score defined by Loughran and McDonald (2011).
+This is a finance-domain dictionary sentiment representation, not the current
+`llm_sentiment` pipeline and not the corpus-derived n-gram BoW baseline.
+The positive-minus-negative count scaled by total content words is also used as
+an LM-dictionary net-tone measure by Qiu, Magnan, and Zhang (2023,
+https://doi.org/10.1007/s11156-022-01098-0).
 
 **Do not claim**
 
@@ -391,8 +411,8 @@ For thesis wording, use:
 - `n-gram frequency BoW` for the BoW baseline
 - `Sun-style ChatGPT sentiment` for the current `llm_sentiment` baseline
 - `LLM embedding` for the OpenAI embedding baseline
-- `Loughran-McDonald sentiment` only if a separate dictionary baseline is
-  restored or reported from older artifacts
+- `Loughran-McDonald sentiment` for the separate `lm_sentiment_v1` feature
+  artifact; do not apply that label to the existing BoW or ChatGPT arms
 
 ## 7. Caveats
 

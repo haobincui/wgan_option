@@ -1,0 +1,72 @@
+schema_version: 1
+
+experiment:
+  kind: rq12_news_first_vol_text_10seed_composite_lr2p5e5_v1
+  interpretation: retrospective_rolling_development
+  output_root: outputs/experiments/rq12_news_first_vol_text_10seed_composite_lr2p5e5_exact_ttm_rolling_v1
+
+execution:
+  mode: sequential_children
+  resume_children: true
+
+children:
+  film_text:
+    module: scripts.rq3.news_first_vol_film_unet_text_10seed_lr2p5e5
+    config: configs/rq3/news_first_vol_film_unet_text_10seed_lr2p5e5.yaml
+    output_root: outputs/experiments/rq12_news_first_vol_film_unet_text128_c32_nolp_direct_text_10seed_lr2p5e5_exact_ttm_rolling_v1
+    source_arms: [lp_matched, lp_shuffle, bow, sentiment]
+    arms: [lp_matched, lp_shuffle, bow, sentiment]
+    arm_aliases: {}
+    expected_training_jobs: 160
+    expected_pair_metric_rows: 20000
+  pure_cnn_no_text:
+    module: scripts.rq3.news_first_vol_cnn_unet_pure_no_text_10seed
+    config: configs/rq3/news_first_vol_cnn_unet_pure_no_text_10seed.yaml
+    output_root: outputs/experiments/rq12_news_first_vol_cnn_unet_c32_nolp_pure_no_text_10seed_exact_ttm_rolling_v1
+    source_arms: [pure_cnn_no_text]
+    arms: [no_text]
+    arm_aliases:
+      pure_cnn_no_text: no_text
+    expected_training_jobs: 40
+    expected_pair_metric_rows: 5000
+
+matrix:
+  tolerance_minutes: 5
+  seeds:
+    - 42
+    - 202
+    - 404
+    - 382624741
+    - 1607127774
+    - 1662128673
+    - 2041145538
+    - 2014889368
+    - 1343862330
+    - 779214671
+  folds: [f1_2023q1, f2_2023q2, f3_2023q3, f4_2023q4]
+  arms: [lp_matched, no_text, lp_shuffle, bow, sentiment]
+  expected_pairs_by_fold:
+    f1_2023q1: 110
+    f2_2023q2: 112
+    f3_2023q3: 135
+    f4_2023q4: 143
+  expected_sessions_by_fold:
+    f1_2023q1: 34
+    f2_2023q2: 36
+    f3_2023q3: 33
+    f4_2023q4: 45
+  expected_training_jobs: 200
+  expected_pair_metric_rows: 25000
+
+analysis:
+  focal_arm: lp_matched
+  reference_arms: [no_text, lp_shuffle, bow, sentiment]
+  run_bootstrap: false
+  bootstrap_replicates: 10000
+  bootstrap_seed: 20260904
+  holm_alpha: 0.05
+  minimum_nonworse_seeds: 7
+  minimum_nonworse_folds: 3
+  require_shared_noise_bank: true
+  report_best_observed_seed: true
+  best_observed_seed_interpretation: descriptive_oracle_not_model_selection

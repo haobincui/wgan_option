@@ -7,12 +7,27 @@ from typing import Iterable, Mapping
 import numpy as np
 
 
-def mean_abs_error(predicted_surface, target_surface) -> float:
-    """Return the mean absolute difference between two surfaces."""
+def mean_abs_error(predicted_surface, target_surface, support_mask=None) -> float:
+    """Return mean absolute error, optionally restricted to supported cells."""
 
     predicted = np.asarray(predicted_surface, dtype=np.float32)
     target = np.asarray(target_surface, dtype=np.float32)
-    return float(np.mean(np.abs(predicted - target)))
+    absolute_error = np.abs(predicted - target)
+    if support_mask is None:
+        return float(np.mean(absolute_error))
+    mask = np.asarray(support_mask, dtype=bool)
+    if mask.ndim == absolute_error.ndim + 1 and mask.shape[0] == 1:
+        mask = mask[0]
+    try:
+        mask = np.broadcast_to(mask, absolute_error.shape)
+    except ValueError as exc:
+        raise ValueError(
+            f"support_mask shape {mask.shape} cannot cover error shape "
+            f"{absolute_error.shape}"
+        ) from exc
+    if not bool(mask.any()):
+        raise ValueError("support_mask must contain at least one supported cell.")
+    return float(np.mean(absolute_error[mask]))
 
 
 def summarize_baseline_aware_metrics(

@@ -8,7 +8,6 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
-import numpy as np
 
 
 MetricRow = Mapping[str, float | int]
@@ -35,8 +34,8 @@ def plot_training_curves(
 ) -> Path:
     """Save a multi-panel training-curve figure from epoch metric rows.
 
-    Missing metric names are skipped so the helper works for train-only runs
-    and for training paths with different metric schemas.
+    Missing metric points are skipped so a validation-only epoch-zero row does
+    not hide the training curves that begin at epoch one.
     """
     if not metrics_rows:
         raise ValueError("metrics_rows must not be empty.")
@@ -52,10 +51,15 @@ def plot_training_curves(
     for ax, (group_title, metric_names) in zip(axes, metric_groups):
         plotted = False
         for metric_name in metric_names:
-            if not all(metric_name in row for row in metrics_rows):
+            points = [
+                (epoch, float(row[metric_name]))
+                for epoch, row in zip(epochs, metrics_rows)
+                if metric_name in row
+            ]
+            if not points:
                 continue
-            values = [float(row[metric_name]) for row in metrics_rows]
-            ax.plot(epochs, values, linewidth=2.0, label=metric_name)
+            metric_epochs, values = zip(*points)
+            ax.plot(metric_epochs, values, linewidth=2.0, label=metric_name)
             plotted = True
 
         ax.set_title(group_title)

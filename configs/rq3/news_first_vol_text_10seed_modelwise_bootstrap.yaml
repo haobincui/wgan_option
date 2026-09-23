@@ -1,0 +1,54 @@
+schema_version: 1
+experiment_kind: news_first_vol_text_10seed_modelwise_persistence_bootstrap_v1
+interpretation: retrospective_rolling_development
+
+source:
+  root: outputs/experiments/rq12_news_first_vol_text_10seed_composite_lr2p5e5_descriptive_no_bootstrap_exact_ttm_rolling_v1
+  pair_metrics: analysis/text_10seed_composite_pair_metrics.csv
+  pair_metrics_sha256: d832b3b057ea440845bdd97312744bf5f75e706c80c2057a44d8f88e64f38754
+  qa: text_10seed_composite_qa.json
+  qa_sha256: d9e7aa5d3c78c5ed1895c3b9b3f91747c635e4831837128716f189703e65707d
+  analysis_manifest: analysis/text_10seed_composite_analysis_manifest.json
+  analysis_manifest_sha256: f9a80bd74edb2037f05119fccf9a2146e1850fecbd64d8bb9bf2f529e3de0584
+  input_manifest: analysis/text_10seed_composite_input_manifest.json
+  input_manifest_sha256: 392869ac394db937e6d70cbe565e374e71de61d2654db4764db22cf68a1cd44e
+  output_hashes: text_10seed_composite_output_hashes.csv
+  output_hashes_sha256: 601be209d0238367a839679e6c283a9680c4d616d5af0dae124e3159e6dc5a4d
+  resolved_config: text_10seed_composite_resolved_config.yaml
+  resolved_config_sha256: 16afd5af543ce867eb0d9d36b7d213c64208cb63604ba1b69993161aeac1ca48
+
+matrix:
+  tolerance_minutes: 5
+  arms: [lp_matched, lp_shuffle, no_text, bow, sentiment]
+  seeds: [42, 202, 404, 382624741, 1607127774, 1662128673, 2041145538, 2014889368, 1343862330, 779214671]
+  folds: [f1_2023q1, f2_2023q2, f3_2023q3, f4_2023q4]
+  expected_pair_rows: 25000
+  expected_pairs_per_arm: 5000
+  expected_pairs_by_fold:
+    f1_2023q1: 110
+    f2_2023q2: 112
+    f3_2023q3: 135
+    f4_2023q4: 143
+  expected_sessions_by_fold:
+    f1_2023q1: 34
+    f2_2023q2: 36
+    f3_2023q3: 33
+    f4_2023q4: 45
+
+bootstrap:
+  iterations_per_arm: 10000
+  chunks_per_arm: 10
+  draws_per_chunk: 1000
+  max_workers: 50
+  multiprocessing_start_method: spawn
+  shared_resampling_schedule: true
+  seed_entropy: [2026, 9, 1, 10000]
+  confidence_level: 0.95
+  holm_alpha: 0.05
+  minimum_nonworse_seeds: 7
+  minimum_nonworse_folds: 3
+  resampling_method: seed_then_fold_then_paired_cme_session_cluster_recompute_cell_means_v1
+  p_value_interpretation: approximate_bootstrap_sign_tail_probability
+
+output:
+  default_root: outputs/experiments/rq12_news_first_vol_text_10seed_modelwise_bootstrap10000_lr2p5e5_exact_ttm_rolling_v1

@@ -1,0 +1,192 @@
+experiment:
+  schema_version: 1
+  experiment_kind: rq123_news_first_vol_film_unet_text128_c32_nolp_10seed_parent30_cont240_rolling_v1
+  interpretation: retrospective_rolling_development
+  output_root: outputs/experiments/rq123_news_first_vol_film_unet_text128_c32_nolp_10seed_parent30_cont240_exact_ttm_rolling_v1
+
+data:
+  root: data/processed/rq3/news_first_vol_surfaces_q097_103_ttm01_38_exact_ttm_v1
+  workbook_template: tolerance_{tolerance02}m/merged_vol.xlsx
+  sheet_name: gan_input_ready
+  news_master_path: data/processed/rq3/news_first_vol_surfaces_q097_103_ttm01_38_exact_ttm_v1/news_master.csv.gz
+  sentiment_workbook_path: data/processed/text_features/rq2/20260625-075653/llm_sentiment_features.xlsx
+  scheduled_event_paths:
+    - data/reference/rq3_scheduled_macro_events_2022.csv
+    - data/reference/rq3_scheduled_macro_events_2023.csv
+  market_jump_root: outputs/rq3/atm_skew_jumps_20260810_final
+  market_jump_candidate_pairs: outputs/rq3/atm_skew_jumps_20260810_final/candidate_pairs.csv
+  market_jump_candidate_episodes: outputs/rq3/atm_skew_jumps_20260810_final/candidate_episodes.csv
+  market_jump_validation_summary: outputs/rq3/atm_skew_jumps_20260810_final/validation_summary.json
+  tolerances_minutes: [5, 30]
+  surface_sheet_name: gan_input_ready
+  embedding_dimension: 1024
+  pair_sample_mode: pair_collapsed_v1
+  article_deduplication_mode: article_id_then_sample_id_v1
+  support_mask_mode: raw_joint
+  minimum_joint_support_cells: 1
+  surface_grid_profile: exact_ttm_16x16_v1
+  strike_grid: [0.970, 0.974, 0.978, 0.982, 0.986, 0.990, 0.994, 0.998,
+                1.002, 1.006, 1.010, 1.014, 1.018, 1.022, 1.026, 1.030]
+  maturity_days_grid: [1, 2, 3, 6, 7, 8, 9, 10, 14, 15, 17, 21, 26, 30, 35, 38]
+
+folds:
+  - id: f1_2023q1
+    train_end_utc: "2022-10-01T00:00:00Z"
+    validation_start_utc: "2022-10-01T00:00:00Z"
+    validation_end_utc: "2023-01-01T00:00:00Z"
+    test_start_utc: "2023-01-01T00:00:00Z"
+    test_end_utc: "2023-04-01T00:00:00Z"
+  - id: f2_2023q2
+    train_end_utc: "2023-01-01T00:00:00Z"
+    validation_start_utc: "2023-01-01T00:00:00Z"
+    validation_end_utc: "2023-04-01T00:00:00Z"
+    test_start_utc: "2023-04-01T00:00:00Z"
+    test_end_utc: "2023-07-01T00:00:00Z"
+  - id: f3_2023q3
+    train_end_utc: "2023-04-01T00:00:00Z"
+    validation_start_utc: "2023-04-01T00:00:00Z"
+    validation_end_utc: "2023-07-01T00:00:00Z"
+    test_start_utc: "2023-07-01T00:00:00Z"
+    test_end_utc: "2023-10-01T00:00:00Z"
+  - id: f4_2023q4
+    train_end_utc: "2023-07-01T00:00:00Z"
+    validation_start_utc: "2023-07-01T00:00:00Z"
+    validation_end_utc: "2023-10-01T00:00:00Z"
+    test_start_utc: "2023-10-01T00:00:00Z"
+    test_end_utc: "2024-01-01T00:00:00Z"
+
+expected_pair_session_counts:
+  5:
+    f1_2023q1: {train_pairs: 382, train_sessions: 93, validation_pairs: 144, validation_sessions: 40, test_pairs: 110, test_sessions: 34}
+    f2_2023q2: {train_pairs: 526, train_sessions: 133, validation_pairs: 110, validation_sessions: 34, test_pairs: 112, test_sessions: 36}
+    f3_2023q3: {train_pairs: 636, train_sessions: 167, validation_pairs: 112, validation_sessions: 36, test_pairs: 135, test_sessions: 33}
+    f4_2023q4: {train_pairs: 748, train_sessions: 203, validation_pairs: 135, validation_sessions: 33, test_pairs: 143, test_sessions: 45}
+  30:
+    f1_2023q1: {train_pairs: 551, train_sessions: 109, validation_pairs: 203, validation_sessions: 48, test_pairs: 162, test_sessions: 41}
+    f2_2023q2: {train_pairs: 754, train_sessions: 157, validation_pairs: 162, validation_sessions: 41, test_pairs: 167, test_sessions: 39}
+    f3_2023q3: {train_pairs: 916, train_sessions: 198, validation_pairs: 167, validation_sessions: 39, test_pairs: 186, test_sessions: 41}
+    f4_2023q4: {train_pairs: 1083, train_sessions: 237, validation_pairs: 186, validation_sessions: 41, test_pairs: 206, test_sessions: 51}
+
+matrix:
+  seeds: [42, 202, 404, 382624741, 1607127774, 1662128673, 2041145538, 2014889368, 1343862330, 779214671]
+  tolerances_minutes: [5, 30]
+  parent_arms: [parent_current_only]
+  continuation_arms: [continuation_no_text]
+  text_arms_5m: [lp_matched, lp_shuffle, bow, sentiment]
+  text_arms_30m: [lp_matched, lp_shuffle]
+  expected_training_jobs: 400
+  expected_prediction_cells: 400
+  shuffle_seed: 20260822
+
+text_representations:
+  parent_current_only: {mode: current_only, normalization: zero_vector_v1}
+  continuation_no_text: {mode: current_only, normalization: zero_vector_v1}
+  lp_matched: {mode: lp_pair_mean_l2_v1, source_dimension: 1024}
+  lp_shuffle: {mode: lp_pair_mean_l2_v1, source_dimension: 1024, pair_mapping: split_local_derangement_v1}
+  bow: {mode: bow_train_pair_vocab_log1p_l2_v1, dimension: 1024, ngram_range: [1, 2]}
+  sentiment: {mode: sentiment_pair_mean_train_zscore_pad_v1, source_dimension: 3, output_dimension: 1024}
+
+model:
+  family: wgan
+  capacity_profile: c32
+  generator_conditioning_mode: film_unet_mask_coords_v1
+  critic_conditioning_mode: lp_disabled_same_shape_v1
+  critic_normalization_mode: legacy_instance_norm_v1
+  generator_noise_mode: gaussian
+  generator_current_input_mode: current_support_masked
+  residual_output_mode: identity_softplus_residual
+  embedding_dim: 1024
+  noise_dim: 32
+  channels: 1
+  gen_base_channels: 32
+  gen_res_blocks: 0
+  gen_text_hidden_dim: 256
+  gen_text_out_dim: 128
+  gen_hidden_dim: 1024
+  disc_base_channels: 32
+  disc_res_blocks: 0
+  disc_text_hidden_dim: 128
+  disc_hidden_dim: 786
+  expected_generator_parameters: 827745
+  expected_critic_parameters: 729157
+  expected_total_parameters: 1556902
+
+training:
+  initial_learning_rate: 5.0e-7
+  generator_learning_rate: 5.0e-7
+  discriminator_learning_rate: 5.0e-7
+  scheduler_min_lr: 5.0e-8
+  reduce_lr_factor: 0.5
+  reduce_lr_patience: 3
+  lr_warmup_epochs: 0
+  batch_size: 16
+  discriminator_steps: 5
+  beta_1: 0.5
+  beta_2: 0.9
+  lambda_gp: 10.0
+  lambda_recon: 10.0
+  lambda_calendar: 2.0
+  lambda_butterfly: 2.0
+  lambda_smooth: 0.1
+  lambda_delta_shrink: 0.0
+  constraint_warmup_epochs: 0
+  num_epochs: 240
+  parent_num_epochs: 30
+  best_checkpoint_metric: val_hybrid_score
+  baseline_penalty_weight: 2.0
+  early_stopping_patience: 20
+  early_stopping_min_epochs: 30
+  parent_early_stopping_min_epochs: 30
+  early_stopping_min_delta: 0.0
+  label_reliability_mode: none
+  validation_mc_samples: 16
+  prediction_mc_samples: 64
+  parent_continuation_mode: full_state_dynamic_validation_v1
+  branch_continuation_mode: full_state_frozen_lr_replay_v1
+  full_state_schema: news_first_wgan_full_training_state_v1
+  full_state_phase: end_of_epoch_after_scheduler_step
+
+analysis:
+  bootstrap_replicates: 10000
+  bootstrap_seed: 20260822
+  confidence_level: 0.95
+  minimum_nonworse_seeds: 7
+  minimum_nonworse_folds: 3
+  rq1_primary:
+    - {name: lp_vs_continuation, focal_arm: lp_matched, reference_arm: continuation_no_text}
+    - {name: lp_vs_shuffle, focal_arm: lp_matched, reference_arm: lp_shuffle}
+  rq2_primary:
+    - {name: lp_vs_bow, focal_arm: lp_matched, reference_arm: bow}
+    - {name: lp_vs_sentiment, focal_arm: lp_matched, reference_arm: sentiment}
+  scheduled:
+    primary_window_minutes: [0, 30]
+    robustness_window_minutes: [-10, 20]
+    descriptive_window_minutes: [0, 5]
+    ordinary_minimum_distance_minutes: 60
+    clock_caliper_minutes: 15
+    minimum_primary_pairs: 30
+    minimum_primary_releases: 20
+    minimum_primary_sessions: 10
+  market_jump:
+    inferential_tier: all
+    descriptive_tiers: [primary, high]
+    minimum_pairs: 30
+    minimum_sessions: 10
+
+runtime:
+  python_executable: /home/haobin_cui/.conda/envs/py312/bin/python
+  gpu_ids: [0, 1]
+  gpu_numa_nodes: {0: 0, 1: 1}
+  benchmark_workers_per_gpu: 18
+  fallback_workers_per_gpu: 12
+  formal_workers_per_gpu: null
+  cpu_threads_per_job: 1
+  use_numa_binding: false
+  numactl_executable: numactl
+  nvidia_smi_executable: nvidia-smi
+  resource_sample_interval_seconds: 2
+  preflight_max_peak_gpu_memory_gib: 20.0
+  preflight_max_host_ram_fraction: 0.85
+  minimum_free_disk_after_projected_bytes_gib: 30
+  disk_projection_safety_factor: 1.30
+  benchmark_jobs: 36

@@ -1,0 +1,93 @@
+news_first_vol_training:
+  datasets:
+    root: data/processed/rq3/news_first_vol_surfaces_q097_103_ttm07_38_v1
+    workbook_template: tolerance_{tolerance02}m/merged_vol.xlsx
+    tolerances_minutes: [5, 10, 15, 30]
+    common_evaluation_tolerance_minutes: 5
+    sheet_name: gan_input_ready
+    text_embedding_mode: lp
+    seed: 42
+    support_mask_mode: raw_joint
+    text_ablation_modes: [current_only, real_text]
+    text_shuffle_seed: 42
+
+  split:
+    train_end_utc: "2023-07-01T00:00:00Z"
+    validation_end_utc: "2023-10-01T00:00:00Z"
+    validation_mc_samples: 16
+
+  lr_sweep:
+    enabled: true
+    capacity_profile: large
+    capacity_profile_source_config: configs/rq3/news_first_vol_capacity_sweep.yaml
+    profiles:
+      lr_1e_06: 1.0e-6
+      lr_3e_06: 3.0e-6
+      lr_1e_05: 1.0e-5
+      lr_3e_05: 3.0e-5
+      lr_1e_04: 1.0e-4
+    screen_tolerances_minutes: [5, 30]
+    confirm_tolerances_minutes: [10, 15]
+    text_ablation_modes: [current_only, real_text]
+    selection:
+      selection_panel: common_validation_05m
+      screen_selection_mode: current_only
+      selection_rule: one_standard_error_lower_lr
+      minimum_mean_improvement_fraction: 0.005
+      bootstrap_clusters: 10000
+
+  models:
+    regression:
+      trainer_command: vol-regression-xlsx
+      training:
+        train_ratio: 0.8
+        channels: 1
+        embedding_dim: 1024
+        noise_dim: 32
+        gen_base_channels: 12
+        gen_res_blocks: 0
+        gen_text_hidden_dim: 96
+        gen_text_out_dim: 48
+        gen_hidden_dim: 384
+        disc_base_channels: 12
+        disc_res_blocks: 0
+        disc_text_hidden_dim: 48
+        disc_hidden_dim: 288
+        residual_output_mode: identity_softplus_residual
+        learning_rate: 1.0e-4
+        use_reduce_lr_on_plateau: true
+        reduce_lr_factor: 0.5
+        reduce_lr_patience: 3
+        reduce_lr_min_lr: 1.0e-5
+        num_epochs: 100
+        batch_size: 16
+        beta_1: 0.5
+        beta_2: 0.9
+        lambda_recon: 10.0
+        lambda_calendar: 2.0
+        lambda_butterfly: 2.0
+        lambda_smooth: 0.1
+        lambda_delta_shrink: 0.0
+        use_calendar_constraint: true
+        use_butterfly_constraint: true
+        use_smooth_constraint: true
+        constraint_warmup_epochs: 0
+        best_checkpoint_metric: val_hybrid_score
+        evaluate_initial_checkpoint: true
+        baseline_penalty_weight: 2.0
+        use_early_stopping: true
+        early_stopping_patience: 12
+        early_stopping_min_epochs: 30
+        early_stopping_min_delta: 0.0
+        save_every: 1000000
+
+  runtime:
+    python_executable: /home/haobin_cui/.conda/envs/py312/bin/python
+    gpu_ids: [0, 1]
+    gpu_numa_nodes: {0: 0, 1: 1}
+    slots_per_gpu: 2
+    cpu_threads_per_job: 8
+    use_numa_binding: true
+    numactl_executable: numactl
+    nvidia_smi_executable: nvidia-smi
+    resource_sample_interval_seconds: 2

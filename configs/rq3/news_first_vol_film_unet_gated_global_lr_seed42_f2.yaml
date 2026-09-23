@@ -1,0 +1,93 @@
+experiment:
+  schema_version: 1
+  experiment_kind: film_unet_gated_global_lr_seed42_f2_5m_probe_v1
+  interpretation: single_seed_mechanism_validation
+  output_root: outputs/experiments/rq3_news_first_vol_film_unet_gated_global_lr_seed42_f2_5m_v1
+
+source_probe:
+  root: outputs/experiments/rq3_news_first_vol_film_unet_text_signal_seed42_f2_5m_v1
+  input_manifest_path: outputs/experiments/rq3_news_first_vol_film_unet_text_signal_seed42_f2_5m_v1/inputs/probe_input_manifest.json
+  input_manifest_sha256: ce6ed4b3cd4013a8ddf63c2e60130ff1e1363f5b4cc61f6861db09aeb7baed87
+  resolved_config_path: outputs/experiments/rq3_news_first_vol_film_unet_text_signal_seed42_f2_5m_v1/contracts/resolved_config.json
+  resolved_config_sha256: 8f17f39ea3cfbf684390fafcd981abf06fca3787260f0db2876cbd8b23b63188
+  terminal_qa_path: outputs/experiments/rq3_news_first_vol_film_unet_text_signal_seed42_f2_5m_v1/qa/terminal_qa.json
+  terminal_qa_sha256: c483bace384377d93ff8276e1ac9a588db75e37f405571111e79ea4b6fe16c9c
+
+data_contract:
+  tolerance_minutes: 5
+  fold_id: f2_2023q2
+  seed: 42
+  train_pairs: 526
+  train_sessions: 133
+  validation_pairs: 110
+  validation_sessions: 34
+  allowed_partitions: [train, validation]
+  test_loader_count: 0
+  q3_q4_input_rows: 0
+
+model_contract:
+  generator_conditioning_mode: film_unet_mask_coords_v1
+  critic_conditioning_mode: lp_disabled_same_shape_v1
+  capacity_profile: c32_text128
+  factor_code: "1000"
+  spatial_rank: 0
+  baseline_generator_parameters: 827745
+  gated_generator_parameters: 827751
+  critic_parameters: 729157
+  gate_mode: direct_hard_clamped_per_site_v1
+  gate_sites: 6
+  gate_initial: 0.01
+  gate_minimum: 0.0
+  gate_maximum: 0.1
+  gate_freeze_epochs: 10
+
+training:
+  epochs: 60
+  text_encoder_learning_rate: 2.5e-6
+  early_stopping: false
+  scheduler: false
+  checkpoint_selection: final_epoch
+  shared_initialization: true
+  shared_batch_order: true
+  shared_noise_bank: true
+  jobs:
+    - job_id: control_1000_uniform_2p5e6
+      physical_gpu_id: 0
+      gate_enabled: false
+      optimizer_mode: uniform_adapter_lr_v1
+      adapter_learning_rate: 2.5e-6
+    - job_id: gated_global_proj_lr5e7
+      physical_gpu_id: 1
+      gate_enabled: true
+      optimizer_mode: separate_text_and_film_lr_v1
+      global_film_learning_rate: 5.0e-7
+      global_gate_learning_rate: 5.0e-7
+    - job_id: gated_global_proj_lr2p5e7
+      physical_gpu_id: 0
+      gate_enabled: true
+      optimizer_mode: separate_text_and_film_lr_v1
+      global_film_learning_rate: 2.5e-7
+      global_gate_learning_rate: 2.5e-7
+
+analysis:
+  bootstrap_replicates: 10000
+  confidence_level: 0.95
+  bootstrap_seed: 20260830
+  primary_metric: log_mae_matched_over_zero
+  secondary_metric: log_mae_matched_over_wrong
+  direct_reference_job: control_1000_uniform_2p5e6
+  minimum_log_mae_improvement: -5.0e-4
+  minimum_nonworse_sessions: 21
+  maximum_constraint_violation_increase_fraction: 0.01
+  interpretation: single_seed_mechanism_validation
+
+runtime:
+  python_executable: /home/haobin_cui/.conda/envs/py312/bin/python
+  gpu_ids: [0, 1]
+  workers_per_gpu: 2
+  cpu_threads_per_job: 1
+  poll_interval_seconds: 1
+  resource_sample_interval_seconds: 2
+  maximum_peak_gpu_memory_gib: 20.0
+  maximum_host_ram_fraction: 0.85
+  canary_epochs: 1

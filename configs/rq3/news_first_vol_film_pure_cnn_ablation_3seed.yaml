@@ -1,0 +1,79 @@
+# Isolated Q3-only architecture ablation for removing the duplicate Generator
+# LP bottleneck path and replacing the dense surface decoder with a FiLM U-Net.
+film_pure_cnn_ablation_sweep:
+  schema_version: 1
+  experiment_kind: film_pure_cnn_ablation_3seed_q3_development_v1
+  base_training_config: configs/rq3/news_first_vol_film_lp_critic_capacity_seed42_lr2p5e7.yaml
+  seeds: [42, 202, 404]
+  learning_rate: 5.0e-7
+  max_epochs: 30
+  lr_warmup_epochs: 0
+  early_stopping_min_epochs: 15
+  early_stopping_patience: 16
+  validation_mc_samples: 16
+
+  # Order is part of the frozen experiment contract. Each adjacent row changes
+  # one factor: duplicate LP concat, decoder, mask/coordinates, adapter width,
+  # then Critic conditioning.
+  arms:
+    baseline:
+      label: FiLM dense + text concat + LP critic
+      generator_conditioning_mode: film_conv_bottleneck_concat_v1
+      critic_conditioning_mode: lp_concat_v1
+      gen_text_hidden_dim: 256
+      gen_text_out_dim: 128
+    film_dense_no_text_concat:
+      label: FiLM dense, no bottleneck text concat + LP critic
+      generator_conditioning_mode: film_conv_no_bottleneck_concat_v1
+      critic_conditioning_mode: lp_concat_v1
+      gen_text_hidden_dim: 256
+      gen_text_out_dim: 128
+    film_unet_text128:
+      label: FiLM U-Net 1-channel, LP1024-256-128 + LP critic
+      generator_conditioning_mode: film_unet_v1
+      critic_conditioning_mode: lp_concat_v1
+      gen_text_hidden_dim: 256
+      gen_text_out_dim: 128
+    film_unet_mask_coords_text128:
+      label: FiLM U-Net mask+coordinates, LP1024-256-128 + LP critic
+      generator_conditioning_mode: film_unet_mask_coords_v1
+      critic_conditioning_mode: lp_concat_v1
+      gen_text_hidden_dim: 256
+      gen_text_out_dim: 128
+    film_unet_mask_coords_text64:
+      label: FiLM U-Net mask+coordinates, LP1024-64-64 + LP critic
+      generator_conditioning_mode: film_unet_mask_coords_v1
+      critic_conditioning_mode: lp_concat_v1
+      gen_text_hidden_dim: 64
+      gen_text_out_dim: 64
+    film_unet_mask_coords_text64_nolp:
+      label: FiLM U-Net mask+coordinates, LP1024-64-64 + NoLP same-shape critic
+      generator_conditioning_mode: film_unet_mask_coords_v1
+      critic_conditioning_mode: lp_disabled_same_shape_v1
+      gen_text_hidden_dim: 64
+      gen_text_out_dim: 64
+    film_unet_mask_coords_text64_projection:
+      label: FiLM U-Net mask+coordinates, LP1024-64-64 + projection critic
+      generator_conditioning_mode: film_unet_mask_coords_v1
+      critic_conditioning_mode: lp_projection_v1
+      gen_text_hidden_dim: 64
+      gen_text_out_dim: 64
+
+  # Legacy channel widths are fixed across every arm. gen_hidden_dim is used by
+  # the two dense arms and retained as inert lineage for the U-Net arms.
+  legacy_profile:
+    gen_base_channels: 32
+    gen_res_blocks: 0
+    gen_hidden_dim: 1024
+    disc_base_channels: 32
+    disc_res_blocks: 0
+    disc_text_hidden_dim: 128
+    disc_hidden_dim: 786
+
+  runtime:
+    python_executable: /home/haobin_cui/.conda/envs/py312/bin/python
+    gpu_ids: [0, 1]
+    workers_per_gpu: 11
+    cpu_threads_per_job: 1
+    poll_interval_seconds: 2
+    resource_sample_interval_seconds: 10

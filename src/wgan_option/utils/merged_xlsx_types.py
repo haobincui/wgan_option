@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -28,6 +28,15 @@ class VolSurfaceXlsxBundle:
     all_items: List["VolSurfaceSample"]
     train_items: List["VolSurfaceSample"]
     val_items: List["VolSurfaceSample"]
+    test_loader: Optional[DataLoader] = None
+    test_samples: int = 0
+    test_timestamps: List[str] = field(default_factory=list)
+    test_items: List["VolSurfaceSample"] = field(default_factory=list)
+    uses_sample_weights: bool = False
+    uses_label_reliability_weights: bool = False
+    uses_support_masks: bool = False
+    uses_current_support_masks: bool = False
+    split_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -63,6 +72,21 @@ class VolSurfaceSample:
     surface_shape: Tuple[int, int]
     global_index: int
     metadata: Dict[str, Any]
+    news_row_id: Optional[int] = None
+    pair_id: str = ""
+    session_id: str = ""
+    effective_origin_utc: str = ""
+    sample_weight: float = 1.0
+    label_reliability_weight: float = 1.0
+    stable_sample_key: str = ""
+    # ``support_mask`` is the future-aware current∩target mask used only for
+    # losses/evaluation.  ``current_support_mask`` is derived exclusively from
+    # the current raw-surface parameters and is safe to use for conditioning.
+    support_mask: Optional[np.ndarray] = None
+    current_support_mask: Optional[np.ndarray] = None
+    support_grid_fingerprint: str = ""
+    support_mask_fingerprint: str = ""
+    current_support_mask_fingerprint: str = ""
 
 
 @dataclass

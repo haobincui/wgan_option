@@ -1,0 +1,25 @@
+{
+  "created_at_utc": "2026-09-03T15:50:24Z",
+  "definition": "Bias-corrected Fisher-Pearson skewness of A/B-quality signed five-minute ATM-IV changes within maturity_date x underlying_contract_id x CME session; 60 clock minutes and at least 30 observations; reset after a gap longer than five minutes.",
+  "display_policy": "All finite 60-minute levels and changes are displayed without clipping. Full-sample observations are plotted as points rather than joined across groups or gaps longer than five minutes.",
+  "flagged_slice_metric_rows": 210,
+  "flagged_tiers": {
+    "broad": 210
+  },
+  "flagged_unique_market_pairs": 209,
+  "inputs": {
+    "outputs/rq3/atm_skew_jumps_20260810_final/metric_rankings.csv.gz": "f747f5ae73c217c5021300dd970e2ee59dc7fc35f4855470ff085cd6bd4a0a1b",
+    "outputs/rq3/atm_skew_jumps_20260810_final/pair_slice_metrics.csv.gz": "d7ad22f5e448176722ee17800e0799dfc654b61d99c129c7f5b5ef8ce0665694"
+  },
+  "outputs": {
+    "docs/figures/ch3_atm_jump_rolling_skewness.png": "90d580c25c57d07ea7dd87fa749bd519ade0ab5c2751e8480b3c36d991300fb3",
+    "docs/figures/ch3_atm_jump_rolling_skewness.svg": "95af20aa99f4fabb004e6950b7d43092bc6a5f15f196f1092c8241e2d1503cf8"
+  },
+  "research_role": "Auxiliary market-first anomaly label for exploratory conditional analysis; not a filter for the primary news-first training sample.",
+  "rolling_change_rows": 6553,
+  "rolling_level_rows": 6801,
+  "schema_version": "chapter3_atm_jump_rolling_skewness_v1",
+  "screening_metric": "delta_rolling_jump_skew_60m",
+  "session_maturity_contract_group_count": 208,
+  "source_root": "outputs/rq3/atm_skew_jumps_20260810_final"
+}
