@@ -1,0 +1,158 @@
+experiment:
+  schema_version: 1
+  experiment_kind: news_first_vol_f4_film_pure_capacity_3seed_v1
+  interpretation: retrospective_f4_capacity_robustness_3seed
+  interface_stability: branch_local
+  output_root: outputs/experiments/rq3_news_first_vol_f4_film_pure_capacity_3seed_exact_ttm_v1
+  benchmark_root: outputs/benchmarks/rq3_news_first_vol_f4_film_pure_capacity_3seed_epoch1_v1
+
+data:
+  root: data/processed/rq3/news_first_vol_surfaces_q097_103_ttm01_38_exact_ttm_v1
+  workbook: data/processed/rq3/news_first_vol_surfaces_q097_103_ttm01_38_exact_ttm_v1/tolerance_05m/merged_vol.xlsx
+  sheet_name: gan_input_ready
+  support_mask_mode: raw_joint
+  surface_grid_profile: exact_ttm_16x16_v1
+  surface_grid_sha256: 7b72f2d3d12a55999415351ba071f8d87863ed57445f1bbf03543e39f9f186b8
+  train_end_utc: "2023-07-01T00:00:00Z"
+  validation_end_utc: "2023-10-01T00:00:00Z"
+  test_end_utc: "2024-01-01T00:00:00Z"
+  expected_counts:
+    train: {pairs: 748, sessions: 203}
+    validation: {pairs: 135, sessions: 33}
+    test: {pairs: 143, sessions: 45}
+  development_overlays:
+    film_cnn:
+      mode: lp_mean_l2
+      path: outputs/experiments/rq12_news_first_vol_film_unet_text128_c32_nolp_direct_text_10seed_lr2p5e5_exact_ttm_rolling_v1/inputs/pair_text_overlays/tolerance_05m/f4_2023q4/lp_matched.json
+      sha256: b82afd975c34732a0ba3c4a17261e12744f1742c02e0f1f19cd123d2387c769b
+      profile_sha256: 310043f573a0554e063471c3ca6e3d06e9d2869f0a789e58d99bccb98b01088c
+    pure_cnn:
+      mode: current_only
+      path: outputs/experiments/rq12_news_first_vol_cnn_unet_c32_nolp_pure_no_text_10seed_exact_ttm_rolling_v1/inputs/pair_text_overlays/tolerance_05m/f4_2023q4/pure_cnn_no_text.json
+      sha256: a48037be3cdc0c8abacddbeb8544370398eb4d2b4f6156cb4f902d83e4f8ad79
+      profile_sha256: ffca2e6839741dea0839d752c05821b6a1771573c7533952cf5eba5c9fdbec25
+  # These paths are deliberately not read by benchmark/prepare/train.  The
+  # evaluator may open them only after the checkpoint allowlist is frozen.
+  frozen_f4_inputs:
+    panel_path: outputs/experiments/rq12_news_first_vol_film_unet_text128_c32_nolp_direct_text_10seed_lr2p5e5_exact_ttm_rolling_v1/evaluation/test_panels/tolerance_05m/f4_2023q4.csv.gz
+    panel_sha256: eb2d930cd3b5dfb35c9e1a6e977ac32551d9e04647c4221f62d988e20dd01de3
+    film_overlay_path: outputs/experiments/rq12_news_first_vol_film_unet_text128_c32_nolp_direct_text_10seed_lr2p5e5_exact_ttm_rolling_v1/evaluation/test_pair_text_overlays/tolerance_05m/f4_2023q4/lp_matched.json
+    film_overlay_sha256: 37154b244930934a10a6b974b1a70f7e53ad0f62685180bfa93c2b480858e32e
+    film_overlay_profile_sha256: 196993050a09d633715fa4f0b16fdf49ea47d73c5d707b89eb17c3ccce89a776
+    pure_overlay_path: outputs/experiments/rq12_news_first_vol_cnn_unet_c32_nolp_pure_no_text_10seed_exact_ttm_rolling_v1/evaluation/test_pair_text_overlays/tolerance_05m/f4_2023q4/pure_cnn_no_text.json
+    pure_overlay_sha256: 392bf412a5b433d03ba1ed69fdd77ebe86ae8fa8be814e850009f2b6f32a930a
+    pure_overlay_profile_sha256: f3e8425aa3a7a3c7fe37c6383ec9d1b9b34cd84f8bf0ddd68b3306f3e6d76dc1
+
+matrix:
+  architectures: [film_cnn, pure_cnn]
+  capacities: [c08, c12, c16, c24, c32, c48]
+  seeds: [42, 202, 404]
+  fold: f4_2023q4
+  expected_training_jobs: 36
+  expected_prediction_cells: 36
+  expected_pair_metric_rows: 5148
+  current_reference_capacity: c32
+
+architectures:
+  film_cnn:
+    label: FiLM-CNN
+    generator_conditioning_mode: film_unet_mask_coords_v1
+    critic_conditioning_mode: lp_disabled_same_shape_v1
+    gen_text_hidden_dim: 256
+    gen_text_out_dim: 128
+    generator_optimizer_profile: film_unet_split_lr_v1
+  pure_cnn:
+    label: Pure-CNN
+    generator_conditioning_mode: cnn_unet_mask_coords_v1
+    critic_conditioning_mode: lp_disabled_same_shape_v1
+    gen_text_hidden_dim: 256
+    gen_text_out_dim: 128
+    generator_optimizer_profile: uniform_v1
+
+profiles:
+  c08: {gen_base_channels: 8, gen_res_blocks: 0, gen_hidden_dim: 256, disc_base_channels: 8, disc_res_blocks: 0, disc_text_hidden_dim: 128, disc_hidden_dim: 192}
+  c12: {gen_base_channels: 12, gen_res_blocks: 0, gen_hidden_dim: 384, disc_base_channels: 12, disc_res_blocks: 0, disc_text_hidden_dim: 128, disc_hidden_dim: 288}
+  c16: {gen_base_channels: 16, gen_res_blocks: 0, gen_hidden_dim: 512, disc_base_channels: 16, disc_res_blocks: 0, disc_text_hidden_dim: 128, disc_hidden_dim: 384}
+  c24: {gen_base_channels: 24, gen_res_blocks: 0, gen_hidden_dim: 768, disc_base_channels: 24, disc_res_blocks: 0, disc_text_hidden_dim: 128, disc_hidden_dim: 576}
+  c32: {gen_base_channels: 32, gen_res_blocks: 0, gen_hidden_dim: 1024, disc_base_channels: 32, disc_res_blocks: 0, disc_text_hidden_dim: 128, disc_hidden_dim: 786}
+  c48: {gen_base_channels: 48, gen_res_blocks: 0, gen_hidden_dim: 1536, disc_base_channels: 48, disc_res_blocks: 0, disc_text_hidden_dim: 128, disc_hidden_dim: 1179}
+
+expected_parameter_counts:
+  film_cnn:
+    c08: {generator: 357945, critic: 186793, total: 544738}
+    c12: {generator: 406725, critic: 237341, total: 644066}
+    c16: {generator: 467313, critic: 303057, total: 770370}
+    c24: {generator: 623913, critic: 479993, total: 1103906}
+    c32: {generator: 827745, critic: 729157, total: 1556902}
+    c48: {generator: 1377105, critic: 1399079, total: 2776184}
+  pure_cnn:
+    c08: {generator: 33241, critic: 186793, total: 220034}
+    c12: {generator: 67573, critic: 237341, total: 304914}
+    c16: {generator: 113713, critic: 303057, total: 416770}
+    c24: {generator: 241417, critic: 479993, total: 721410}
+    c32: {generator: 416353, critic: 729157, total: 1145510}
+    c48: {generator: 907921, critic: 1399079, total: 2307000}
+
+model:
+  channels: 1
+  embedding_dim: 1024
+  noise_dim: 32
+  generator_noise_mode: gaussian
+  generator_current_input_mode: current_support_masked
+  residual_output_mode: identity_softplus_residual
+  critic_normalization_mode: legacy_instance_norm_v1
+
+training:
+  protocol: independent_random_init_v1
+  checkpoint_selection_mode: best_learned_dynamic_validation_v1
+  initial_learning_rate: 5.0e-7
+  generator_learning_rate: 5.0e-7
+  generator_text_learning_rate: 2.5e-6
+  generator_film_learning_rate: 2.5e-5
+  generator_text_min_learning_rate: 2.5e-7
+  generator_film_min_learning_rate: 2.5e-6
+  discriminator_learning_rate: 5.0e-7
+  scheduler_min_lr: 5.0e-8
+  group_scheduler_floor_ratio: 0.1
+  reduce_lr_factor: 0.5
+  reduce_lr_patience: 3
+  lr_warmup_epochs: 0
+  batch_size: 16
+  discriminator_steps: 5
+  beta_1: 0.5
+  beta_2: 0.9
+  lambda_gp: 10.0
+  lambda_recon: 10.0
+  lambda_calendar: 2.0
+  lambda_butterfly: 2.0
+  lambda_smooth: 0.1
+  lambda_delta_shrink: 0.0
+  constraint_warmup_epochs: 0
+  num_epochs: 240
+  best_checkpoint_metric: val_hybrid_score
+  baseline_penalty_weight: 2.0
+  early_stopping_patience: 20
+  early_stopping_min_epochs: 30
+  early_stopping_min_delta: 0.0
+  validation_mc_samples: 16
+  prediction_mc_samples: 64
+  shared_prediction_noise_bank: true
+
+analysis:
+  bootstrap_replicates: 10000
+  bootstrap_seed: 20260924
+  confidence_level: 0.95
+  reference_capacity: c32
+  improvement_definition: within_architecture_100_times_one_minus_mae_over_c32_mae
+  test_based_selection_permitted: false
+
+runtime:
+  python_executable: /home/haobin_cui/.conda/envs/py312/bin/python
+  gpu_ids: [0, 1]
+  workers_per_gpu: 18
+  benchmark_workers_per_gpu: 18
+  cpu_threads_per_job: 1
+  poll_interval_seconds: 2
+  resource_sample_interval_seconds: 2
+  max_peak_gpu_memory_gib: 20.0
+  max_host_ram_fraction: 0.85

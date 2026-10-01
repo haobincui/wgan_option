@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="730" viewBox="0 0 2200 730" role="img" aria-labelledby="title desc">
+  <title id="title">FiLM-CNN surface-only Wasserstein critic architecture</title>
+  <desc id="desc">The critic masks and concatenates current and candidate future volatility surfaces, encodes the two-channel grid with three strided convolutions, appends an exact zero text vector for shape compatibility, and outputs a real-valued Wasserstein score without a sigmoid.</desc>
+  <defs>
+    <marker id="arrow-dark" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#25364A"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#2869B2"/>
+    </marker>
+    <filter id="shadow" x="-15%" y="-20%" width="130%" height="145%">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#172033" flood-opacity="0.12"/>
+    </filter>
+    <style>
+      .bg { fill:#FFFFFF; }
+      .title { font:700 43px 'DejaVu Sans',Arial,sans-serif; fill:#172033; }
+      .subtitle { font:400 22px 'DejaVu Sans',Arial,sans-serif; fill:#536174; }
+      .h1 { font:700 22px 'DejaVu Sans',Arial,sans-serif; fill:#172033; }
+      .h2 { font:700 19px 'DejaVu Sans',Arial,sans-serif; fill:#172033; }
+      .body { font:400 17px 'DejaVu Sans',Arial,sans-serif; fill:#344256; }
+      .small { font:400 15px 'DejaVu Sans',Arial,sans-serif; fill:#4C5A6C; }
+      .mono { font:600 16px 'DejaVu Sans Mono',monospace; fill:#435166; }
+      .formula { font:400 22px 'DejaVu Serif',Georgia,serif; fill:#172033; }
+      .white { font:700 20px 'DejaVu Sans',Arial,sans-serif; fill:#FFFFFF; }
+      .white-small { font:400 15px 'DejaVu Sans',Arial,sans-serif; fill:#FFFFFF; }
+      .surface { fill:#F5F7FA; stroke:#687588; stroke-width:2.6; }
+      .candidate { fill:#FFF4E8; stroke:#D96B12; stroke-width:2.6; }
+      .mask { fill:#EAF9F8; stroke:#178187; stroke-width:2.6; }
+      .formation { fill:#F3F7FC; stroke:#2869B2; stroke-width:2.8; }
+      .conv { fill:#EEF6FF; stroke:#2869B2; stroke-width:2.6; }
+      .neutral { fill:#F7F8FA; stroke:#5D6979; stroke-width:2.6; }
+      .disabled { fill:#F1F3F6; stroke:#8A95A5; stroke-width:2.3; stroke-dasharray:8 6; }
+      .score { fill:#EAF9F8; stroke:#087F85; stroke-width:2.8; }
+      .norm { fill:#2869B2; stroke:#1E4F87; stroke-width:2; }
+      .chip { fill:#25364A; }
+      .rule { stroke:#D7DEE8; stroke-width:1.8; }
+      .arrow { fill:none; stroke:#25364A; stroke-width:3.8; marker-end:url(#arrow-dark); }
+      .input-arrow { fill:none; stroke:#2869B2; stroke-width:3.4; marker-end:url(#arrow-blue); }
+      .disabled-arrow { fill:none; stroke:#7B8797; stroke-width:3; stroke-dasharray:8 6; marker-end:url(#arrow-dark); }
+    </style>
+  </defs>
+
+  <rect class="bg" width="2200" height="900"/>
+
+  <!-- Heading -->
+  <text class="title" x="1100" y="55" text-anchor="middle">FiLM-CNN Critic (Surface-only)</text>
+  <text class="subtitle" x="1100" y="91" text-anchor="middle">A shared convolutional critic scores real and generated IVS transitions</text>
+
+  <!-- Input formation -->
+  <g filter="url(#shadow)">
+    <rect class="surface" x="30" y="133" width="280" height="108" rx="14"/>
+    <rect class="candidate" x="355" y="133" width="330" height="108" rx="14"/>
+    <rect class="mask" x="730" y="133" width="290" height="108" rx="14"/>
+    <rect class="formation" x="1080" y="119" width="1085" height="136" rx="16"/>
+  </g>
+
+  <text class="h1" x="170" y="171" text-anchor="middle">Current IVS</text>
+  <text class="formula" x="170" y="208" text-anchor="middle">σ<tspan baseline-shift="sub" font-size="14">t</tspan></text>
+
+  <text class="h1" x="520" y="169" text-anchor="middle">Candidate future IVS</text>
+  <text class="formula" x="520" y="205" text-anchor="middle">S ∈ {σ<tspan baseline-shift="sub" font-size="14">t+h</tspan>, σ̂<tspan baseline-shift="sub" font-size="14">t+h</tspan>}</text>
+  <text class="small" x="520" y="230" text-anchor="middle">real or generated</text>
+
+  <text class="h1" x="875" y="169" text-anchor="middle">Joint support</text>
+  <text class="formula" x="875" y="205" text-anchor="middle">M<tspan baseline-shift="super" font-size="14">∩</tspan> = M<tspan baseline-shift="sub" font-size="14">t</tspan> ⊙ M<tspan baseline-shift="sub" font-size="14">t+h</tspan></text>
+  <text class="small" x="875" y="230" text-anchor="middle">deterministic zero-mask</text>
+
+  <text class="h1" x="1622.5" y="154" text-anchor="middle">Mask and concatenate</text>
+  <text class="formula" x="1622.5" y="194" text-anchor="middle">X<tspan baseline-shift="super" font-size="14">C</tspan><tspan baseline-shift="sub" font-size="14">t</tspan>(S) = Concat[M<tspan baseline-shift="super" font-size="14">∩</tspan>⊙σ<tspan baseline-shift="sub" font-size="14">t</tspan> ; M<tspan baseline-shift="super" font-size="14">∩</tspan>⊙S]</text>
+  <text class="mono" x="1622.5" y="229" text-anchor="middle">[B, 2, 16, 16]</text>
+
+  <path class="input-arrow" d="M170 241V276H1046V153H1080"/>
+  <path class="input-arrow" d="M520 241V290H1058V187H1080"/>
+  <path class="input-arrow" d="M875 241V304H1070V221H1080"/>
+
+  <!-- Main pipeline cards -->
+  <g filter="url(#shadow)">
+    <rect class="formation" x="22" y="414" width="205" height="250" rx="15"/>
+    <rect class="conv" x="267" y="394" width="205" height="270" rx="15"/>
+    <rect class="conv" x="512" y="394" width="205" height="270" rx="15"/>
+    <rect class="conv" x="757" y="394" width="205" height="270" rx="15"/>
+    <rect class="neutral" x="1002" y="414" width="145" height="250" rx="15"/>
+    <rect class="neutral" x="1187" y="414" width="205" height="250" rx="15"/>
+    <rect class="neutral" x="1432" y="394" width="320" height="270" rx="15"/>
+    <rect class="score" x="1792" y="414" width="386" height="250" rx="15"/>
+  </g>
+
+  <!-- Two-channel input -->
+  <text class="h1" x="124.5" y="455" text-anchor="middle">Critic input</text>
+  <text class="mono" x="124.5" y="491" text-anchor="middle">[B,2,16,16]</text>
+  <line class="rule" x1="48" y1="517" x2="201" y2="517"/>
+  <text class="body" x="124.5" y="558" text-anchor="middle">masked current</text>
+  <text class="body" x="124.5" y="592" text-anchor="middle">+</text>
+  <text class="body" x="124.5" y="626" text-anchor="middle">masked candidate</text>
+
+  <!-- CNN stage 1 -->
+  <text class="h1" x="369.5" y="436" text-anchor="middle">CNN stage 1</text>
+  <text class="body" x="369.5" y="480" text-anchor="middle">3×3 Conv, stride 2</text>
+  <text class="body" x="369.5" y="512" text-anchor="middle">2 → 32</text>
+  <line class="rule" x1="294" y1="536" x2="445" y2="536"/>
+  <text class="body" x="369.5" y="574" text-anchor="middle">LeakyReLU(0.2)</text>
+  <text class="mono" x="369.5" y="628" text-anchor="middle">32 × 8 × 8</text>
+
+  <!-- CNN stage 2 -->
+  <text class="h1" x="614.5" y="436" text-anchor="middle">CNN stage 2</text>
+  <text class="body" x="614.5" y="480" text-anchor="middle">3×3 Conv, stride 2</text>
+  <text class="body" x="614.5" y="512" text-anchor="middle">32 → 64</text>
+  <rect class="norm" x="532" y="537" width="165" height="55" rx="9"/>
+  <text class="white-small" x="614.5" y="560" text-anchor="middle">Affine InstanceNorm</text>
+  <text class="white-small" x="614.5" y="581" text-anchor="middle">+ LeakyReLU</text>
+  <text class="mono" x="614.5" y="628" text-anchor="middle">64 × 4 × 4</text>
+
+  <!-- CNN stage 3 -->
+  <text class="h1" x="859.5" y="436" text-anchor="middle">CNN stage 3</text>
+  <text class="body" x="859.5" y="480" text-anchor="middle">3×3 Conv, stride 2</text>
+  <text class="body" x="859.5" y="512" text-anchor="middle">64 → 128</text>
+  <rect class="norm" x="777" y="537" width="165" height="55" rx="9"/>
+  <text class="white-small" x="859.5" y="560" text-anchor="middle">Affine InstanceNorm</text>
+  <text class="white-small" x="859.5" y="581" text-anchor="middle">+ LeakyReLU</text>
+  <text class="mono" x="859.5" y="628" text-anchor="middle">128 × 2 × 2</text>
+
+  <!-- Flatten and zero concat -->
+  <text class="h1" x="1074.5" y="466" text-anchor="middle">Flatten</text>
+  <text class="mono" x="1074.5" y="517" text-anchor="middle">512</text>
+  <text class="small" x="1074.5" y="565" text-anchor="middle">surface</text>
+  <text class="small" x="1074.5" y="590" text-anchor="middle">features</text>
+
+  <text class="h1" x="1289.5" y="455" text-anchor="middle">Concatenate</text>
+  <text class="mono" x="1289.5" y="503" text-anchor="middle">512 + 0<tspan baseline-shift="sub" font-size="11">128</tspan></text>
+  <line class="rule" x1="1216" y1="530" x2="1363" y2="530"/>
+  <text class="mono" x="1289.5" y="578" text-anchor="middle">640</text>
+
+  <!-- Scoring MLP -->
+  <text class="h1" x="1592" y="436" text-anchor="middle">Scoring head</text>
+  <text class="body" x="1592" y="485" text-anchor="middle">Linear 640 → 786</text>
+  <text class="body" x="1592" y="524" text-anchor="middle">LeakyReLU(0.2)</text>
+  <text class="body" x="1592" y="563" text-anchor="middle">Linear 786 → 1</text>
+  <line class="rule" x1="1475" y1="592" x2="1709" y2="592"/>
+
+  <!-- Score -->
+  <text class="h1" x="1985" y="455" text-anchor="middle">Wasserstein critic score</text>
+  <text class="formula" x="1985" y="512" text-anchor="middle">C<tspan baseline-shift="sub" font-size="14">ψ</tspan>(S, σ<tspan baseline-shift="sub" font-size="14">t</tspan>; M<tspan baseline-shift="super" font-size="14">∩</tspan>) ∈ R</text>
+  <line class="rule" x1="1845" y1="543" x2="2125" y2="543"/>
+  <text class="h2" x="1985" y="588" text-anchor="middle">Real-valued output</text>
+  <text class="body" x="1985" y="622" text-anchor="middle">No sigmoid</text>
+
+  <!-- Main forward arrows -->
+  <path class="arrow" d="M227 555H267"/>
+  <path class="arrow" d="M472 555H512"/>
+  <path class="arrow" d="M717 555H757"/>
+  <path class="arrow" d="M962 555H1002"/>
+  <path class="arrow" d="M1147 555H1187"/>
+  <path class="arrow" d="M1392 555H1432"/>
+  <path class="arrow" d="M1752 555H1792"/>
+</svg>

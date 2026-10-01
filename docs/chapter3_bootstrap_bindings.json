@@ -139,11 +139,28 @@
   ],
   "external_table_changes": [
     {
-      "label": "tab:ch3:legacy_full_wgan_capacity_vs_fixed_pure_cnn",
-      "baseline_sha256": "208379d00409815415a4510bb07fcd65c95ad8f74cc49180b65d5d28bbbaf2e0",
-      "current_sha256": "6f166de26376c93f51322be31d64dde5456f599a9e5c6671feddb0f06b7f51ee",
+      "label": "tab:ch3:f4_film_pure_capacity_robustness",
+      "current_sha256": "9bbbfdd3b0e7b8534d838811eef199af1cfffa760a2c1a87015b3a9d62b0c1cb",
       "status": "user_authorized_descriptive_update_verified",
-      "numerical_source_audit": "Q3/Q4 values were independently reconciled to the pinned capacity pair CSVs using panel=core, stratum_type=overall, stratum_value=all, and tolerance_minutes=5; see the integration notes. This descriptive table is not v2-bootstrap bound."
+      "source": {
+        "summary_json_path": "outputs/experiments/rq3_news_first_vol_f4_film_pure_capacity_3seed_exact_ttm_v1/analysis/f4_capacity_summary.json",
+        "summary_json_sha256": "460c9161ad7eaf855af3ed440676f8c17467baaea94466817da2323714498555",
+        "pair_metrics_path": "outputs/experiments/rq3_news_first_vol_f4_film_pure_capacity_3seed_exact_ttm_v1/analysis/f4_pair_metrics.csv.gz",
+        "pair_metrics_sha256": "7eb7b391209a742ce6478867d09e2d2390d65c2f2f6e5a97493ebc2e6fcfd5a2",
+        "summary_csv_path": "outputs/experiments/rq3_news_first_vol_f4_film_pure_capacity_3seed_exact_ttm_v1/analysis/f4_capacity_summary.csv",
+        "summary_csv_sha256": "7aeaa83c8da6714c14fb92e23853fcfe887114d17407afa5433abc15d040ea3e",
+        "latex_table_path": "outputs/experiments/rq3_news_first_vol_f4_film_pure_capacity_3seed_exact_ttm_v1/analysis/f4_capacity_table.tex",
+        "latex_table_sha256": "79ac7c4fb8e57990adc96e2aac37757f4ad14554331cacc49c01a54afdc581d4",
+        "input_pair_metrics_path": "outputs/experiments/rq3_news_first_vol_f4_film_pure_capacity_3seed_exact_ttm_v1/evaluation/f4_pair_metrics.csv.gz",
+        "input_pair_metrics_sha256": "8c30ab2a74c6ecb0a5bd40d1aec113afc95b04eda3670cfc4fc5353482621760"
+      },
+      "supersedes": {
+        "label": "tab:ch3:legacy_full_wgan_capacity_vs_fixed_pure_cnn",
+        "status": "superseded",
+        "baseline_sha256": "208379d00409815415a4510bb07fcd65c95ad8f74cc49180b65d5d28bbbaf2e0",
+        "last_active_sha256": "6f166de26376c93f51322be31d64dde5456f599a9e5c6671feddb0f06b7f51ee"
+      },
+      "numerical_source_audit": "The F4-only FiLM-CNN/Pure-CNN capacity table was generated from the frozen three-seed, 143-pair analysis artifacts recorded above; it is externally source-verified and not v2-bootstrap bound."
     },
     {
       "label": "tab:ch3:alignment_window_coverage",
@@ -186,7 +203,7 @@
     ],
     "binding_groups": 103,
     "numerical_bindings": 539,
-    "interpretation": "All displayed numerical cells in the listed inferential/result tables plus principal interpretation and Conclusion statements are explicitly bound. The pooled-MAE columns in the descriptive coverage table are bound to v2 arms, while its pair counts and coverage percentages retain their external descriptive audit. Training, capacity, constraint, design-count, and RQ4 numbers are outside this v2 inferential binding scope."
+    "interpretation": "All displayed numerical cells in the listed inferential/result tables plus principal interpretation and Conclusion statements are explicitly bound. The pooled-MAE columns in the descriptive coverage table are bound to v2 arms, while its pair counts and coverage percentages retain their external descriptive audit. The active F4 capacity table is externally source-verified, but training, capacity, constraint, design-count, and RQ4 numbers remain outside this v2 inferential binding scope."
   },
   "bindings": [
     {

@@ -3,9 +3,11 @@
 The historical source IVs reproduce observed prices, and stored raw-IV grids
 reproduce their frozen JSON parameters exactly. Their pricing clock and the
 model's penalty clock nevertheless differ. A separate replay of CSV-to-JSON
-aggregation also finds 200 differing node instances; the full raw-data lineage
-is therefore not certified as reproduced. This audit preserves the existing
-datasets, checkpoints, and reported results; it does not certify that the
+aggregation also finds 200 differing node instances. Post-aggregation audit
+export can lose the multiplicity of identical raw rows; one independently
+checked duplicate trade reproduces a discrepant JSON node when restored. The
+full raw-data lineage is therefore not certified as reproduced. This audit
+preserves the existing datasets, checkpoints, and reported results; it does not certify that the
 penalties implement an actual-expiry no-arbitrage test.
 
 ## Scope and reproduction
@@ -74,6 +76,8 @@ they do not retain node-level actual expiry timestamps or pricing times.
 | --- | --- |
 | Raw observations / accepted by `passes_precalib_filter` | 79,060 / 65,108 |
 | Accepted source window directions | 65,108 `backward` |
+| Distinct JSON snapshots / recorded selected observations | 3,867 / 65,665 |
+| Snapshots with an accepted-row export deficit / total shortfall | 291 / 557 rows |
 | Maximum absolute ACT/365 Black repricing error | 5.972111694e-12 price quote units |
 | Maximum absolute discount-factor reproduction error | 1.776356839e-15 |
 | News-to-pair workbook rows / current and target surface instances | 1,610 / 3,220 |
@@ -98,10 +102,36 @@ compared, with no missing groups or point-count mismatches. At absolute
 tolerance `1e-12`, 200 node instances differ in IV or percent strike. The maximum
 IV difference is `0.00277151125466088`, and the maximum percent-strike difference
 is `0.00030187415596161227`. Node instances can repeat when news rows share
-snapshots. The cause of these differences has not been established; the audit
-does not attribute them to the maturity clock. Frozen JSON parameters remain
-the reference for reproducing historical training targets. The emitted audit
-status is `verified_frozen_targets_with_clock_and_lineage_caveats`.
+snapshots: the 200 instances represent 195 distinct snapshot, maturity and node
+keys across 183 snapshots.
+
+The JSON records 65,665 selected observations across 3,867 distinct snapshots,
+while the exported precalibration CSV retains 65,108 accepted rows. The 557-row
+shortfall is confined to 291 snapshots, which contain every mismatched node
+instance. The surface builder aggregates all selected candidates before
+`relaxed_time_pipeline.py` inserts audit rows into `precalib_point`, whose
+`(anchor_time_utc, row_sha256)` primary key and `INSERT OR IGNORE` remove
+identical rows. The exported CSV is then written from this index. This sequence
+can make a JSON parameter reflect duplicate observations that the CSV cannot
+replay. In the 2022-02-25 13:16 UTC snapshot at `q=39`, `K=124.5`, the raw gzip
+contains two identical trades of weight 15, but the exported CSV retains one.
+Adding the missing duplicate to the exported strike bucket changes its
+volume-weighted `K/F` from `0.9883494398696278` to `0.9883506614978763`,
+matching the JSON value `0.988350661497876`.
+
+The duplicate source lines can be inspected from the repository root with:
+
+```bash
+zgrep -F 'TY1245Q2,,Market Price,2022-02-25T07:14:19.076069208-06,Trade,0.578125,15' 'data/raw/option_data/0#TY+/0#TY+_2022-02-25_2022-02-26.csv.gz'
+```
+
+That case directly verifies the export-deduplication mechanism. The counts
+strongly implicate the same mechanism for the wider drift, but the complete
+pre-index candidate stream has not been replayed and all 557 missing rows have
+not been individually traced. The audit does not attribute these differences
+to the maturity clock. Frozen JSON parameters remain the reference for
+reproducing historical training targets. The emitted audit status is
+`verified_frozen_targets_with_clock_and_lineage_caveats`.
 
 This limitation is consistent with the repository's existing frozen-parameter
 policy in `scripts/rq3/market_jump_detection.py`: archived JSON parameters are
@@ -133,10 +163,10 @@ agreement for calls and puts, price-preserving IV reannualization, exclusion of
 rejected source rows, non-finite/corrupted source values, forward snapshot
 lineage, denominator cancellation, corrupted workbook targets/parameters,
 source-row versus unique-pair counts, and explicit aggregation-lineage caveats.
-They also check conflicting repeated workbook rows despite reconstruction
-caching and unchanged input hashes. All twelve audit tests pass, together with
-seven existing raw surface tests and three existing Black-76 tests (22 tests
-in total). The full dataset audit also completes with unchanged input hashes.
+They also check reused JSON snapshots and exported-row count deficits,
+conflicting repeated workbook rows despite reconstruction caching, and
+unchanged input hashes. All 13 targeted audit tests pass. The full dataset
+audit also completes with unchanged input hashes.
 LaTeX environment balance and the new equation labels were checked statically;
 a full thesis PDF build was not run because no LaTeX compiler is available in
 this environment.

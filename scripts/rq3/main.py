@@ -894,6 +894,53 @@ def build_parser() -> argparse.ArgumentParser:
         "--worker-dry-run", action="store_true", help=argparse.SUPPRESS
     )
 
+    f4_film_pure_capacity = subparsers.add_parser(
+        "train-news-first-vol-f4-film-pure-capacity-3seed",
+        help=(
+            "Run the F4-only, three-seed FiLM-CNN/Pure-CNN capacity "
+            "robustness experiment on the common 2023Q4 test panel."
+        ),
+    )
+    f4_film_pure_capacity.add_argument(
+        "action",
+        nargs="?",
+        choices=(
+            "benchmark",
+            "prepare",
+            "dry-run",
+            "launch",
+            "freeze-checkpoints",
+            "evaluate-f4",
+            "postprocess",
+            "qa",
+            "worker",
+            "status",
+        ),
+        default="prepare",
+        help="F4 capacity experiment action (safe default: prepare).",
+    )
+    f4_film_pure_capacity.add_argument(
+        "--config",
+        default="configs/rq3/news_first_vol_f4_film_pure_capacity_3seed.yaml",
+        help="Versioned F4-only FiLM/Pure capacity config.",
+    )
+    f4_film_pure_capacity.add_argument(
+        "--output-dir",
+        default=(
+            "outputs/experiments/"
+            "rq3_news_first_vol_f4_film_pure_capacity_3seed_exact_ttm_v1"
+        ),
+        help="Independent F4-only capacity experiment root.",
+    )
+    f4_film_pure_capacity.add_argument(
+        "--job-id", default="", help="Registry job identifier for worker."
+    )
+    f4_film_pure_capacity.add_argument("--resume", action="store_true")
+    f4_film_pure_capacity.add_argument("--reuse", action="store_true")
+    f4_film_pure_capacity.add_argument(
+        "--worker-dry-run", action="store_true", help=argparse.SUPPRESS
+    )
+
     legacy_architecture_seed = subparsers.add_parser(
         "train-news-first-vol-legacy-architecture-seed-sweep",
         help=(
@@ -1317,6 +1364,22 @@ def main(argv: Iterable[str] | None = None) -> Path:
             worker_dry_run=bool(args.worker_dry_run),
         )
         print(f"RQ3 FiLM/NoLP capacity-seed experiment: {output}")
+        return output
+    if args.command == "train-news-first-vol-f4-film-pure-capacity-3seed":
+        from scripts.rq3.news_first_vol_f4_film_pure_capacity_3seed import (
+            run_news_first_vol_f4_film_pure_capacity_3seed,
+        )
+
+        output = run_news_first_vol_f4_film_pure_capacity_3seed(
+            args.config,
+            args.output_dir,
+            action=args.action,
+            job_id=args.job_id,
+            resume=bool(args.resume),
+            reuse=bool(args.reuse),
+            worker_dry_run=bool(args.worker_dry_run),
+        )
+        print(f"RQ3 F4 FiLM/Pure capacity experiment: {output}")
         return output
     if args.command == "train-news-first-vol-legacy-architecture-seed-sweep":
         from scripts.rq3.news_first_vol_legacy_architecture_seed import (

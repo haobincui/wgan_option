@@ -221,6 +221,48 @@ class MaturityClockAuditTests(unittest.TestCase):
             self.assertEqual(report["point_count_error_groups"], 1)
             self.assertEqual(report["missing_group_count"], 3)
 
+    def test_observation_counts_deduplicate_reused_json_snapshots(self):
+        raw = self.raw_frame().iloc[0].to_dict()
+        origin, future = raw["target_datetime_utc"], "2023-01-06T15:05:00Z"
+        accepted = pd.DataFrame([
+            raw,
+            {**raw, "target_datetime_utc": future},
+            {**raw, "target_datetime_utc": future, "window_side": "forward",
+             "implied_vol": 0.3},
+        ])
+
+        def entry(snapshot, iv, selected):
+            return {
+                "snapshot_time_utc": snapshot,
+                "surface_audit": {"selected_option_observations": selected},
+                "surface_params": {
+                    "business_days": [1], "percent_strikes": [[1.0]],
+                    "implied_vols": [[iv]],
+                },
+            }
+
+        source = {
+            origin: {
+                "backward": entry(origin, 0.2, 2),
+                "forward": entry(future, 0.3, 2),
+            },
+            future: {"backward": entry(future, 0.3, 2)},
+        }
+        report = audit_raw_aggregation(accepted, source)
+        self.assertEqual(report["json_unique_snapshot_count"], 2)
+        self.assertEqual(report["json_selected_option_observations_total"], 4)
+        self.assertEqual(report["exported_accepted_backward_rows_total"], 2)
+        self.assertEqual(report["count_deficit_snapshot_count"], 2)
+        self.assertEqual(report["count_deficit_rows"], 2)
+        self.assertEqual(report["mismatched_point_count"], 2)
+        self.assertEqual(report["mismatched_unique_node_count"], 1)
+        self.assertEqual(report["mismatched_unique_snapshot_count"], 1)
+        self.assertEqual(report["mismatched_point_count_on_deficit_snapshots"], 2)
+
+        source[future]["backward"]["surface_audit"]["selected_option_observations"] = 3
+        with self.assertRaisesRegex(ValueError, "Conflicting selected-option counts"):
+            audit_raw_aggregation(accepted, source)
+
 
 if __name__ == "__main__":
     unittest.main()

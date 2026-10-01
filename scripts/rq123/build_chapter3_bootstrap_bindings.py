@@ -36,6 +36,22 @@ DEFAULT_VALUES = (
 )
 DEFAULT_OUTPUT = ROOT / "docs/chapter3_bootstrap_bindings.json"
 
+LEGACY_CAPACITY_TABLE_LABEL = (
+    "tab:ch3:legacy_full_wgan_capacity_vs_fixed_pure_cnn"
+)
+F4_CAPACITY_TABLE_LABEL = "tab:ch3:f4_film_pure_capacity_robustness"
+F4_CAPACITY_ANALYSIS_KIND = "f4_film_pure_capacity_3seed_analysis_v1"
+DEFAULT_F4_CAPACITY_ANALYSIS_DIR = (
+    ROOT
+    / "outputs/experiments"
+    / "rq3_news_first_vol_f4_film_pure_capacity_3seed_exact_ttm_v1"
+    / "analysis"
+)
+F4_CAPACITY_SUMMARY_JSON = "f4_capacity_summary.json"
+F4_CAPACITY_SUMMARY_CSV = "f4_capacity_summary.csv"
+F4_CAPACITY_PAIR_METRICS = "f4_pair_metrics.csv.gz"
+F4_CAPACITY_TABLE_TEX = "f4_capacity_table.tex"
+
 PASSTHROUGH_LABELS = (
     "tab:ch3:baseline_training_diagnostics",
     "tab:ch3:rq2_training_diagnostics",
@@ -1690,10 +1706,271 @@ def _passthrough_records(tex: str, existing: dict) -> list[dict]:
     return records
 
 
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _required_file(path: Path, role: str) -> Path:
+    path = path.resolve()
+    if not path.is_file():
+        raise ValueError(f"Missing F4 capacity {role}: {path}")
+    return path
+
+
+def _summary_artifact_hash(summary: dict, name: str) -> str:
+    try:
+        digest = summary["artifacts"][name]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f"F4 capacity summary is missing artifact hash: {name}") from exc
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ValueError(f"Invalid F4 capacity artifact hash for {name}")
+    return digest
+
+
+def _validate_f4_capacity_summary(summary: dict) -> None:
+    expected = {
+        "schema_version": 1,
+        "kind": F4_CAPACITY_ANALYSIS_KIND,
+        "fold": "f4_2023q4",
+        "architectures": ["film_cnn", "pure_cnn"],
+        "capacity_ids": ["c08", "c12", "c16", "c24", "c32", "c48"],
+        "current_capacity_id": "c32",
+        "seeds": [42, 202, 404],
+        "pair_count": 143,
+        "session_count": 45,
+        "seed_pair_rows_per_architecture_capacity": 429,
+        "pair_metric_rows": 5148,
+        "aggregation": "equal_seed_mean_of_within_seed_pair_mae_v1",
+        "improvement_formula": (
+            "100*(1-mae_capacity/mae_c32)_within_architecture"
+        ),
+        "table_label": F4_CAPACITY_TABLE_LABEL,
+    }
+    for field, value in expected.items():
+        if summary.get(field) != value:
+            raise ValueError(
+                f"F4 capacity summary contract drift at {field}: "
+                f"{summary.get(field)!r} != {value!r}"
+            )
+    rows = summary.get("rows")
+    if not isinstance(rows, list) or len(rows) != 6:
+        raise ValueError("F4 capacity summary must contain six capacity rows")
+    if [row.get("capacity_id") for row in rows if isinstance(row, dict)] != expected[
+        "capacity_ids"
+    ]:
+        raise ValueError("F4 capacity summary row order or capacity IDs drifted")
+
+
+def _resolve_recorded_path(path_value: Any) -> Path:
+    if not isinstance(path_value, str) or not path_value:
+        raise ValueError("F4 capacity summary contains an invalid source path")
+    path = Path(path_value)
+    return path if path.is_absolute() else ROOT / path
+
+
+def _f4_capacity_source_record(
+    analysis_dir: Path,
+    chapter_table: str,
+) -> dict[str, str]:
+    """Validate the generated F4 table lineage before recording any hashes."""
+
+    analysis_dir = analysis_dir.resolve()
+    summary_path = _required_file(
+        analysis_dir / F4_CAPACITY_SUMMARY_JSON, "summary JSON"
+    )
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Invalid F4 capacity summary JSON: {summary_path}") from exc
+    if not isinstance(summary, dict):
+        raise ValueError("F4 capacity summary JSON must be an object")
+    _validate_f4_capacity_summary(summary)
+
+    paths = {
+        "pair_metrics": _required_file(
+            analysis_dir / F4_CAPACITY_PAIR_METRICS, "pair metrics"
+        ),
+        "summary_csv": _required_file(
+            analysis_dir / F4_CAPACITY_SUMMARY_CSV, "summary CSV"
+        ),
+        "latex_table": _required_file(
+            analysis_dir / F4_CAPACITY_TABLE_TEX, "LaTeX table"
+        ),
+    }
+    artifact_names = {
+        "pair_metrics": F4_CAPACITY_PAIR_METRICS,
+        "summary_csv": F4_CAPACITY_SUMMARY_CSV,
+        "latex_table": F4_CAPACITY_TABLE_TEX,
+    }
+    hashes: dict[str, str] = {}
+    for role, path in paths.items():
+        digest = _sha256_path(path)
+        expected_digest = _summary_artifact_hash(summary, artifact_names[role])
+        if digest != expected_digest:
+            raise ValueError(
+                f"F4 capacity {role} hash drift: {digest} != {expected_digest}"
+            )
+        hashes[role] = digest
+
+    input_path = _required_file(
+        _resolve_recorded_path(summary.get("input_pair_metrics_path")),
+        "input pair metrics",
+    )
+    input_digest = summary.get("input_pair_metrics_sha256")
+    if (
+        not isinstance(input_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", input_digest) is None
+        or _sha256_path(input_path) != input_digest
+    ):
+        raise ValueError("F4 capacity input pair-metric source hash drift")
+
+    generated_tex = paths["latex_table"].read_text(encoding="utf-8")
+    generated_blocks = re.findall(
+        r"\\begin\{table\*?\}.*?\\end\{table\*?\}", generated_tex, re.DOTALL
+    )
+    generated_tables = _tables(generated_tex)
+    if len(generated_blocks) != 1:
+        raise ValueError("Generated F4 capacity LaTeX must contain exactly one table")
+    if set(generated_tables) != {F4_CAPACITY_TABLE_LABEL}:
+        raise ValueError(
+            "Generated F4 capacity LaTeX must contain exactly its active table label"
+        )
+    if generated_tables[F4_CAPACITY_TABLE_LABEL] != chapter_table:
+        raise ValueError(
+            "Chapter F4 capacity table is not byte-identical to the generated table"
+        )
+
+    return {
+        "summary_json_path": _repo_relative(summary_path),
+        "summary_json_sha256": _sha256_path(summary_path),
+        "pair_metrics_path": _repo_relative(paths["pair_metrics"]),
+        "pair_metrics_sha256": hashes["pair_metrics"],
+        "summary_csv_path": _repo_relative(paths["summary_csv"]),
+        "summary_csv_sha256": hashes["summary_csv"],
+        "latex_table_path": _repo_relative(paths["latex_table"]),
+        "latex_table_sha256": hashes["latex_table"],
+        "input_pair_metrics_path": _repo_relative(input_path),
+        "input_pair_metrics_sha256": input_digest,
+    }
+
+
+def _external_table_records(
+    tex: str,
+    existing: dict,
+    *,
+    f4_capacity_analysis_dir: Path,
+) -> list[dict]:
+    """Update external-table hashes, migrating capacity provenance atomically.
+
+    Until the chapter adopts the new F4 label, the historical record remains
+    unchanged and the not-yet-produced analysis artifacts are never opened.
+    Once the new label appears, every source artifact is required and verified
+    before the historical label is nested as superseded provenance.
+    """
+
+    records = deepcopy(existing.get("external_table_changes", []))
+    if len(records) != 2:
+        raise ValueError("The two externally tracked table records are required")
+    labels = [record.get("label") for record in records]
+    if len(labels) != len(set(labels)):
+        raise ValueError("Duplicate externally tracked table label")
+    tables = _tables(tex)
+    legacy_present = LEGACY_CAPACITY_TABLE_LABEL in tables
+    active_present = F4_CAPACITY_TABLE_LABEL in tables
+    if legacy_present == active_present:
+        raise ValueError(
+            "Chapter must contain exactly one legacy or active capacity table"
+        )
+    if active_present and "\\label{" + LEGACY_CAPACITY_TABLE_LABEL + "}" in tex:
+        raise ValueError("Superseded legacy capacity label remains in the chapter")
+
+    alignment_label = "tab:ch3:alignment_window_coverage"
+    by_label = {record.get("label"): record for record in records}
+    if alignment_label not in by_label or alignment_label not in tables:
+        raise ValueError("Missing externally tracked alignment-window table")
+    alignment = deepcopy(by_label[alignment_label])
+    alignment["current_sha256"] = hashlib.sha256(
+        tables[alignment_label].encode("utf-8")
+    ).hexdigest()
+    alignment["status"] = "user_authorized_v2_update_verified"
+    alignment["numerical_source_audit"] = (
+        "Pair counts and coverage remain externally audited; the two "
+        "displayed pooled-MAE columns are additionally bound row by row "
+        "to formal v2 arm records in this JSON."
+    )
+
+    if legacy_present:
+        if LEGACY_CAPACITY_TABLE_LABEL not in by_label:
+            raise ValueError("Missing active legacy capacity-table record")
+        capacity = deepcopy(by_label[LEGACY_CAPACITY_TABLE_LABEL])
+        capacity["current_sha256"] = hashlib.sha256(
+            tables[LEGACY_CAPACITY_TABLE_LABEL].encode("utf-8")
+        ).hexdigest()
+        capacity["status"] = "user_authorized_descriptive_update_verified"
+        capacity["numerical_source_audit"] = (
+            "Q3/Q4 values were independently reconciled to the pinned capacity "
+            "pair CSVs using panel=core, stratum_type=overall, "
+            "stratum_value=all, and tolerance_minutes=5; see the integration "
+            "notes. This descriptive table is not v2-bootstrap bound."
+        )
+        return [capacity, alignment]
+
+    if LEGACY_CAPACITY_TABLE_LABEL in by_label:
+        previous = deepcopy(by_label[LEGACY_CAPACITY_TABLE_LABEL])
+        last_active_sha256 = previous.get("current_sha256")
+        baseline_sha256 = previous.get("baseline_sha256")
+    elif F4_CAPACITY_TABLE_LABEL in by_label:
+        previous_active = by_label[F4_CAPACITY_TABLE_LABEL]
+        previous = deepcopy(previous_active.get("supersedes"))
+        if not isinstance(previous, dict):
+            raise ValueError("Active capacity record lacks superseded provenance")
+        last_active_sha256 = previous.get("last_active_sha256")
+        baseline_sha256 = previous.get("baseline_sha256")
+    else:
+        raise ValueError("Missing capacity-table external provenance record")
+    if previous.get("label") != LEGACY_CAPACITY_TABLE_LABEL:
+        raise ValueError("Superseded capacity-table label drifted")
+    if not all(
+        isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+        for value in (baseline_sha256, last_active_sha256)
+    ):
+        raise ValueError("Superseded capacity-table hashes are invalid")
+
+    chapter_table = tables[F4_CAPACITY_TABLE_LABEL]
+    source = _f4_capacity_source_record(
+        f4_capacity_analysis_dir,
+        chapter_table,
+    )
+    capacity = {
+        "label": F4_CAPACITY_TABLE_LABEL,
+        "current_sha256": hashlib.sha256(chapter_table.encode("utf-8")).hexdigest(),
+        "status": "user_authorized_descriptive_update_verified",
+        "source": source,
+        "supersedes": {
+            "label": LEGACY_CAPACITY_TABLE_LABEL,
+            "status": "superseded",
+            "baseline_sha256": baseline_sha256,
+            "last_active_sha256": last_active_sha256,
+        },
+        "numerical_source_audit": (
+            "The F4-only FiLM-CNN/Pure-CNN capacity table was generated from "
+            "the frozen three-seed, 143-pair analysis artifacts recorded above; "
+            "it is externally source-verified and not v2-bootstrap bound."
+        ),
+    }
+    return [capacity, alignment]
+
+
 def build_payload(
     tex_path: Path = DEFAULT_TEX,
     values_path: Path = DEFAULT_VALUES,
     existing_path: Path = DEFAULT_OUTPUT,
+    *,
+    f4_capacity_analysis_dir: Path = DEFAULT_F4_CAPACITY_ANALYSIS_DIR,
 ) -> dict:
     tex_path = tex_path.resolve()
     values_path = values_path.resolve()
@@ -1745,35 +2022,35 @@ def build_payload(
         "source operands; negate requires one formal source operand."
     )
 
-    external = deepcopy(existing.get("external_table_changes", []))
-    if len(external) != 2:
-        raise ValueError("The two preserved external table-change records are required")
-    for record in external:
-        label = record["label"]
-        if label not in builder.tables:
-            raise ValueError(f"Missing externally tracked table: {label}")
-        record["current_sha256"] = hashlib.sha256(
-            builder.tables[label].encode("utf-8")
-        ).hexdigest()
-        if label == "tab:ch3:legacy_full_wgan_capacity_vs_fixed_pure_cnn":
-            record["status"] = "user_authorized_descriptive_update_verified"
-            record["numerical_source_audit"] = (
-                "Q3/Q4 values were independently reconciled to the pinned capacity "
-                "pair CSVs using panel=core, stratum_type=overall, "
-                "stratum_value=all, and tolerance_minutes=5; see the integration "
-                "notes. This descriptive table is not v2-bootstrap bound."
-            )
-        elif label == "tab:ch3:alignment_window_coverage":
-            record["status"] = "user_authorized_v2_update_verified"
-            record["numerical_source_audit"] = (
-                "Pair counts and coverage remain externally audited; the two "
-                "displayed pooled-MAE columns are additionally bound row by row "
-                "to formal v2 arm records in this JSON."
-            )
+    external = _external_table_records(
+        tex,
+        existing,
+        f4_capacity_analysis_dir=f4_capacity_analysis_dir,
+    )
     scope = deepcopy(existing["scope"])
     scope["excluded_anchor_range"]["start"] = (
         "\\label{subsec:ch3:rq4_conditional_text_value}"
     )
+    coverage_interpretation = (
+        "All displayed numerical cells in the listed inferential/result "
+        "tables plus principal interpretation and Conclusion statements "
+        "are explicitly bound. The pooled-MAE columns in the descriptive "
+        "coverage table are bound to v2 arms, while its pair counts and "
+        "coverage percentages retain their external descriptive audit. "
+        "Training, capacity, constraint, design-count, and RQ4 numbers are "
+        "outside this v2 inferential binding scope."
+    )
+    if F4_CAPACITY_TABLE_LABEL in builder.tables:
+        coverage_interpretation = (
+            "All displayed numerical cells in the listed inferential/result "
+            "tables plus principal interpretation and Conclusion statements "
+            "are explicitly bound. The pooled-MAE columns in the descriptive "
+            "coverage table are bound to v2 arms, while its pair counts and "
+            "coverage percentages retain their external descriptive audit. "
+            "The active F4 capacity table is externally source-verified, but "
+            "training, capacity, constraint, design-count, and RQ4 numbers "
+            "remain outside this v2 inferential binding scope."
+        )
     payload = {
         "schema_version": 1,
         "kind": "chapter3_bootstrap_tex_bindings",
@@ -1792,15 +2069,7 @@ def build_payload(
             "bound_jobs": sorted(bound_jobs),
             "binding_groups": len(builder.bindings),
             "numerical_bindings": atom_count,
-            "interpretation": (
-                "All displayed numerical cells in the listed inferential/result "
-                "tables plus principal interpretation and Conclusion statements "
-                "are explicitly bound. The pooled-MAE columns in the descriptive "
-                "coverage table are bound to v2 arms, while its pair counts and "
-                "coverage percentages retain their external descriptive audit. "
-                "Training, capacity, constraint, design-count, and RQ4 numbers are "
-                "outside this v2 inferential binding scope."
-            ),
+            "interpretation": coverage_interpretation,
         },
         "bindings": builder.bindings,
     }
@@ -1821,9 +2090,19 @@ def main() -> None:
     parser.add_argument("--tex", type=Path, default=DEFAULT_TEX)
     parser.add_argument("--values", type=Path, default=DEFAULT_VALUES)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--f4-capacity-analysis-dir",
+        type=Path,
+        default=DEFAULT_F4_CAPACITY_ANALYSIS_DIR,
+    )
     args = parser.parse_args()
     output = args.output.resolve()
-    payload = build_payload(args.tex, args.values, output)
+    payload = build_payload(
+        args.tex,
+        args.values,
+        output,
+        f4_capacity_analysis_dir=args.f4_capacity_analysis_dir,
+    )
     serialized = _serialized(payload)
     if args.check:
         if not output.exists() or output.read_text(encoding="utf-8") != serialized:

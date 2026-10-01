@@ -131,6 +131,59 @@ def audit_raw_points(frame):
 
 def audit_raw_aggregation(accepted, source):
     """Replay documented aggregation separately from frozen-target checks."""
+    # Count each generated snapshot once. A forward JSON entry can reuse the
+    # same independently generated backward snapshot as another entry.
+    json_snapshots = set()
+    selected_counts = {}
+    missing_selected_counts = 0
+    for directions in source.values():
+        for entry in directions.values():
+            snapshot = entry["snapshot_time_utc"]
+            json_snapshots.add(snapshot)
+            count = entry.get("surface_audit", {}).get("selected_option_observations")
+            if count is None:
+                missing_selected_counts += 1
+                continue
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                raise ValueError("Invalid JSON selected-option observation count")
+            if snapshot in selected_counts and selected_counts[snapshot] != count:
+                raise ValueError(f"Conflicting selected-option counts for {snapshot}")
+            selected_counts[snapshot] = count
+    if missing_selected_counts and selected_counts:
+        raise ValueError("Incomplete JSON selected-option observation counts")
+    exported = accepted.loc[accepted["window_side"].eq("backward")]
+    exported_counts = exported.groupby("target_datetime_utc").size().to_dict()
+    if selected_counts:
+        deficit_snapshots = {
+            snapshot for snapshot, count in selected_counts.items()
+            if count > exported_counts.get(snapshot, 0)
+        }
+        surplus_snapshots = {
+            snapshot for snapshot, count in selected_counts.items()
+            if count < exported_counts.get(snapshot, 0)
+        }
+        count_lineage = {
+            "json_selected_option_observations_total": sum(selected_counts.values()),
+            "count_deficit_snapshot_count": len(deficit_snapshots),
+            "count_deficit_rows": sum(
+                selected_counts[snapshot] - exported_counts.get(snapshot, 0)
+                for snapshot in deficit_snapshots
+            ),
+            "count_surplus_snapshot_count": len(surplus_snapshots),
+            "count_surplus_rows": sum(
+                exported_counts[snapshot] - selected_counts[snapshot]
+                for snapshot in surplus_snapshots
+            ),
+        }
+    else:
+        deficit_snapshots = set()
+        count_lineage = {
+            "json_selected_option_observations_total": None,
+            "count_deficit_snapshot_count": None,
+            "count_deficit_rows": None,
+            "count_surplus_snapshot_count": None,
+            "count_surplus_rows": None,
+        }
     numeric = ["business_days", "strike", "percent_strike", "implied_vol", "weight"]
     values = accepted[numeric].astype(float)
     if not np.isfinite(values.to_numpy()).all() or (values <= 0).any().any():
@@ -151,6 +204,8 @@ def audit_raw_aggregation(accepted, source):
         points.sort(key=lambda point: point[0])
     point_count = compared = mismatched = missing = count_errors = 0
     iv_errors, strike_errors, examples = [], [], []
+    mismatched_nodes, mismatched_snapshots = set(), set()
+    mismatched_on_deficit_snapshots = 0
     for target, directions in source.items():
         for direction, entry in directions.items():
             params = entry.get("surface_params")
@@ -183,7 +238,12 @@ def audit_raw_aggregation(accepted, source):
                 iv_errors.extend(np.abs(delta[:, 1]))
                 bad = np.any(np.abs(delta) > 1e-12, axis=1)
                 mismatched += int(bad.sum())
+                if bad.any():
+                    mismatched_snapshots.add(snapshot)
+                    if snapshot in deficit_snapshots:
+                        mismatched_on_deficit_snapshots += int(bad.sum())
                 for index in np.flatnonzero(bad):
+                    mismatched_nodes.add((snapshot, int(day), int(index)))
                     if len(examples) < 3:
                         examples.append({**context, "issue": "node_mismatch", "point_index": int(index),
                                          "csv_percent_strike_iv": list(points[index]),
@@ -191,6 +251,15 @@ def audit_raw_aggregation(accepted, source):
     return {
         "json_point_count": point_count, "compared_point_count": compared,
         "mismatched_point_count": mismatched, "absolute_tolerance": 1e-12,
+        "json_unique_snapshot_count": len(json_snapshots),
+        "exported_accepted_backward_rows_total": len(exported),
+        "exported_accepted_backward_snapshot_count": len(exported_counts),
+        "mismatched_unique_node_count": len(mismatched_nodes),
+        "mismatched_unique_snapshot_count": len(mismatched_snapshots),
+        "mismatched_point_count_on_deficit_snapshots": (
+            mismatched_on_deficit_snapshots if selected_counts else None
+        ),
+        **count_lineage,
         "missing_group_count": missing, "point_count_error_groups": count_errors,
         "implied_vol_absolute_error": summary(iv_errors) if iv_errors else None,
         "percent_strike_absolute_error": summary(strike_errors) if strike_errors else None,

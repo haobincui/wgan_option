@@ -1,8 +1,9 @@
 # Chapter 3 shared-panel bootstrap v2 integration notes
 
-Status: the approved v2 reporting contract has been merged into
-`docs/chapter3.tex`; the final machine-readable bindings are complete and
-verified in `docs/chapter3_bootstrap_bindings.json`.
+Status: the approved v2 reporting contract was merged into
+`docs/chapter3.tex`. The machine-readable bindings record that earlier
+verified revision; the current chapter has a later Conclusion revision whose
+binding status is described at the end of this note.
 
 This note is an integration and audit record, not a source of reported results.
 The authoritative numerical archive is
@@ -132,20 +133,25 @@ Key artifact SHA-256 digests are:
 - `analysis/new_old_comparison.csv`:
   `368c29e8d2c66acfc41467c127150ecef63f54ac2746e9621418c98d15eab7ad`.
 
-The final binding check passes for 103 binding groups and 539 numerical/display
-atoms across 11 tables, all 15 formal jobs, and the principal repeated prose
-and conclusion values. The six frozen training-diagnostic/RQ4 table hashes
-remain unchanged. The two externally revised descriptive-table records retain
-their prior hashes and explicitly record the authorized, source-verified
-updates; they are not falsely certified as unchanged.
+The final binding check covers 103 binding groups and 539 numerical/display
+atoms across 11 v2-bound tables, all 15 formal jobs, and the principal repeated
+prose and conclusion values. The six frozen training-diagnostic/RQ4 table
+hashes remain unchanged. Two active descriptive-table records are verified
+outside the v2 inference archive: alignment-window coverage and the F4
+model-capacity robustness table. The F4 record explicitly records that it
+supersedes the former capacity-table label
+`tab:ch3:legacy_full_wgan_capacity_vs_fixed_pure_cnn`; the verifier
+requires that old label to be absent from the current chapter rather than
+falsely certifying the replaced table as unchanged.
 
-The binding generator's `--check` also passes, independently reconstructing the
-explicit source mappings. Final SHA-256 digests are:
+The binding generator's `--check` independently reconstructs the explicit
+source mappings. After the F4 capacity subsection was rewritten and the
+frozen table retained verbatim, the Chapter 3 source digest was:
 
 - `docs/chapter3.tex`:
-  `c503ab0ba2a1817fb22e29aab78b8b719c7f036e5f99518c805a63c550af3f65`;
+  `f758005d823e54a366dc08919801907a5fad3f1d61997910d9e7a45fa55b6aa1`;
 - `docs/chapter3_bootstrap_bindings.json`:
-  `7eeefb0e9ff6b9d90f06b53cc218ed558ca0b2eb4fc31e88222ba7ddc6c82512`.
+  `1bd1fe0e6482a8e47842571029fbc05d9906144ee43954a57d012e7139a641e6`.
 
 ## High-impact integrated values
 
@@ -182,17 +188,40 @@ rows; they do not imply retraining or re-estimation of RQ4.
   `af62a197d4a761f08810bd715a3085aac787d781a51b43198e02130a9e55c627`).
   All 280 referenced metrics files were also checked for existence, content
   hash, maximum epoch, and selected validation-best epoch.
-- The historical capacity table reconciles to the Q3 and Q4 pair-metric files
-  under
-  `outputs/experiments/rq3_news_first_vol_film_nolp_capacity_seed_exact_ttm_v1/analysis/`
-  with respective SHA-256 digests
-  `393b9ba1095cc5899bdbe8504deddb5884c2f3d982f87f1b0223b228800d9222`
+- The active F4 model-capacity table is reproduced from the isolated experiment
+  root
+  `outputs/experiments/rq3_news_first_vol_f4_film_pure_capacity_3seed_exact_ttm_v1/`.
+  Its frozen 5,148-row analysis panel is
+  `analysis/f4_pair_metrics.csv.gz` (SHA-256
+  `7eb7b391209a742ce6478867d09e2d2390d65c2f2f6e5a97493ebc2e6fcfd5a2`),
+  derived from the frozen evaluation evidence with SHA-256
+  `8c30ab2a74c6ecb0a5bd40d1aec113afc95b04eda3670cfc4fc5353482621760`.
+  The summary CSV, summary JSON, and complete LaTeX table have respective
+  SHA-256 digests
+  `7aeaa83c8da6714c14fb92e23853fcfe887114d17407afa5433abc15d040ea3e`,
+  `460c9161ad7eaf855af3ed440676f8c17467baaea94466817da2323714498555`,
   and
-  `6975426abd6178f64a25c6585272bf7cc3745e46bbcf54a6bbb3121a096370c6`.
-  Reproduction requires the selector `panel=core`,
-  `stratum_type=overall`, `stratum_value=all`, and
-  `tolerance_minutes=5`. The source also contains 30-minute records, so this
-  selector must not be omitted when reproducing the table.
+  `79ac7c4fb8e57990adc96e2aac37757f4ad14554331cacc49c01a54afdc581d4`.
+  Terminal QA is frozen at `analysis/f4_capacity_qa.json` (SHA-256
+  `da6c827be95f16ab9012b079466d53f2dd503069b64e1dafe4ce6d6491cafbd7`)
+  and records `status=passed`, 36 training jobs, 72 checkpoint rows, 36
+  prediction cells, and the same 5,148 pair-metric rows.
+  The c32 regression-control record is
+  `analysis/f4_c32_regression_control.json` (SHA-256
+  `c200e68d3f5f625365192cb054655e488fff717e671ed75081435658c18b6589`).
+  Both architecture-level c32 MAEs pass the frozen relative tolerance of
+  `5e-5`, and their 143-pair / 45-session panels match the immutable anchors.
+  The 12 old/new Generator and Critic checkpoint hashes are not bitwise
+  identical, so this control explicitly makes no exact-determinism claim.
+  The matrix is six capacities by two architectures by three seeds by 143 F4
+  test pairs. MAE is averaged within seed and then equally across seeds;
+  improvement is calculated from unrounded means as
+  `100*(1-mae_capacity/mae_c32)` within each architecture. Q3 supplies only
+  validation/checkpoint selection and Q4 is the held-out test panel, not
+  training data. The earlier Q3/Q4 capacity experiment remains read-only
+  provenance, but its
+  `tab:ch3:legacy_full_wgan_capacity_vs_fixed_pure_cnn` table is superseded and
+  is no longer a source for the active chapter.
 - Alignment coverage counts `500 / 588 / 634 / 673 / 721` reconcile to
   `inputs/pair_universe_summary.csv` (SHA-256
   `4619626efd7df93744577aa12824acd6a2060dccb90286e2afdf8e89a9dea72a`).
@@ -203,13 +232,18 @@ rows; they do not imply retraining or re-estimation of RQ4.
 
 ## Static and rendered-document QA boundary
 
-Static source QA reports 129 unique labels, balanced LaTeX environments, no
-undefined internal references, resolved new bibliography keys, and no duplicate
-bibliography keys. All 47 targeted tests, scoped Ruff checks, whitespace checks,
-and the formal replay pass. The final verification commands are:
+Static source QA after the F4 table integration reports 129 unique labels,
+balanced LaTeX table and tabular environments, no undefined internal
+references, resolved bibliography keys, and no duplicate bibliography keys.
+The exact generated capacity-table block matches the block in
+`docs/chapter3.tex`. The final verification commands are:
 
 ```bash
+python scripts/rq3/main.py train-news-first-vol-f4-film-pure-capacity-3seed qa --resume
+python -m unittest tests.test_scripts.test_rq3_news_first_vol_f4_film_pure_capacity_3seed -v
+python -m unittest tests.test_scripts.test_rq3_news_first_vol_f4_film_pure_capacity_3seed_analysis -v
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python -m unittest discover -s tests/test_scripts -p 'test_*chapter3*bootstrap*.py' -v
+python -m scripts.rq123.build_chapter3_bootstrap_bindings --write
 python -m scripts.rq123.build_chapter3_bootstrap_bindings --check
 python -m scripts.rq123.verify_chapter3_bootstrap_bindings
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python -m scripts.rq123.chapter3_shared_panel_bootstrap_v2 --verify-only
@@ -222,3 +256,21 @@ their declared thesis paths. The ATM-jump PNG exists under `docs/figures`, but
 the chapter source refers to the master-thesis `Chapter3/Chapter3Figs` layout.
 These asset/path limitations affect rendered-document QA, not the formal-v2
 numerical reconciliation.
+
+## Subsequent Conclusion revision
+
+The Conclusion was rewritten to reflect the F4-only capacity experiment and
+the current alignment-window reporting. The current `docs/chapter3.tex` SHA-256
+is `5f59aa80713bf4a135dd367a88adfb21ce09d77b3a8ae3218fd5d6a15dda86a4`.
+The chapter's alignment-coverage table label was also corrected to match its
+existing reference; no numerical table cell was changed as part of this
+revision. The earlier chapter digest and binding totals above describe the
+previous verified revision, not the current source file.
+
+Current binding regeneration is pending reconciliation of pre-existing RQ1
+table drift. The table's four Panel C standard-error ratios are
+`-0.89 / -1.92 / 0.74 / -0.38`, whereas the frozen v2 contrast records render
+`-0.39 / -1.36 / 0.41 / -0.29`. The current binding builder also still
+expects the former RQ1 panel layout. These differences were not introduced
+by the Conclusion rewrite, and neither the table values nor frozen numerical
+archive were changed to force a passing check.

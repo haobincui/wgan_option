@@ -40,6 +40,8 @@ Historical pooled-pair robustness results remain unchanged in their original out
 
 The archived capacity diagnostics cover Q3 and Q4 separately. They are labelled historical development diagnostics, with same-panel persistence references. Cross-experiment comparisons against a four-fold Pure-CNN MAE and the resulting 9.7%/16.0% apparent gains were removed. No missing capacity folds were invented. RQ4 results were not completed or re-estimated in this revision.
 
+This paragraph records the state of that earlier reporting revision only. The active chapter now supersedes its historical capacity table with the separately trained F4 (2023Q4) FiLM-CNN/Pure-CNN capacity robustness test labelled `tab:ch3:f4_film_pure_capacity_robustness`. The old label `tab:ch3:legacy_full_wgan_capacity_vs_fixed_pure_cnn` and the old Q3/Q4 table remain provenance, not current Chapter 3 evidence.
+
 ## Reproducible artifacts
 
 Paths are relative to the repository root:
@@ -49,6 +51,8 @@ Paths are relative to the repository root:
 | Original MAE and matched-prediction identity | `scripts/rq123/chapter3_point_estimate_audit.py` | `outputs/analysis/chapter3_observed_point_estimates_v1` |
 | Primary shared-market uncertainty | `scripts/rq123/chapter3_main_inference_audit.py` | `outputs/analysis/chapter3_main_inference_verified_v1` |
 | Equal-cell robustness, coverage and historical capacity | `scripts/rq123/chapter3_robustness_point_audit.py` | `outputs/analysis/chapter3_robustness_equal_cell_v1` |
+
+The capacity output in the last row belongs only to the superseded historical audit. The current F4 table is sourced from `outputs/experiments/rq3_news_first_vol_f4_film_pure_capacity_3seed_exact_ttm_v1/analysis/` and is verified through its own terminal QA and the Chapter 3 external-table binding.
 
 Each archive records source hashes and unrounded values. Bootstrap archives preserve panels, schedules and draws for replay. The main inference audit also records the upstream implementation drift observed while a separate task was updating the shared-bootstrap driver/adapter. It verifies the frozen inputs and replays the retained panels and schedules with the stable numerical core; it does not misrepresent the earlier driver's failed live-code hash check as a pass. The intermediate `chapter3_shared_market_panel_bootstrap_10000_point_audit_v1`/`v3` directories are upstream provenance, not the final standalone verification entrypoint.
 
