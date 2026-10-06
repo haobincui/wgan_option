@@ -288,7 +288,7 @@ The non-arbitrage conditions require the option prices implied by the IVS to
 exhibit economically consistent behaviour across both strikes and maturities.
 Let \(C_t^{\mathrm{bl}}(K,T)\) denote the Black--76 (\citet{black76}) European call
 value associated with an IVS quote at time \(t\), let
-\(\tau=\tau^{\mathrm{act}}(t,T)\) be the ACT/365 time to expiry, let
+\(\tau=\tau^{\mathrm{act}}(t,T)\) be the ACT/365 pricing fraction associated with the timestamp \(T\), whose pricing convention is defined in Eq.~\eqref{eq:ch3:pricing_clock}, let
 \(F_t(T)\) be the futures price, and let
 \(D_t(T)=e^{-r\tau}\) be the discount factor. For relative strike
 \(m=K/F_t(T)\), define the forward- and discount-normalised call value as
@@ -1779,18 +1779,18 @@ In this section, we describe the datasets utilized in our research. The dataset 
 
 
 \subsection*{Futures and Options Dataset}\label{sec: ch3: dataset: option}
-We use the U.S. 10-Year Treasury Note (T-Note) future contracts and the future option contracts. Both the future and the option contracts are listed in Chicago Mercantile Exchange (CME). All the contracts can be traded continuously except a one-hour halt from 4PM to 5Pm Central Time (CT). Hence, the contract can be regarded as trading for all the time allowing traders to reactions to economic events at almost anytime.
+We use U.S. 10-Year Treasury Note (T-Note) futures and options on those futures, traded on the Chicago Board of Trade (CBOT), part of CME Group. Regular CME Globex trading runs from Sunday to Friday, with sessions normally opening at 17:00 and closing at 16:00 Chicago time and a daily maintenance break from 16:00 to 17:00. Weekend closures, holiday schedules, and special closing times also apply \citep{cme_tnote_contract_specs}.
 
 
-For the future contract, each contract has a face value of \$100,000 with a maturity of one-year. The contract is rolling, if one contract is expired, a new one-year contract will be opened automatically. There are 4 quarterly contracts listed with maturity months: March, June, September, and December. The contract is expired at the 7th business day before the end of maturity month. The contract is quoted on points with a basis of 100. Noticeably, the contract is American-style which allows the owner to exercise the right anytime before the maturity. 
+The futures trading unit is U.S. Treasury notes with a face value of \$100,000, and delivery months follow the March, June, September, and December quarterly cycle. Each futures contract has its own specified delivery month; rolling a position into another delivery month is a separate transaction. Prices are quoted in points and fractions of points with par on a basis of 100. Under CBOT Rule 19102.F, an expiring contract does not trade during the last seven business days of its named month. Trading termination is distinct from the delivery period, which extends through the last business day of that month under Rule 19103 \citep{cme_tnote_futures_rules}.
 
 
-The contracts are represented by 4 characters. For instance, ``TYM4\footnote{Refinitiv and Bloomberg use ``TY'' as the identifier for the U.S. 10-Year Treasury Note future contract, CME use ``ZN'' for the contract.}'' is the listed contract, where ``TY'' indicates that the underlying asset is the U.S. 10-year Treasury note, ``M'' denotes the expiration month (June),  and ``4'' signifies the last digit of the expiration year (2024).
+In the Refinitiv symbols used here, ``TYM4\footnote{The Refinitiv futures root is ``TY''; the CME Globex futures code is ``ZN''.}'' denotes the June 2024 delivery contract: ``TY'' identifies the Treasury futures family, ``M'' the June delivery month, and ``4'' the final digit of the delivery year.
 
 
-The option contract is derived from one future contract but has maturities for each month. It is expired at the last business day of the maturity month. The option contract is American style which means traders can exercise the contract anytime before the maturity. Each option contract is identified by 6 to 8 characters.
+Each option gives the holder the right to assume a position in one underlying futures contract. For quarterly options, the underlying futures delivery month is the same as the option's named month; for serial options, it is the next month in the quarterly cycle. For these monthly option families, CBOT Rule 19A01.I determines the last trading day using a Friday and business-day convention in the calendar month preceding the named option month, with holiday adjustments. The named month therefore does not itself specify the option's calendar expiration date. The options are American-style and may be exercised on eligible business days before expiration, subject to the exchange's exercise procedures \citep{cme_tnote_options_rules}.
 
-For instance, ``TY11225T3'' is the listed contract name. ``TY'' indicates that the underlying asset is the 10-year T-note future contract. ``11225'' represents the strike price of the contract, which is 112.25 points. ``T'' serves as the indicator of the contract maturity. Also it distinguishes between call and put options, different types of options have different sets of indicators for the contract maturity month. The example contract's maturity month is August. The final digital, ``3'', means the contract's maturity year is 2023.
+For example, ``TY11225T3'' identifies a put option with a strike of 112.25 points and the named month August 2023: ``TY'' is the Treasury futures root, ``11225'' encodes the strike, ``T'' identifies an August put, and ``3'' the final digit of the named year. This serial option refers to the September 2023 futures contract, ``TYU3'', and its last trading date, determined under CBOT Rule 19A01.I, is 21 July 2023.
 
 We extracted the limit order book data from the Refinitiv DataScope, a database vendor received data directly from the CME. Compared with the market order which is execute directly, although the order may not be executed, the limit order allows traders to submit specific prices about the asset based on their understanding about the market. Therefore, it can provide insights about their expectations about the asset.
 
@@ -1802,14 +1802,14 @@ Finally, we extracted the tick data for both the futures and options contracts c
 
 We utilize a 5-minute time interval ($h=5$) to construct the Implied Volatility Surface (IVS) in our main test. Since the option contracts are quoted in terms of price, we employ the Black Model (\cite{black76}, Eq.\ref{eq:ch3:black76}), which is the extended model for Black–Scholes model (\cite{BlackScholes:1973}) when the underlying asset is future contract ($F_t$), to invert the prices and compute the corresponding implied volatilities (IVs).
 
-The raw-price inversion uses the actual UTC trade timestamp \(t\) and the contract's UTC expiration timestamp \(T\), including the intraday fraction:
+The raw-price inversion uses the UTC trade timestamp \(t\) and a pricing cutoff \(T\) for each contract, including the intraday fraction. For quarterly and serial options, the last trading date is determined under CBOT Rule 19A01.I, and \(T\) is set to 16:00 \texttt{America/Chicago} on that date. Conversion to UTC accounts for daylight-saving time. For example, the pricing cutoff for ``TY11225T3'' is 21 July 2023 at 21:00 UTC. This convention distinguishes the pricing cutoff from the expiration of an unexercised option at 17:30 Chicago time under Rule 19A02.A, subject to exchange-designated exceptions \citep{cme_tnote_options_rules}. The calculation applies the 16:00 cutoff uniformly and does not incorporate special holiday early-close times. The ACT/365 pricing fraction is
 
 \begin{equation}\label{eq:ch3:pricing_clock}
 \tau^{\mathrm{act}}(t,T)
 =\frac{\operatorname{seconds}(T-t)}{365\times86{,}400}.
 \end{equation}
 
-For the pricing equations below, write \(\tau=\tau^{\mathrm{act}}(t,T)\). Both the Black variance \(\sigma^2\tau\) and the discount factor \(e^{-r\tau}\) use this ACT/365 fraction. Consequently, the inverted IV is annualised on an actual-calendar-time basis. The business-day maturity \(q\) used to index and interpolate surfaces is a separate coordinate.
+For the pricing equations below, write \(\tau=\tau^{\mathrm{act}}(t,T)\). Both the Black variance \(\sigma^2\tau\) and the discount factor \(e^{-r\tau}\) use this ACT/365 fraction. Consequently, the inverted IV is annualised on an actual-calendar-time basis. The superscript \(\mathrm{act}\) denotes the elapsed-calendar-time measure, while \(T\) denotes the pricing cutoff defined above. The business-day maturity \(q\) used to index and interpolate surfaces is a separate coordinate.
 
 
 \begin{equation}\label{eq:ch3:black76}
@@ -1832,7 +1832,7 @@ For the pricing equations below, write \(\tau=\tau^{\mathrm{act}}(t,T)\). Both t
 
 
 where \(C_t^{\mathrm{bl}}(\cdot)\) and \(P_t^{\mathrm{bl}}(\cdot)\) are the
-theoretical call and put values, \(T\) is the expiration time, \(r\) is the
+theoretical call and put values under the pricing convention defined above, \(T\) is the pricing cutoff defined above, \(r\) is the
 risk-free rate, \(\sigma\) is implied volatility, and \(\Phi(\cdot)\) is the
 standard normal cumulative distribution function. Therefore, for a given
 market price \(C_{i,t}^{\mathrm{mkt}}\) or \(P_{i,t}^{\mathrm{mkt}}\), implied
@@ -2229,7 +2229,7 @@ raw-data-derived gridded IVSs on the same exact-TTM $16\times16$ grid. The money
 \{1,2,3,6,7,8,9,10,14,15,17,21,26,30,35,38\}.
 \end{equation}
 
-The current and target grids retain the scale of the raw ACT/365 IVs. Within each business-day maturity and strike bucket, the construction uses a volume-weighted median and interpolates a total-variance proxy on the fixed grid. The business-day maturity coordinate used for this interpolation does not reannualise the IVs or replace the actual expiry fraction used in the raw-price inversion. Appendix~\ref{app:ch3_target_interpolation} gives the full interpolation rule, maturity-clock distinction, and reproduction audit.
+The current and target grids retain the scale of the raw ACT/365 IVs. Within each business-day maturity and strike bucket, the construction uses a volume-weighted median and interpolates a total-variance proxy on the fixed grid. The business-day maturity coordinate used for this interpolation does not reannualise the IVs or replace the ACT/365 fraction to the pricing cutoff used in the raw-price inversion. Appendix~\ref{app:ch3_target_interpolation} gives the full interpolation rule, maturity-clock distinction, and reproduction audit.
 
 
 After that, The pipeline deliberately preserves three distinct analytical layers. 

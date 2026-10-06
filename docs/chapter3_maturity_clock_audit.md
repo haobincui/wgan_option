@@ -41,9 +41,21 @@ other dataset variants or regenerated workbooks.
 ## Clocks and interpretation
 
 Source Black-76 inversion uses elapsed time from each option trade timestamp
-to its actual expiry timestamp: `tau_ACT365 = elapsed_seconds / (365 * 86400)`.
-The audit reprices accepted source observations with the stored IV and verifies
-their discount factor against `exp(-continuous_rate * tau_ACT365)`.
+to the archived pricing cutoff: `tau_ACT365 = elapsed_seconds / (365 * 86400)`.
+For quarterly/serial TY options, this cutoff is fixed at 16:00
+`America/Chicago` on the rule-derived monthly last-trading date and converted
+to UTC with daylight-saving time taken into account. The archived CSV retains
+the historical field name `expiration_datetime_utc` for this cutoff. ACT/365
+describes the elapsed calendar-time measure; it does not establish that the
+stored cutoff is the legal exercise-expiration timestamp, which is a separate
+contract event. Holiday early-close overrides were not applied to this
+pricing-cutoff mapping, a limitation of the archived convention.
+
+The audit reprices accepted source observations with the stored IV and the
+same stored cutoff, and verifies their discount factor against
+`exp(-continuous_rate * tau_ACT365)`. These checks establish internal numerical
+consistency, not an independent verification of the legal exercise-expiration
+mapping.
 
 The raw surface instead uses business-day coordinates `q`: it interpolates
 `sigma_ACT365**2 * q / 250` and divides by the query `q / 250` before taking
@@ -68,7 +80,8 @@ Black formula's separate standard-deviation and discount inputs, as documented
 in [QuantLib's Black-formula interface](https://github.com/lballabio/QuantLib/blob/master/ql/pricingengines/blackformula.hpp).
 The stored surface
 parameters contain only `business_days`, `implied_vols`, and `percent_strikes`;
-they do not retain node-level actual expiry timestamps or pricing times.
+they do not retain node-level pricing-cutoff or exercise-expiration timestamps
+or pricing times.
 
 ## Observed audit results
 
