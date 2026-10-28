@@ -25,6 +25,7 @@ class VolTrainingBatch:
     # Pair-level train-only label reliability multiplier.  It is deliberately
     # last so historical three- through seven-item tuple meanings never move.
     label_reliability_weight: torch.Tensor | None
+    cell_weight: torch.Tensor | None = None
 
 
 def unpack_vol_training_batch(batch: Sequence[Any]) -> VolTrainingBatch:
@@ -33,12 +34,13 @@ def unpack_vol_training_batch(batch: Sequence[Any]) -> VolTrainingBatch:
     The six-item shape appends the joint ``support_mask`` after the stable
     sample key.  The seven-item shape then appends ``current_support_mask``.
     The eighth item is the scalar-per-row ``label_reliability_weight``.
-    Historical three- through seven-item tuple meanings remain unchanged.
+    The ninth item is an independent per-cell reconstruction/metric weight.
+    Historical three- through eight-item tuple meanings remain unchanged.
     """
 
-    if len(batch) not in {3, 4, 5, 6, 7, 8}:
+    if len(batch) not in {3, 4, 5, 6, 7, 8, 9}:
         raise ValueError(
-            "Expected a 3, 4, 5, 6, 7 or 8 item vol batch, "
+            "Expected a 3, 4, 5, 6, 7, 8 or 9 item vol batch, "
             f"got {len(batch)} item(s)."
         )
     current_surface, text_embedding, target_surface = batch[:3]
@@ -53,7 +55,7 @@ def unpack_vol_training_batch(batch: Sequence[Any]) -> VolTrainingBatch:
     stable_noise_key = batch[4] if len(batch) >= 5 else None
     support_mask = batch[5] if len(batch) >= 6 else None
     current_support_mask = batch[6] if len(batch) >= 7 else None
-    label_reliability_weight = batch[7] if len(batch) == 8 else None
+    label_reliability_weight = batch[7] if len(batch) >= 8 else None
     return VolTrainingBatch(
         current_surface=current_surface,
         text_embedding=text_embedding,
@@ -67,6 +69,7 @@ def unpack_vol_training_batch(batch: Sequence[Any]) -> VolTrainingBatch:
             if label_reliability_weight is None
             else label_reliability_weight.reshape(-1)
         ),
+        cell_weight=batch[8] if len(batch) == 9 else None,
     )
 
 
@@ -144,6 +147,59 @@ def masked_mean_per_sample(
         numerator / denominator.clamp_min(1.0),
         torch.zeros_like(numerator),
     )
+
+
+def validated_cell_weights(
+    cell_weight: torch.Tensor | None,
+    *,
+    reference_surface: torch.Tensor,
+    support_mask: torch.Tensor | None = None,
+) -> torch.Tensor | None:
+    """Validate independent, frozen cell weights as ``[B, 1, H, W]``."""
+
+    if cell_weight is None:
+        return None
+    weights = cell_weight.detach().to(
+        device=reference_surface.device, dtype=reference_surface.dtype,
+        non_blocking=True,
+    )
+    if weights.ndim == 3:
+        weights = weights.unsqueeze(1)
+    if tuple(weights.shape) != tuple(reference_surface.shape):
+        raise ValueError(
+            f"cell_weight shape must match the surface: {tuple(weights.shape)} "
+            f"!= {tuple(reference_surface.shape)}"
+        )
+    if not bool(torch.isfinite(weights).all()) or bool((weights < 0.0).any()):
+        raise ValueError("cell_weight values must be finite and non-negative.")
+    supported_weights = weights if support_mask is None else weights * support_mask
+    if bool((supported_weights.reshape(weights.shape[0], -1).sum(dim=1) <= 0.0).any()):
+        raise ValueError("Every sample must have positive cell_weight mass on its support.")
+    return weights
+
+
+def masked_cell_weighted_mean_per_sample(
+    values: torch.Tensor,
+    support_mask: torch.Tensor | None = None,
+    cell_weight: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Average supported errors within each pair using frozen cell weights.
+
+    Pair/sample weights are applied separately by the batch reducer.  A
+    missing cell weight exactly preserves the historical masked reduction.
+    """
+
+    if cell_weight is None:
+        return masked_mean_per_sample(values, support_mask)
+    weights = validated_cell_weights(
+        cell_weight, reference_surface=values, support_mask=support_mask,
+    )
+    if support_mask is not None:
+        weights = weights * support_mask
+    batch_size = int(values.shape[0])
+    numerator = (values * weights).reshape(batch_size, -1).sum(dim=1)
+    denominator = weights.reshape(batch_size, -1).sum(dim=1)
+    return numerator / denominator
 
 
 def validated_sample_weights(

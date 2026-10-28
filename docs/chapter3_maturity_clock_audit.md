@@ -2,11 +2,12 @@
 
 The historical source IVs reproduce observed prices, and stored raw-IV grids
 reproduce their frozen JSON parameters exactly. Their pricing clock and the
-model's penalty clock nevertheless differ. A separate replay of CSV-to-JSON
-aggregation also finds 200 differing node instances. Post-aggregation audit
-export can lose the multiplicity of identical raw rows; one independently
-checked duplicate trade reproduces a discrepant JSON node when restored. The
-full raw-data lineage is therefore not certified as reproduced. This audit
+model's penalty clock nevertheless differ. A CSV-only aggregation replay finds
+200 differing node instances. The accepted-observation multiplicity replay
+below resolves all these differences by restoring repeated source records
+omitted from the post-aggregation audit export. This verifies aggregation
+conditional on the accepted observations and recorded IVs; it does not replay
+upstream candidate selection or independently re-estimate those IVs. This audit
 preserves the existing datasets, checkpoints, and reported results; it does not certify that the
 penalties implement an actual-expiry no-arbitrage test.
 
@@ -83,7 +84,7 @@ parameters contain only `business_days`, `implied_vols`, and `percent_strikes`;
 they do not retain node-level pricing-cutoff or exercise-expiration timestamps
 or pricing times.
 
-## Observed audit results
+## Original CSV-only audit results
 
 | Check | Result |
 | --- | --- |
@@ -138,12 +139,12 @@ The duplicate source lines can be inspected from the repository root with:
 zgrep -F 'TY1245Q2,,Market Price,2022-02-25T07:14:19.076069208-06,Trade,0.578125,15' 'data/raw/option_data/0#TY+/0#TY+_2022-02-25_2022-02-26.csv.gz'
 ```
 
-That case directly verifies the export-deduplication mechanism. The counts
-strongly implicate the same mechanism for the wider drift, but the complete
-pre-index candidate stream has not been replayed and all 557 missing rows have
-not been individually traced. The audit does not attribute these differences
-to the maturity clock. Frozen JSON parameters remain the reference for
-reproducing historical training targets. The emitted audit status is
+That case directly verifies the export-deduplication mechanism. The original
+CSV-only audit did not trace all 557 omitted occurrences; the accepted-observation
+replay below now reconciles them. The complete pre-index candidate-selection
+process remains outside both checks. These aggregation differences are not
+attributed to the maturity clock. Frozen JSON parameters remain the reference
+for reproducing historical training targets. The unchanged original CLI emits
 `verified_frozen_targets_with_clock_and_lineage_caveats`.
 
 This limitation is consistent with the repository's existing frozen-parameter
@@ -153,6 +154,61 @@ lineage checks. The broader market audit at
 `outputs/rq3/atm_skew_jumps_20260810_final/validation_summary.json` also records
 aggregation mismatches; its scope and counts differ from this chapter-target
 audit. No CSV-based replacement labels are written here.
+
+## Accepted-observation multiplicity replay: 19 October 2026
+
+The reproducible companion is stored in the thesis repository at
+`Chapter3/results/raw_observation_replay_20261019/`. It contains the replay
+script, semantic tests, source hashes, per-observation occurrence counts,
+snapshot and node comparisons, and a separate implementation of aggregation,
+grid interpolation, and support-mask verification. From the thesis root, with
+the research repository in the adjacent directory, run:
+
+```bash
+python Chapter3/results/raw_observation_replay_20261019/replay_observations.py \
+  --research-repo ../wgan_option-rq123-london-timezone \
+  --output-dir /tmp/chapter3-accepted-observation-replay
+```
+
+Accepted export rows are matched to source records by UTC nanosecond timestamp,
+contract, price, and original volume. Occurrence counts come from the raw files,
+not from fitting the stored surface parameters. All 463 relevant source archives
+pass SHA-256 and size checks against the frozen source manifest before and after
+reading. The parser retains positive finite prices and volumes without filtering
+the `Type` column, consistent with the original source parser. Repeated content
+is reproduced as handled by the historical pipeline; this does not establish
+whether identical records represent distinct economic transactions.
+
+The reconstructed strike buckets use volume multiplied by source multiplicity
+for the weighted median IV and weighted mean relative strike. The archived
+configuration requires at least two distinct strikes per retained maturity
+slice. Accepted observations in singleton-strike slices still contribute to
+selected-observation counts but not to retained surface nodes.
+
+| Check | Result |
+| --- | --- |
+| Accepted export rows / restored snapshot-level occurrences | 65,108 / 65,665 |
+| Restored omitted occurrences / affected snapshots | 557 / 291 |
+| Distinct snapshots / remaining selected-count discrepancies | 3,867 / 0 |
+| Distinct nodes / stored node instances checked | 35,596 / 36,375 |
+| Node discrepancies after restoration, absolute tolerance `1e-12` | 0 |
+| Maximum restored IV / relative-strike difference | 0 / `1.1102230246251565e-15` |
+| Five-minute workbook rows / unique pairs | 1,610 / 1,283 |
+| Current and target full-grid values independently checked | 824,320 |
+| Maximum reconstructed grid difference | `2.886579864025407e-15` |
+| Single-precision surface-input or target differences | 0 |
+| Support-mask differences | 0 |
+| Main test pairs / jointly supported scoring cells | 500 / 13,163 |
+
+These grid checks include cells outside common support and workbook rows with
+no common support. The main training, validation, and test pair universe is
+covered. Since the reconstructed model-precision surfaces and scoring masks
+are unchanged, this multiplicity reconciliation requires no replacement labels
+or model rerun. It closes the accepted-observation aggregation discrepancy;
+candidate selection, underlying matching, pricing inputs, and IV inversion are
+held as recorded. All original data and parameter files remain unchanged.
+
+## Variance-clock sensitivity
 
 To quantify the clock difference, the audit also substitutes business-day
 proxy times into Black-76 while holding each source IV and discount factor

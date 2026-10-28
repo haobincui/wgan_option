@@ -221,6 +221,16 @@ def label_reliability_lineage(config: "Config") -> Dict[str, Any]:
     }
 
 
+def cell_weight_lineage(config: "Config") -> Dict[str, Any]:
+    """Persist the independent, current-observation cell-weight contract."""
+
+    return {
+        "cell_weight_mode": str(getattr(config, "cell_weight_mode", "none") or "none"),
+        "cell_weight_manifest_path": str(getattr(config, "cell_weight_manifest_path", "") or ""),
+        "cell_weight_manifest_sha256": str(getattr(config, "cell_weight_manifest_sha256", "") or ""),
+    }
+
+
 @dataclass
 class Config:
     # Data
@@ -238,6 +248,9 @@ class Config:
     news_first_train_end_utc: str = "2023-07-01T00:00:00Z"
     news_first_validation_end_utc: str = "2023-10-01T00:00:00Z"
     support_mask_mode: str = "none"
+    cell_weight_mode: str = "none"
+    cell_weight_manifest_path: str = ""
+    cell_weight_manifest_sha256: str = ""
     news_first_dataset_tolerance_minutes: int = 0
     news_first_text_ablation_mode: str = "real_text"
     news_first_text_information_path: str = "current_surface_plus_real_lp_embedding"
@@ -479,6 +492,22 @@ class Config:
                 "support_mask_mode must be one of ['none', 'raw_joint'], got: "
                 f"{self.support_mask_mode}"
             )
+        self.cell_weight_mode = str(self.cell_weight_mode or "none").strip().lower()
+        if self.cell_weight_mode not in {"none", "black76_current_vega_v1"}:
+            raise ValueError("Unsupported cell_weight_mode: " + self.cell_weight_mode)
+        if self.cell_weight_mode != "none":
+            if self.support_mask_mode != "raw_joint":
+                raise ValueError("Vega cell weighting requires support_mask_mode='raw_joint'")
+            weight_path = Path(self.cell_weight_manifest_path).expanduser()
+            if not self.cell_weight_manifest_path or not weight_path.is_file():
+                raise ValueError("Vega cell weighting requires an existing manifest")
+            weight_sha = str(self.cell_weight_manifest_sha256).strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", weight_sha):
+                raise ValueError("Vega cell weighting requires a manifest SHA-256")
+            if hashlib.sha256(weight_path.read_bytes()).hexdigest() != weight_sha:
+                raise ValueError("Vega cell-weight manifest SHA-256 mismatch")
+            self.cell_weight_manifest_path = str(weight_path.resolve())
+            self.cell_weight_manifest_sha256 = weight_sha
         if (
             self.generator_current_input_mode
             == CURRENT_SUPPORT_MASKED_GENERATOR_INPUT_MODE

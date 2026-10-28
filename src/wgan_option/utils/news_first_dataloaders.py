@@ -245,6 +245,47 @@ def _with_pair_balanced_weights(
     return weighted
 
 
+def _with_cell_weights(
+    items: Sequence[VolSurfaceSample], config: Config,
+) -> list[VolSurfaceSample]:
+    """Attach frozen current-side Vega after pair collapse, without altering IVs."""
+
+    mode = str(getattr(config, "cell_weight_mode", "none") or "none").strip().lower()
+    if mode == "none":
+        return list(items)
+    if mode != "black76_current_vega_v1":
+        raise ValueError(f"Unsupported cell_weight_mode: {mode}")
+    from .vega_weights import load_vega_weight_grid
+
+    weighted: list[VolSurfaceSample] = []
+    for sample in items:
+        if sample.support_mask is None:
+            raise ValueError("Vega cell weights require independent raw_joint support masks.")
+        weights, lineage = load_vega_weight_grid(
+            config.cell_weight_manifest_path,
+            sample.current_snapshot_time_utc,
+            sample.strike_grid,
+            sample.maturity_grid_days,
+            expected_manifest_sha256=config.cell_weight_manifest_sha256,
+        )
+        weights = np.asarray(weights, dtype=np.float32)
+        if weights.shape != sample.surface_shape or sample.support_mask.shape != sample.current_surface.shape:
+            raise ValueError("Cell weight, support mask and surface shapes must agree.")
+        weights = weights.reshape(sample.current_surface.shape)
+        if not np.isfinite(weights).all() or np.any(weights < 0.0):
+            raise ValueError("Vega cell weights must be finite and non-negative.")
+        if float(np.sum(weights * sample.support_mask)) <= 0.0:
+            raise ValueError(f"No supported Vega weight mass for pair {sample.pair_id!r}.")
+        metadata = dict(sample.metadata)
+        metadata["cell_weight_metadata"] = dict(lineage)
+        weighted.append(replace(
+            sample, cell_weight=weights,
+            cell_weight_fingerprint=str(lineage["cell_weight_fingerprint"]),
+            metadata=metadata,
+        ))
+    return weighted
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -1071,6 +1112,10 @@ def _weighted_loader(
         torch.tensor(weights, dtype=torch.float32),
         torch.tensor(stable_keys, dtype=torch.int64),
     ]
+    cell_weight_presence = [sample.cell_weight is not None for sample in items]
+    if any(cell_weight_presence) and not all(cell_weight_presence):
+        raise ValueError("Cell weights must be present for every row or no rows.")
+    emit_cell_weights = bool(items) and all(cell_weight_presence)
     mask_presence = [sample.support_mask is not None for sample in items]
     if any(mask_presence) and not all(mask_presence):
         raise ValueError(
@@ -1100,7 +1145,7 @@ def _weighted_loader(
             raise ValueError(
                 "Label-reliability lineage must be present for every row or no rows."
             )
-        if all(emit_label_reliability):
+        if all(emit_label_reliability) or emit_cell_weights:
             label_reliability_weights = np.asarray(
                 [float(sample.label_reliability_weight) for sample in items],
                 dtype=np.float32,
@@ -1122,6 +1167,16 @@ def _weighted_loader(
                     "[0.5, 2.0]."
                 )
             tensors.append(torch.tensor(label_reliability_weights, dtype=torch.float32))
+        if emit_cell_weights:
+            cell_weights = np.stack([
+                sample.cell_weight.reshape(sample.current_surface.shape) for sample in items
+            ], axis=0)
+            supported_mass = (cell_weights * masks).reshape(len(items), -1).sum(axis=1)
+            if not np.isfinite(cell_weights).all() or np.any(cell_weights < 0.0) or np.any(supported_mass <= 0.0):
+                raise ValueError("Every row requires finite nonnegative weights with positive supported mass.")
+            tensors.append(torch.tensor(cell_weights, dtype=torch.float32))
+    elif emit_cell_weights:
+        raise ValueError("Vega cell weights require raw joint and current support masks.")
     dataset = TensorDataset(*tensors)
     loader = DataLoader(
         dataset,
@@ -1341,6 +1396,9 @@ def create_news_first_vol_surface_dataloaders(
             )
         else:
             test_items = []
+    train_items = _with_cell_weights(train_items, config)
+    val_items = _with_cell_weights(val_items, config)
+    test_items = _with_cell_weights(test_items, config)
     selection = replace(
         selection,
         train_items=train_items,
@@ -1455,6 +1513,14 @@ def create_news_first_vol_surface_dataloaders(
         "text_ablation_splits": text_ablation_splits,
         "pair_text_overlay": pair_text_audit,
         "label_reliability": label_reliability_audit,
+        "cell_weight": {
+            "mode": str(getattr(config, "cell_weight_mode", "none")),
+            "manifest_path": str(getattr(config, "cell_weight_manifest_path", "")),
+            "manifest_sha256": str(getattr(config, "cell_weight_manifest_sha256", "")),
+            "scope": "reconstruction_and_metrics",
+            "basis": "current_snapshot_only",
+            "normalization": "per_pair_on_joint_support",
+        },
     }
     if not materialize_validation_loader:
         split_metadata["validation_data_policy"] = {
@@ -1516,6 +1582,7 @@ def create_news_first_vol_surface_dataloaders(
         ),
         uses_support_masks=bool(training_support["support_mask_applied"]),
         uses_current_support_masks=bool(training_support["support_mask_applied"]),
+        uses_cell_weights=first.cell_weight is not None,
         split_metadata=split_metadata,
     )
 
@@ -1525,6 +1592,8 @@ def create_configured_vol_surface_dataloaders(config: Config) -> VolSurfaceXlsxB
 
     common_path = str(getattr(config, "news_first_common_eval_data_path", "")).strip()
     if not common_path and bool(config.news_first_materialize_validation_loader):
+        if str(getattr(config, "cell_weight_mode", "none")) != "none":
+            raise ValueError("Vega cell weighting requires the explicit news-first split loader.")
         from .merged_xlsx_dataloaders import create_vol_surface_xlsx_dataloaders
 
         return create_vol_surface_xlsx_dataloaders(config)

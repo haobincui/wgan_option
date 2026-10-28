@@ -606,6 +606,10 @@ def _run_spec(job: Mapping[str, Any]) -> RunSpec:
         text_ablation_mode=_mode(job),
         support_mask_mode=str(config.get("support_mask_mode", "none")),
         manifest_path=config_path,
+        config_path=config_path,
+        cell_weight_mode=str(config.get("cell_weight_mode", "none")),
+        cell_weight_manifest_path=str(config.get("cell_weight_manifest_path", "")),
+        cell_weight_manifest_sha256=str(config.get("cell_weight_manifest_sha256", "")),
         metadata={
             **config,
             "capacity_profile": _profile(job),

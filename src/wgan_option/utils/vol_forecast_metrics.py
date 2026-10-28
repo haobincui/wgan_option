@@ -30,6 +30,33 @@ def mean_abs_error(predicted_surface, target_surface, support_mask=None) -> floa
     return float(np.mean(absolute_error[mask]))
 
 
+def cell_weighted_mean_abs_error(
+    predicted_surface, target_surface, cell_weight=None, support_mask=None,
+) -> float:
+    """Vega-weighted MAE in IV units, with per-pair weight normalization."""
+
+    if cell_weight is None:
+        return mean_abs_error(predicted_surface, target_surface, support_mask)
+    predicted = np.asarray(predicted_surface, dtype=np.float64)
+    target = np.asarray(target_surface, dtype=np.float64)
+    weights = np.asarray(cell_weight, dtype=np.float64)
+    if weights.ndim == target.ndim + 1 and weights.shape[0] == 1:
+        weights = weights[0]
+    if predicted.shape != target.shape or weights.shape != target.shape:
+        raise ValueError("Predicted/target surfaces and cell weights must share a shape.")
+    if not np.isfinite(weights).all() or (weights < 0.0).any():
+        raise ValueError("cell_weight values must be finite and non-negative.")
+    mask = np.ones_like(weights, dtype=bool) if support_mask is None else np.asarray(support_mask, dtype=bool)
+    if mask.ndim == weights.ndim + 1 and mask.shape[0] == 1:
+        mask = mask[0]
+    if mask.shape != weights.shape:
+        raise ValueError("support_mask must match the cell-weight shape.")
+    mass = float(weights[mask].sum())
+    if mass <= 0.0:
+        raise ValueError("Cell weights must have positive mass on the supported cells.")
+    return float(np.sum(np.abs(predicted[mask] - target[mask]) * weights[mask]) / mass)
+
+
 def summarize_baseline_aware_metrics(
     recon_values: Iterable[float],
     current_recon_values: Iterable[float],

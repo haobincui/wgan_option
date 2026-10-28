@@ -29,6 +29,7 @@ from utils.training_paths import (
 )
 from wgan_option.config import (
     Config,
+    cell_weight_lineage,
     config_to_dict,
     default_config,
     label_reliability_lineage,
@@ -50,6 +51,7 @@ from wgan_option.utils.visualization import plot_training_curves
 from wgan_option.utils.vol_forecast_metrics import resolve_monitor_metric
 from wgan_option.utils.weighted_training import (
     masked_mean_per_sample,
+    masked_cell_weighted_mean_per_sample,
     reconstruction_training_weights,
     training_weighted_mean,
     unpack_vol_training_batch,
@@ -243,7 +245,7 @@ class VolSurfaceRegressionTrainer(BaseTrainer):
     def _label_reliability_lineage(self) -> dict[str, object]:
         """Return the hash-bound train-label contract for persisted artifacts."""
 
-        return label_reliability_lineage(self.config)
+        return {**label_reliability_lineage(self.config), **cell_weight_lineage(self.config)}
 
     def _step_plateau_scheduler(
         self,
@@ -449,6 +451,10 @@ class VolSurfaceRegressionTrainer(BaseTrainer):
             "val_calendar",
             "val_butterfly",
             "val_delta_shrink",
+            "val_vega_recon",
+            "val_vega_current_recon",
+            "val_vega_baseline_gap",
+            "val_vega_hybrid_score",
         }
 
     def _run_epoch(self, loader, *, train: bool, epoch: int) -> Dict[str, float]:
@@ -478,6 +484,8 @@ class VolSurfaceRegressionTrainer(BaseTrainer):
         with mode_ctx:
             for raw_batch in loader:
                 batch = unpack_vol_training_batch(raw_batch)
+                if getattr(self.config, "cell_weight_mode", "none") != "none" and batch.cell_weight is None:
+                    raise ValueError("Vega reconstruction and validation require independent cell weights.")
                 current_surface = self._to_device(batch.current_surface)
                 text_embedding = self._to_device(batch.text_embedding)
                 real_future = self._to_device(batch.target_surface)
@@ -534,16 +542,24 @@ class VolSurfaceRegressionTrainer(BaseTrainer):
                         torch.abs(current_surface - real_future), support_mask
                     ),
                 }
+                if batch.cell_weight is not None:
+                    per_sample["vega_recon"] = masked_cell_weighted_mean_per_sample(
+                        torch.abs(predicted_future - real_future), support_mask, batch.cell_weight,
+                    )
+                    per_sample["vega_current_recon"] = masked_cell_weighted_mean_per_sample(
+                        torch.abs(current_surface - real_future), support_mask, batch.cell_weight,
+                    )
                 reducer = training_weighted_mean if train else weighted_mean
                 reduced = {
                     name: reducer(
                         values,
-                        recon_weight if name == "recon" else sample_weight,
+                        recon_weight if name in {"recon", "vega_recon"} else sample_weight,
                     )
                     for name, values in per_sample.items()
                 }
 
-                total_loss = float(self.config.lambda_recon) * reduced["recon"]
+                optimized_recon_key = "vega_recon" if batch.cell_weight is not None else "recon"
+                total_loss = float(self.config.lambda_recon) * reduced[optimized_recon_key]
                 if use_calendar_constraint:
                     total_loss = (
                         total_loss
@@ -573,12 +589,12 @@ class VolSurfaceRegressionTrainer(BaseTrainer):
                 batch_numerators = {
                     name: torch.sum(
                         values.detach()
-                        * (recon_weight if name == "recon" else sample_weight)
+                        * (recon_weight if name in {"recon", "vega_recon"} else sample_weight)
                     )
                     for name, values in per_sample.items()
                 }
                 total_numerator = (
-                    float(self.config.lambda_recon) * batch_numerators["recon"]
+                    float(self.config.lambda_recon) * batch_numerators[optimized_recon_key]
                 )
                 if use_calendar_constraint:
                     total_numerator = total_numerator + float(
@@ -598,6 +614,7 @@ class VolSurfaceRegressionTrainer(BaseTrainer):
                     ) * batch_numerators["delta_shrink"]
                 metric_numerators["total"] += float(total_numerator.cpu())
                 for name, numerator in batch_numerators.items():
+                    metric_numerators.setdefault(name, 0.0)
                     metric_numerators[name] += float(numerator.cpu())
                 metric_denominator += (
                     float(batch_size)
@@ -630,6 +647,16 @@ class VolSurfaceRegressionTrainer(BaseTrainer):
                     * max(0.0, val_baseline_gap),
                 }
             )
+            if "vega_recon" in metric_numerators:
+                vega_recon = metric_numerators["vega_recon"] / metric_denominator
+                vega_current = metric_numerators["vega_current_recon"] / metric_denominator
+                vega_gap = vega_recon - vega_current
+                metrics.update({
+                    "val_vega_recon": vega_recon,
+                    "val_vega_current_recon": vega_current,
+                    "val_vega_baseline_gap": vega_gap,
+                    "val_vega_hybrid_score": vega_recon + float(self.config.baseline_penalty_weight) * max(0.0, vega_gap),
+                })
         return metrics
 
     def _init_metrics_file(self) -> None:
@@ -736,6 +763,7 @@ class VolSurfaceRegressionTrainer(BaseTrainer):
                 **self._label_reliability_lineage(),
                 **self._learning_rate_contract(),
                 "metrics": {
+                    **{key: float(value) for key, value in epoch_stats.items() if key.startswith("val_vega_")},
                     "val_recon": float(epoch_stats.get("val_recon", 0.0)),
                     "val_current_recon": float(
                         epoch_stats.get("val_current_recon", 0.0)
@@ -775,6 +803,7 @@ class VolSurfaceRegressionTrainer(BaseTrainer):
                 **self._label_reliability_lineage(),
                 **self._learning_rate_contract(),
                 "metrics": {
+                    **{key: float(value) for key, value in epoch_stats.items() if key.startswith("val_vega_")},
                     "val_recon": float(epoch_stats.get("val_recon", 0.0)),
                     "val_current_recon": float(
                         epoch_stats.get("val_current_recon", 0.0)
@@ -817,6 +846,7 @@ class VolSurfaceRegressionTrainer(BaseTrainer):
                 **self._label_reliability_lineage(),
                 **self._learning_rate_contract(),
                 "metrics": {
+                    **{key: float(value) for key, value in epoch_stats.items() if key.startswith("val_vega_")},
                     "val_recon": float(epoch_stats.get("val_recon", 0.0)),
                     "val_current_recon": float(
                         epoch_stats.get("val_current_recon", 0.0)

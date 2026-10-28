@@ -13,6 +13,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from wgan_option.config import (
     FROZEN_EPOCH_LR_REPLAY_REFIT_MODE,
     Config,
+    cell_weight_lineage,
     label_reliability_lineage,
     load_refit_recipe,
     normalize_refit_mode,
@@ -61,6 +62,7 @@ from wgan_option.utils.training_artifacts import (
     write_metrics_json,
 )
 from wgan_option.utils.vol_forecast_metrics import (
+    cell_weighted_mean_abs_error,
     mean_abs_error,
     resolve_monitor_metric,
     summarize_baseline_aware_metrics,
@@ -69,6 +71,7 @@ from wgan_option.utils.visualization import plot_training_curves
 from wgan_option.utils.weighted_training import (
     apply_surface_mask,
     masked_mean_per_sample,
+    masked_cell_weighted_mean_per_sample,
     reconstruction_training_weights,
     stable_noise_for_keys,
     stable_tensor_row_keys,
@@ -705,7 +708,7 @@ class WGAN_GP:
     def _label_reliability_lineage(self) -> dict[str, object]:
         """Return the hash-bound train-label contract for persisted artifacts."""
 
-        return label_reliability_lineage(self.config)
+        return {**label_reliability_lineage(self.config), **cell_weight_lineage(self.config)}
 
     def _forward_generator(
         self,
@@ -1214,6 +1217,10 @@ class WGAN_GP:
             "val_calendar",
             "val_butterfly",
             "val_delta_shrink",
+            "val_vega_recon",
+            "val_vega_current_recon",
+            "val_vega_baseline_gap",
+            "val_vega_hybrid_score",
         }
 
     def calculate_gradient_penalty(
@@ -1266,10 +1273,13 @@ class WGAN_GP:
         label_reliability_weight: torch.Tensor | None = None,
         support_mask: torch.Tensor | None = None,
         current_support_mask: torch.Tensor | None = None,
+        cell_weight: torch.Tensor | None = None,
         epoch: int = 1,
         loss_scale: float = 1.0,
         skip_optimizer_step: bool = False,
     ):
+        if getattr(self.config, "cell_weight_mode", "none") != "none" and cell_weight is None:
+            raise ValueError("Vega-weighted training requires independent cell weights in every batch.")
         if not skip_optimizer_step and loss_scale == 1.0:
             self.g_optimizer.zero_grad(set_to_none=True)
         noise = self._generator_noise(
@@ -1300,6 +1310,9 @@ class WGAN_GP:
             torch.abs(fake_future - real_future),
             support_mask,
         )
+        vega_recon_per_sample = masked_cell_weighted_mean_per_sample(
+            torch.abs(fake_future - real_future), support_mask, cell_weight,
+        )
         recon_weight = reconstruction_training_weights(
             sample_weight,
             label_reliability_weight,
@@ -1309,6 +1322,7 @@ class WGAN_GP:
         )
         adv_loss = training_weighted_mean(adv_per_sample, sample_weight)
         recon_loss = training_weighted_mean(recon_per_sample, recon_weight)
+        optimized_recon_loss = training_weighted_mean(vega_recon_per_sample, recon_weight)
         cal_penalty = self.calendar_arbitrage_penalty(
             fake_future,
             sample_weight,
@@ -1338,7 +1352,7 @@ class WGAN_GP:
             self._constraint_switches_for_epoch(epoch)
         )
 
-        g_loss = adv_loss + self.lambda_recon * recon_loss
+        g_loss = adv_loss + self.lambda_recon * optimized_recon_loss
         if use_calendar_constraint:
             g_loss = g_loss + self.lambda_calendar * cal_penalty
         if use_butterfly_constraint:
@@ -1359,6 +1373,7 @@ class WGAN_GP:
             "g_butterfly": float(bfly_penalty.detach().cpu()),
             "g_smooth": float(smooth_penalty.detach().cpu()),
             "g_delta_shrink": float(delta_shrink.detach().cpu()),
+            **({"g_vega_recon": float(optimized_recon_loss.detach().cpu())} if cell_weight is not None else {}),
         }
 
     def _discriminator_step(
@@ -1446,6 +1461,8 @@ class WGAN_GP:
         with torch.no_grad():
             for raw_batch in val_loader:
                 batch = unpack_vol_training_batch(raw_batch)
+                if getattr(self.config, "cell_weight_mode", "none") != "none" and batch.cell_weight is None:
+                    raise ValueError("Vega validation requires the same frozen cell weights as training.")
                 current_surface = self._to_device(batch.current_surface)
                 text_embedding = self._to_device(batch.text_embedding)
                 real_future = self._to_device(batch.target_surface)
@@ -1544,7 +1561,15 @@ class WGAN_GP:
                         support_mask,
                     ),
                 }
+                if batch.cell_weight is not None:
+                    per_sample_metrics["vega_recon"] = masked_cell_weighted_mean_per_sample(
+                        torch.abs(fake_future - real_future), support_mask, batch.cell_weight,
+                    )
+                    per_sample_metrics["vega_current_recon"] = masked_cell_weighted_mean_per_sample(
+                        torch.abs(current_surface - real_future), support_mask, batch.cell_weight,
+                    )
                 for name, values in per_sample_metrics.items():
+                    metric_sums.setdefault(name, 0.0)
                     metric_sums[name] += float(torch.sum(values * weights).cpu())
                 total_weight += float(torch.sum(weights).cpu())
 
@@ -1555,7 +1580,7 @@ class WGAN_GP:
         val_recon = metric_sums["recon"] / total_weight
         val_current_recon = metric_sums["current_recon"] / total_weight
         val_baseline_gap = val_recon - val_current_recon
-        return {
+        result = {
             "val_recon": val_recon,
             "val_current_recon": val_current_recon,
             "val_baseline_gap": val_baseline_gap,
@@ -1565,6 +1590,17 @@ class WGAN_GP:
             "val_butterfly": metric_sums["butterfly"] / total_weight,
             "val_delta_shrink": metric_sums["delta_shrink"] / total_weight,
         }
+        if "vega_recon" in metric_sums:
+            vega_recon = metric_sums["vega_recon"] / total_weight
+            vega_current = metric_sums["vega_current_recon"] / total_weight
+            vega_gap = vega_recon - vega_current
+            result.update({
+                "val_vega_recon": vega_recon,
+                "val_vega_current_recon": vega_current,
+                "val_vega_baseline_gap": vega_gap,
+                "val_vega_hybrid_score": vega_recon + self.baseline_penalty_weight * max(0.0, vega_gap),
+            })
+        return result
 
     def _init_metrics_file(self):
         self._metrics_file = os.path.join(self.metrics_path, "training_metrics.json")
@@ -1714,6 +1750,7 @@ class WGAN_GP:
                 **self._refit_lineage(),
                 **self._learning_rate_contract(),
                 "metrics": {
+                    **{key: float(value) for key, value in epoch_stats.items() if key.startswith("val_vega_")},
                     "val_recon": float(epoch_stats.get("val_recon", 0.0)),
                     "val_current_recon": float(
                         epoch_stats.get("val_current_recon", 0.0)
@@ -1761,6 +1798,7 @@ class WGAN_GP:
                 **self._refit_lineage(),
                 **self._learning_rate_contract(),
                 "metrics": {
+                    **{key: float(value) for key, value in epoch_stats.items() if key.startswith("val_vega_")},
                     "val_recon": float(epoch_stats.get("val_recon", 0.0)),
                     "val_current_recon": float(
                         epoch_stats.get("val_current_recon", 0.0)
@@ -1805,6 +1843,7 @@ class WGAN_GP:
                 **self._refit_lineage(),
                 **self._learning_rate_contract(),
                 "metrics": {
+                    **{key: float(value) for key, value in epoch_stats.items() if key.startswith("val_vega_")},
                     "val_recon": float(epoch_stats.get("val_recon", 0.0)),
                     "val_current_recon": float(
                         epoch_stats.get("val_current_recon", 0.0)
@@ -1876,6 +1915,7 @@ class WGAN_GP:
             current_surface = sample.current_surface[0]
             target_surface = sample.target_surface[0]
             support_mask = getattr(sample, "support_mask", None)
+            cell_weight = getattr(sample, "cell_weight", None)
             uncertainty_scores.append(float(uncertainty_score))
             sample_metrics.append(
                 {
@@ -1886,6 +1926,12 @@ class WGAN_GP:
                         current_surface, target_surface, support_mask
                     ),
                     "uncertainty_score": float(uncertainty_score),
+                    "vega_model_recon": cell_weighted_mean_abs_error(
+                        mean_surface, target_surface, cell_weight, support_mask,
+                    ),
+                    "vega_current_recon": cell_weighted_mean_abs_error(
+                        current_surface, target_surface, cell_weight, support_mask,
+                    ),
                 }
             )
 
@@ -1901,16 +1947,21 @@ class WGAN_GP:
             threshold = float(np.percentile(score_array, percentile))
             fallback_recon = []
             current_recon = []
+            vega_fallback_recon = []
+            vega_current_recon = []
             used_fallback_count = 0
             for item in sample_metrics:
                 current_metric = float(item["current_recon"])
                 model_metric = float(item["model_recon"])
                 current_recon.append(current_metric)
+                vega_current_recon.append(float(item["vega_current_recon"]))
                 if float(item["uncertainty_score"]) > threshold:
                     fallback_recon.append(current_metric)
+                    vega_fallback_recon.append(float(item["vega_current_recon"]))
                     used_fallback_count += 1
                 else:
                     fallback_recon.append(model_metric)
+                    vega_fallback_recon.append(float(item["vega_model_recon"]))
             summary = summarize_baseline_aware_metrics(
                 fallback_recon,
                 current_recon,
@@ -1923,9 +1974,16 @@ class WGAN_GP:
                 / float(len(sample_metrics)),
                 **summary,
             }
+            if getattr(self.config, "cell_weight_mode", "none") != "none":
+                vega_summary = summarize_baseline_aware_metrics(
+                    vega_fallback_recon, vega_current_recon,
+                    baseline_penalty_weight=self.baseline_penalty_weight,
+                )
+                row.update({key.replace("val_", "val_vega_", 1): value for key, value in vega_summary.items()})
             candidate_rows.append(row)
-            if best_payload is None or float(row["val_hybrid_score"]) < float(
-                best_payload["val_hybrid_score"]
+            fallback_monitor = "val_vega_hybrid_score" if getattr(self.config, "cell_weight_mode", "none") != "none" else "val_hybrid_score"
+            if best_payload is None or float(row[fallback_monitor]) < float(
+                best_payload[fallback_monitor]
             ):
                 best_payload = row
 
@@ -1939,6 +1997,7 @@ class WGAN_GP:
                 **self._label_reliability_lineage(),
                 "uncertainty_threshold": float(best_payload["uncertainty_threshold"]),
                 "selected_metrics": {
+                    **{key: float(value) for key, value in best_payload.items() if key.startswith("val_vega_")},
                     "val_recon": float(best_payload["val_recon"]),
                     "val_current_recon": float(best_payload["val_current_recon"]),
                     "val_baseline_gap": float(best_payload["val_baseline_gap"]),
@@ -2200,6 +2259,7 @@ class WGAN_GP:
                     label_reliability_weight=batch.label_reliability_weight,
                     support_mask=support_mask,
                     current_support_mask=current_support_mask,
+                    cell_weight=batch.cell_weight,
                     epoch=epoch,
                     loss_scale=1.0 / accum_steps if accum_steps > 1 else 1.0,
                     skip_optimizer_step=not is_accum_boundary

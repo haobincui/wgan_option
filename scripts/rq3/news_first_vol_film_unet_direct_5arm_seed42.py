@@ -41,6 +41,11 @@ from scripts.rq3.news_first_vol_film_unet_direct_5arm_seed42_analysis import (
     fold_session_paired_bootstrap,
     holm_adjust,
 )
+from scripts.rq3.vega_experiment_support import (
+    PARALLEL_MODE,
+    validate_global_evidence,
+    weight_source_paths,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -80,6 +85,8 @@ BENCHMARK_RESULT_KIND = "direct_5arm_full_matrix_epoch1_benchmark_v1"
 REGISTRY_KIND = "direct_5arm_task_registry_v1"
 
 SOURCE_CODE_RELATIVE_PATHS = (
+    "scripts/rq3/vega_experiment_support.py",
+    "scripts/rq3/rq12_direct_vega_parallel.py",
     "scripts/rq3/news_first_vol_film_unet_direct_5arm_seed42.py",
     "scripts/rq3/news_first_vol_film_unet_direct_5arm_seed42_analysis.py",
     "scripts/rq123/news_first_vol_film_nolp_10seed.py",
@@ -506,7 +513,7 @@ def _source_paths(config: Mapping[str, Any]) -> list[tuple[str, Path]]:
             dataset / str(data["workbook_template"]).format(tolerance02="05"),
         ),
         ("support_audit_05m", dataset / "tolerance_05m/surface_support_audit.csv.gz"),
-    ]
+    ] + weight_source_paths(config)
 
 
 def _code_paths() -> list[Path]:
@@ -668,7 +675,8 @@ def _with_workers(config: Mapping[str, Any], workers: int) -> dict[str, Any]:
         int(runtime["benchmark_workers_per_gpu"]),
         int(runtime["fallback_workers_per_gpu"]),
     }
-    if int(workers) not in candidates:
+    shared_parallel = runtime.get("parallel_scheduler_mode") == PARALLEL_MODE
+    if (shared_parallel and int(workers) < 1) or (not shared_parallel and int(workers) not in candidates):
         raise ValueError(f"Workers/GPU must be one of {sorted(candidates)}")
     resolved = deepcopy(dict(config))
     resolved["runtime"] = dict(resolved["runtime"])
@@ -818,8 +826,10 @@ def prepare(
         declared = resolve_path(config["experiment"]["output_root"])
         if root != declared:
             raise ValueError(f"Formal output root drift: {root} != {declared}")
-        if not benchmark_evidence or benchmark_evidence.get("status") != "passed":
-            raise RuntimeError("Formal prepare requires a passed frozen benchmark")
+        user_override = bool(benchmark_evidence) and benchmark_evidence.get("kind") == "rq12_direct_vega_user_concurrency_override_v1" and benchmark_evidence.get("status") == "authorized_by_user" and config["runtime"].get("parallel_scheduler_mode") == PARALLEL_MODE
+        if not benchmark_evidence or (benchmark_evidence.get("status") != "passed" and not user_override):
+            raise RuntimeError("Formal prepare requires a passed benchmark or explicit user concurrency override")
+        validate_global_evidence(config, benchmark_evidence, workers)
     config = _with_workers(config, workers)
     root.mkdir(parents=True)
     for relative in (

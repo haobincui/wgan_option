@@ -1,0 +1,2183 @@
+{
+  "schema_version": 1,
+  "kind": "chapter3_bootstrap_tex_bindings",
+  "status": "complete",
+  "tex_path": "../PhdThesis/Chapter3/chapter3.tex",
+  "values_path": "outputs/analysis/chapter3_shared_market_panel_bootstrap_10000_v2/chapter3_values.json",
+  "scope": {
+    "included": [
+      "rq1_panels_a_b",
+      "rq2_panels_a_b",
+      "rq3_absolute_mae",
+      "associated_mae_prose"
+    ],
+    "excluded": [
+      "other_result_tables",
+      "other_prose",
+      "rq4"
+    ],
+    "excluded_anchor_range": {
+      "start": "\\label{subsec:ch3:rq4_conditional_text_value}",
+      "end": "\\subsection*{Robustness Tests}"
+    }
+  },
+  "coverage": {
+    "required_result_tables": [
+      "tab:ch3:direct_model_results",
+      "tab:ch3:rq2_direct_results",
+      "tab:ch3:rq3_rolling_results"
+    ],
+    "bound_jobs": [
+      "direct_f1_2023q1",
+      "direct_f2_2023q2",
+      "direct_f3_2023q3",
+      "direct_f4_2023q4",
+      "direct_overall",
+      "rq3_full_absolute_mae",
+      "rq3_intervention"
+    ],
+    "binding_groups": 27,
+    "numerical_bindings": 142,
+    "interpretation": "Scoped verification of original-sample MAEs and their arithmetic comparisons in the three main result tables and associated prose. Existing stars and standard-error ratios in their MAE panels are bound to the unchanged paired contrasts. Other results and the historical full-chapter mirror are outside this verification."
+  },
+  "bindings": [
+    {
+      "binding_id": "tab:ch3:direct_model_results_lp_matched_mae",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:direct_model_results",
+        "window_lines": 250
+      },
+      "expected_substring": "FiLM-CNN, matched LP\n& \\rqonebootcell{0.001583118}{}{-0.48}\n& \\rqonebootcell{0.003047944}{***}{-2.19}\n& \\rqonebootcell{0.001802987}{}{0.23}\n& \\rqonebootcell{0.001669953}{*}{-1.96} \\\\",
+      "values": [
+        {
+          "literal": "0.001583118",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "arms",
+            "item_id": "lp_matched",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "contrasts",
+            "item_id": "direct_f1_2023q1_lp_matched_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "-0.48",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "contrasts",
+            "item_id": "direct_f1_2023q1_lp_matched_vs_persistence",
+            "field": "statistic"
+          }
+        },
+        {
+          "literal": "0.003047944",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "arms",
+            "item_id": "lp_matched",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "***",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "contrasts",
+            "item_id": "direct_f2_2023q2_lp_matched_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "-2.19",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "contrasts",
+            "item_id": "direct_f2_2023q2_lp_matched_vs_persistence",
+            "field": "statistic"
+          }
+        },
+        {
+          "literal": "0.001802987",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "arms",
+            "item_id": "lp_matched",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "contrasts",
+            "item_id": "direct_f3_2023q3_lp_matched_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "0.23",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "contrasts",
+            "item_id": "direct_f3_2023q3_lp_matched_vs_persistence",
+            "field": "statistic"
+          }
+        },
+        {
+          "literal": "0.001669953",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "arms",
+            "item_id": "lp_matched",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "*",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "contrasts",
+            "item_id": "direct_f4_2023q4_lp_matched_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "-1.96",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "contrasts",
+            "item_id": "direct_f4_2023q4_lp_matched_vs_persistence",
+            "field": "statistic"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "tab:ch3:direct_model_results_lp_matched_improvement",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:direct_model_results",
+        "window_lines": 250
+      },
+      "expected_substring": "FiLM-CNN, matched LP & \\textbf{0.0695} & \\textbf{0.2592} & $-0.1033$ & \\textbf{0.3561} \\\\",
+      "values": [
+        {
+          "literal": "0.0695",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "ratios",
+            "item_id": "lp_matched__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.2592",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "ratios",
+            "item_id": "lp_matched__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "$-0.1033$",
+          "format": {
+            "style": "fixed",
+            "digits": 4,
+            "math_mode": true
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "ratios",
+            "item_id": "lp_matched__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.3561",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "ratios",
+            "item_id": "lp_matched__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "tab:ch3:direct_model_results_no_text_mae",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:direct_model_results",
+        "window_lines": 250
+      },
+      "expected_substring": "Pure-CNN, no text\n& \\rqonebootcell{0.001583453}{}{-0.52}\n& \\rqonebootcell{0.003050367}{***}{-2.21}\n& \\rqonebootcell{0.001802223}{}{0.15}\n& \\rqonebootcell{0.001670234}{*}{-2.15} \\\\",
+      "values": [
+        {
+          "literal": "0.001583453",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "arms",
+            "item_id": "no_text",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "contrasts",
+            "item_id": "direct_f1_2023q1_no_text_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "-0.52",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "contrasts",
+            "item_id": "direct_f1_2023q1_no_text_vs_persistence",
+            "field": "statistic"
+          }
+        },
+        {
+          "literal": "0.003050367",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "arms",
+            "item_id": "no_text",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "***",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "contrasts",
+            "item_id": "direct_f2_2023q2_no_text_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "-2.21",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "contrasts",
+            "item_id": "direct_f2_2023q2_no_text_vs_persistence",
+            "field": "statistic"
+          }
+        },
+        {
+          "literal": "0.001802223",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "arms",
+            "item_id": "no_text",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "contrasts",
+            "item_id": "direct_f3_2023q3_no_text_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "0.15",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "contrasts",
+            "item_id": "direct_f3_2023q3_no_text_vs_persistence",
+            "field": "statistic"
+          }
+        },
+        {
+          "literal": "0.001670234",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "arms",
+            "item_id": "no_text",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "*",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "contrasts",
+            "item_id": "direct_f4_2023q4_no_text_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "-2.15",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "contrasts",
+            "item_id": "direct_f4_2023q4_no_text_vs_persistence",
+            "field": "statistic"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "tab:ch3:direct_model_results_no_text_improvement",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:direct_model_results",
+        "window_lines": 250
+      },
+      "expected_substring": "Pure-CNN, no text    & 0.0483 & 0.1799 & $-0.0609$ & 0.3393 \\\\",
+      "values": [
+        {
+          "literal": "0.0483",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "ratios",
+            "item_id": "no_text__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.1799",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "ratios",
+            "item_id": "no_text__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "$-0.0609$",
+          "format": {
+            "style": "fixed",
+            "digits": 4,
+            "math_mode": true
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "ratios",
+            "item_id": "no_text__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.3393",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "ratios",
+            "item_id": "no_text__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "tab:ch3:direct_model_results_persistence_mae",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:direct_model_results",
+        "window_lines": 250
+      },
+      "expected_substring": "Persistence\n& \\rqonebootreference{0.001584219}\n& \\rqonebootreference{0.003055866}\n& \\rqonebootreference{0.001801126}\n& \\rqonebootreference{0.001675921} \\\\",
+      "values": [
+        {
+          "literal": "0.001584219",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "arms",
+            "item_id": "persistence",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.003055866",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "arms",
+            "item_id": "persistence",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.001801126",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "arms",
+            "item_id": "persistence",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.001675921",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "arms",
+            "item_id": "persistence",
+            "field": "observed_mean_mae"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "tab:ch3:direct_model_results_persistence_improvement",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:direct_model_results",
+        "window_lines": 250
+      },
+      "expected_substring": "Persistence          & 0.0000 & 0.0000 & \\textbf{0.0000} & 0.0000 \\\\",
+      "values": [
+        {
+          "literal": "0.0000",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "ratios",
+            "item_id": "persistence__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.0000",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "ratios",
+            "item_id": "persistence__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.0000",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "ratios",
+            "item_id": "persistence__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.0000",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "ratios",
+            "item_id": "persistence__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "tab:ch3:rq2_direct_results_bow_mae",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:rq2_direct_results",
+        "window_lines": 250
+      },
+      "expected_substring": "BoW\n& \\rqtwobootcell{0.001583029}{}{-0.46}\n& \\rqtwobootcell{0.003046246}{***}{-2.35}\n& \\rqtwobootcell{0.001813047}{}{0.99}\n& \\rqtwobootcell{0.001669449}{*}{-2.13} \\\\",
+      "values": [
+        {
+          "literal": "0.001583029",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "arms",
+            "item_id": "bow",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "contrasts",
+            "item_id": "direct_f1_2023q1_bow_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "-0.46",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "contrasts",
+            "item_id": "direct_f1_2023q1_bow_vs_persistence",
+            "field": "statistic"
+          }
+        },
+        {
+          "literal": "0.003046246",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "arms",
+            "item_id": "bow",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "***",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "contrasts",
+            "item_id": "direct_f2_2023q2_bow_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "-2.35",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "contrasts",
+            "item_id": "direct_f2_2023q2_bow_vs_persistence",
+            "field": "statistic"
+          }
+        },
+        {
+          "literal": "0.001813047",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "arms",
+            "item_id": "bow",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "contrasts",
+            "item_id": "direct_f3_2023q3_bow_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "0.99",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "contrasts",
+            "item_id": "direct_f3_2023q3_bow_vs_persistence",
+            "field": "statistic"
+          }
+        },
+        {
+          "literal": "0.001669449",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "arms",
+            "item_id": "bow",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "*",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "contrasts",
+            "item_id": "direct_f4_2023q4_bow_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "-2.13",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "contrasts",
+            "item_id": "direct_f4_2023q4_bow_vs_persistence",
+            "field": "statistic"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "tab:ch3:rq2_direct_results_bow_improvement",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:rq2_direct_results",
+        "window_lines": 250
+      },
+      "expected_substring": "BoW\n& \\textbf{0.0752}\n& \\textbf{0.3148}\n& $-0.6619$\n& \\textbf{0.3862} \\\\",
+      "values": [
+        {
+          "literal": "0.0752",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "ratios",
+            "item_id": "bow__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.3148",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "ratios",
+            "item_id": "bow__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "$-0.6619$",
+          "format": {
+            "style": "fixed",
+            "digits": 4,
+            "math_mode": true
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "ratios",
+            "item_id": "bow__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.3862",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "ratios",
+            "item_id": "bow__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "tab:ch3:rq2_direct_results_lp_matched_mae",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:rq2_direct_results",
+        "window_lines": 250
+      },
+      "expected_substring": "Text embedding (matched LP)\n& \\rqtwobootcell{0.001583118}{}{-0.48}\n& \\rqtwobootcell{0.003047944}{***}{-2.19}\n& \\rqtwobootcell{0.001802987}{}{0.23}\n& \\rqtwobootcell{0.001669953}{*}{-1.96} \\\\",
+      "values": [
+        {
+          "literal": "0.001583118",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "arms",
+            "item_id": "lp_matched",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "contrasts",
+            "item_id": "direct_f1_2023q1_lp_matched_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "-0.48",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "contrasts",
+            "item_id": "direct_f1_2023q1_lp_matched_vs_persistence",
+            "field": "statistic"
+          }
+        },
+        {
+          "literal": "0.003047944",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "arms",
+            "item_id": "lp_matched",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "***",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "contrasts",
+            "item_id": "direct_f2_2023q2_lp_matched_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "-2.19",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "contrasts",
+            "item_id": "direct_f2_2023q2_lp_matched_vs_persistence",
+            "field": "statistic"
+          }
+        },
+        {
+          "literal": "0.001802987",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "arms",
+            "item_id": "lp_matched",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "contrasts",
+            "item_id": "direct_f3_2023q3_lp_matched_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "0.23",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "contrasts",
+            "item_id": "direct_f3_2023q3_lp_matched_vs_persistence",
+            "field": "statistic"
+          }
+        },
+        {
+          "literal": "0.001669953",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "arms",
+            "item_id": "lp_matched",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "*",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "contrasts",
+            "item_id": "direct_f4_2023q4_lp_matched_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "-1.96",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "contrasts",
+            "item_id": "direct_f4_2023q4_lp_matched_vs_persistence",
+            "field": "statistic"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "tab:ch3:rq2_direct_results_lp_matched_improvement",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:rq2_direct_results",
+        "window_lines": 250
+      },
+      "expected_substring": "Text embedding (matched LP)\n& 0.0695\n& 0.2592\n& $-0.1033$\n& 0.3561 \\\\",
+      "values": [
+        {
+          "literal": "0.0695",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "ratios",
+            "item_id": "lp_matched__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.2592",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "ratios",
+            "item_id": "lp_matched__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "$-0.1033$",
+          "format": {
+            "style": "fixed",
+            "digits": 4,
+            "math_mode": true
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "ratios",
+            "item_id": "lp_matched__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.3561",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "ratios",
+            "item_id": "lp_matched__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "tab:ch3:rq2_direct_results_sentiment_mae",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:rq2_direct_results",
+        "window_lines": 250
+      },
+      "expected_substring": "Sentiment\n& \\rqtwobootcell{0.001583282}{}{-0.54}\n& \\rqtwobootcell{0.003049653}{***}{-2.29}\n& \\rqtwobootcell{0.001811850}{}{1.19}\n& \\rqtwobootcell{0.001672650}{*}{-2.22} \\\\",
+      "values": [
+        {
+          "literal": "0.001583282",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "arms",
+            "item_id": "sentiment",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "contrasts",
+            "item_id": "direct_f1_2023q1_sentiment_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "-0.54",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "contrasts",
+            "item_id": "direct_f1_2023q1_sentiment_vs_persistence",
+            "field": "statistic"
+          }
+        },
+        {
+          "literal": "0.003049653",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "arms",
+            "item_id": "sentiment",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "***",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "contrasts",
+            "item_id": "direct_f2_2023q2_sentiment_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "-2.29",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "contrasts",
+            "item_id": "direct_f2_2023q2_sentiment_vs_persistence",
+            "field": "statistic"
+          }
+        },
+        {
+          "literal": "0.001811850",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "arms",
+            "item_id": "sentiment",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "contrasts",
+            "item_id": "direct_f3_2023q3_sentiment_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "1.19",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "contrasts",
+            "item_id": "direct_f3_2023q3_sentiment_vs_persistence",
+            "field": "statistic"
+          }
+        },
+        {
+          "literal": "0.001672650",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "arms",
+            "item_id": "sentiment",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "*",
+          "format": {
+            "style": "stars"
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "contrasts",
+            "item_id": "direct_f4_2023q4_sentiment_vs_persistence",
+            "field": "significance_stars"
+          }
+        },
+        {
+          "literal": "-2.22",
+          "format": {
+            "style": "fixed",
+            "digits": 2
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "contrasts",
+            "item_id": "direct_f4_2023q4_sentiment_vs_persistence",
+            "field": "statistic"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "tab:ch3:rq2_direct_results_sentiment_improvement",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:rq2_direct_results",
+        "window_lines": 250
+      },
+      "expected_substring": "Sentiment\n& 0.0592\n& 0.2033\n& $-0.5954$\n& 0.1952 \\\\",
+      "values": [
+        {
+          "literal": "0.0592",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "ratios",
+            "item_id": "sentiment__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.2033",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "ratios",
+            "item_id": "sentiment__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "$-0.5954$",
+          "format": {
+            "style": "fixed",
+            "digits": 4,
+            "math_mode": true
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "ratios",
+            "item_id": "sentiment__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.1952",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "ratios",
+            "item_id": "sentiment__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "tab:ch3:rq2_direct_results_persistence_mae",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:rq2_direct_results",
+        "window_lines": 250
+      },
+      "expected_substring": "Persistence\n& \\rqtwobootreference{0.001584219}\n& \\rqtwobootreference{0.003055866}\n& \\rqtwobootreference{0.001801126}\n& \\rqtwobootreference{0.001675921} \\\\",
+      "values": [
+        {
+          "literal": "0.001584219",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "arms",
+            "item_id": "persistence",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.003055866",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "arms",
+            "item_id": "persistence",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.001801126",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "arms",
+            "item_id": "persistence",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.001675921",
+          "format": {
+            "style": "fixed",
+            "digits": 9
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "arms",
+            "item_id": "persistence",
+            "field": "observed_mean_mae"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "tab:ch3:rq2_direct_results_persistence_improvement",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:rq2_direct_results",
+        "window_lines": 250
+      },
+      "expected_substring": "Persistence\n& 0.0000\n& 0.0000\n& \\textbf{0.0000}\n& 0.0000 \\\\",
+      "values": [
+        {
+          "literal": "0.0000",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "ratios",
+            "item_id": "persistence__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.0000",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "ratios",
+            "item_id": "persistence__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.0000",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "ratios",
+            "item_id": "persistence__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.0000",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "ratios",
+            "item_id": "persistence__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "rq3_film_lp_matched_observed_mae",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:rq3_rolling_results",
+        "window_lines": 250
+      },
+      "expected_substring": "FiLM, matched LP      & 0.0020257411 & 0.1745 & 0.999895 \\\\",
+      "values": [
+        {
+          "literal": "0.0020257411",
+          "format": {
+            "style": "fixed",
+            "digits": 10
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "arms",
+            "item_id": "film_lp_matched",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.1745",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "film_lp_matched__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.999895",
+          "format": {
+            "style": "fixed",
+            "digits": 6
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "film_lp_matched__over__pure_cnn_continue_no_text",
+            "field": "observed_mae_ratio"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "rq3_film_zero_text_observed_mae",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:rq3_rolling_results",
+        "window_lines": 250
+      },
+      "expected_substring": "FiLM, zero text       & 0.0020257684 & 0.1732 & 0.999909 \\\\",
+      "values": [
+        {
+          "literal": "0.0020257684",
+          "format": {
+            "style": "fixed",
+            "digits": 10
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "arms",
+            "item_id": "film_zero_text",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.1732",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "film_zero_text__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.999909",
+          "format": {
+            "style": "fixed",
+            "digits": 6
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "film_zero_text__over__pure_cnn_continue_no_text",
+            "field": "observed_mae_ratio"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "rq3_film_lp_shuffle_observed_mae",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:rq3_rolling_results",
+        "window_lines": 250
+      },
+      "expected_substring": "FiLM, shuffled LP     & 0.0020281161 & 0.0575 & 1.001067 \\\\",
+      "values": [
+        {
+          "literal": "0.0020281161",
+          "format": {
+            "style": "fixed",
+            "digits": 10
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "arms",
+            "item_id": "film_lp_shuffle",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.0575",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "film_lp_shuffle__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "1.001067",
+          "format": {
+            "style": "fixed",
+            "digits": 6
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "film_lp_shuffle__over__pure_cnn_continue_no_text",
+            "field": "observed_mae_ratio"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "rq3_film_bow_observed_mae",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:rq3_rolling_results",
+        "window_lines": 250
+      },
+      "expected_substring": "FiLM, BoW             & 0.0020266582 & 0.1293 & 1.000348 \\\\",
+      "values": [
+        {
+          "literal": "0.0020266582",
+          "format": {
+            "style": "fixed",
+            "digits": 10
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "arms",
+            "item_id": "film_bow",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.1293",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "film_bow__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "1.000348",
+          "format": {
+            "style": "fixed",
+            "digits": 6
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "film_bow__over__pure_cnn_continue_no_text",
+            "field": "observed_mae_ratio"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "rq3_film_sentiment_observed_mae",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:rq3_rolling_results",
+        "window_lines": 250
+      },
+      "expected_substring": "FiLM, sentiment       & 0.0020276669 & 0.0796 & 1.000846 \\\\",
+      "values": [
+        {
+          "literal": "0.0020276669",
+          "format": {
+            "style": "fixed",
+            "digits": 10
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "arms",
+            "item_id": "film_sentiment",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.0796",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "film_sentiment__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "1.000846",
+          "format": {
+            "style": "fixed",
+            "digits": 6
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "film_sentiment__over__pure_cnn_continue_no_text",
+            "field": "observed_mae_ratio"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "rq3_pure_cnn_continue_no_text_observed_mae",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:rq3_rolling_results",
+        "window_lines": 250
+      },
+      "expected_substring": "Pure-CNN continuation & 0.0020259535 & 0.1641 & 1.000000 \\\\",
+      "values": [
+        {
+          "literal": "0.0020259535",
+          "format": {
+            "style": "fixed",
+            "digits": 10
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "arms",
+            "item_id": "pure_cnn_continue_no_text",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.1641",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "pure_cnn_continue_no_text__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "1.000000",
+          "format": {
+            "style": "fixed",
+            "digits": 6
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "pure_cnn_continue_no_text__over__pure_cnn_continue_no_text",
+            "field": "observed_mae_ratio"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "rq3_pure_cnn_parent_observed_mae",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:rq3_rolling_results",
+        "window_lines": 250
+      },
+      "expected_substring": "Pure-CNN parent       & 0.0020265517 & 0.1346 & 1.000295 \\\\",
+      "values": [
+        {
+          "literal": "0.0020265517",
+          "format": {
+            "style": "fixed",
+            "digits": 10
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "arms",
+            "item_id": "pure_cnn_parent",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.1346",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "pure_cnn_parent__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "1.000295",
+          "format": {
+            "style": "fixed",
+            "digits": 6
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "pure_cnn_parent__over__pure_cnn_continue_no_text",
+            "field": "observed_mae_ratio"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "rq3_persistence_observed_mae",
+      "anchor": {
+        "kind": "latex_label",
+        "value": "tab:ch3:rq3_rolling_results",
+        "window_lines": 250
+      },
+      "expected_substring": "Persistence           & 0.0020292830 & 0.0000 & 1.001643 \\\\",
+      "values": [
+        {
+          "literal": "0.0020292830",
+          "format": {
+            "style": "fixed",
+            "digits": 10
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "arms",
+            "item_id": "persistence",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.0000",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "persistence__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "1.001643",
+          "format": {
+            "style": "fixed",
+            "digits": 6
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "persistence__over__pure_cnn_continue_no_text",
+            "field": "observed_mae_ratio"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "rq1_observed_quarterly_prose",
+      "anchor": {
+        "kind": "unique_text",
+        "value": "Relative to persistence, FiLM-CNN reduces its MAE by ",
+        "window_lines": 30
+      },
+      "expected_substring": "Relative to persistence, FiLM-CNN reduces its MAE by 0.0695\\% in\n2023Q1, 0.2592\\% in 2023Q2, and 0.3561\\% in 2023Q4, but increases it by\n0.1033\\% in 2023Q3. Pure-CNN follows the same temporal pattern, with\nrespective improvements of 0.0483\\%, 0.1799\\%, $-0.0609\\%$, and 0.3393\\%. For both\nmodels, the improvement over persistence reaches the 1\\% level after\nHolm adjustment in 2023Q2 and only the 10\\% level in 2023Q4\n($p_{\\mathrm{Holm}}=0.0570$), but neither level in 2023Q1 or 2023Q3. Forecast\nperformance is therefore period-dependent rather than uniformly better than\npersistence.",
+      "values": [
+        {
+          "literal": "0.0695",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "ratios",
+            "item_id": "lp_matched__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.2592",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "ratios",
+            "item_id": "lp_matched__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.1033",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source_expression": {
+            "operator": "negate",
+            "operands": [
+              {
+                "job_id": "direct_f3_2023q3",
+                "collection": "ratios",
+                "item_id": "lp_matched__over__persistence",
+                "field": "observed_improvement_percent"
+              }
+            ]
+          }
+        },
+        {
+          "literal": "0.3561",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "ratios",
+            "item_id": "lp_matched__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.0483",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f1_2023q1",
+            "collection": "ratios",
+            "item_id": "no_text__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.1799",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f2_2023q2",
+            "collection": "ratios",
+            "item_id": "no_text__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "-0.0609",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f3_2023q3",
+            "collection": "ratios",
+            "item_id": "no_text__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.3393",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "direct_f4_2023q4",
+            "collection": "ratios",
+            "item_id": "no_text__over__persistence",
+            "field": "observed_improvement_percent"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "rq1_observed_overall_prose",
+      "anchor": {
+        "kind": "unique_text",
+        "value": "Giving the four folds equal weight, the overall",
+        "window_lines": 30
+      },
+      "expected_substring": "Giving the four folds equal weight, the overall\nMAEs are 0.0020260002 for FiLM-CNN and 0.0020265693 for\nPure-CNN, compared with persistence at 0.0020292830.",
+      "values": [
+        {
+          "literal": "0.0020260002",
+          "format": {
+            "style": "fixed",
+            "digits": 10
+          },
+          "source": {
+            "job_id": "direct_overall",
+            "collection": "arms",
+            "item_id": "lp_matched",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.0020265693",
+          "format": {
+            "style": "fixed",
+            "digits": 10
+          },
+          "source": {
+            "job_id": "direct_overall",
+            "collection": "arms",
+            "item_id": "no_text",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.0020292830",
+          "format": {
+            "style": "fixed",
+            "digits": 10
+          },
+          "source": {
+            "job_id": "direct_overall",
+            "collection": "arms",
+            "item_id": "persistence",
+            "field": "observed_mean_mae"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "rq3_observed_leaders_prose",
+      "anchor": {
+        "kind": "unique_text",
+        "value": "Matched LP has the lowest MAE,",
+        "window_lines": 30
+      },
+      "expected_substring": "Matched LP has the lowest MAE, 0.0020257411, followed\nclosely by zero text at 0.0020257684 and the Pure-CNN continuation at\n0.0020259535. Relative to the Pure-CNN continuation, the matched-LP result has\na normalised MAE of 0.999895, corresponding to a descriptive\nreduction of 0.0105\\%. This reduction is small, and the near equality between matched LP\nand zero text means that the aggregate MAE alone cannot establish that the\ngain is attributable to textual information.",
+      "values": [
+        {
+          "literal": "0.0020257411",
+          "format": {
+            "style": "fixed",
+            "digits": 10
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "arms",
+            "item_id": "film_lp_matched",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.0020257684",
+          "format": {
+            "style": "fixed",
+            "digits": 10
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "arms",
+            "item_id": "film_zero_text",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.0020259535",
+          "format": {
+            "style": "fixed",
+            "digits": 10
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "arms",
+            "item_id": "pure_cnn_continue_no_text",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.999895",
+          "format": {
+            "style": "fixed",
+            "digits": 6
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "film_lp_matched__over__pure_cnn_continue_no_text",
+            "field": "observed_mae_ratio"
+          }
+        },
+        {
+          "literal": "0.0105",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "film_lp_matched__over__pure_cnn_continue_no_text",
+            "field": "observed_improvement_percent"
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "rq3_observed_relative_prose",
+      "anchor": {
+        "kind": "unique_text",
+        "value": "Relative to the Pure-CNN continuation, matched LP and zero text reduce the",
+        "window_lines": 30
+      },
+      "expected_substring": "Relative to the Pure-CNN continuation, matched LP and zero text reduce the\nMAE by 0.0105\\% and 0.0091\\%, respectively, whereas\nshuffled LP increases it by 0.1067\\%. All seven learned conditions have lower\nMAE than persistence.",
+      "values": [
+        {
+          "literal": "0.0105",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "film_lp_matched__over__pure_cnn_continue_no_text",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.0091",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source": {
+            "job_id": "rq3_full_absolute_mae",
+            "collection": "ratios",
+            "item_id": "film_zero_text__over__pure_cnn_continue_no_text",
+            "field": "observed_improvement_percent"
+          }
+        },
+        {
+          "literal": "0.1067",
+          "format": {
+            "style": "fixed",
+            "digits": 4
+          },
+          "source_expression": {
+            "operator": "negate",
+            "operands": [
+              {
+                "job_id": "rq3_full_absolute_mae",
+                "collection": "ratios",
+                "item_id": "film_lp_shuffle__over__pure_cnn_continue_no_text",
+                "field": "observed_improvement_percent"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "binding_id": "rq3_matched_same_checkpoint_mae",
+      "anchor": {
+        "kind": "unique_text",
+        "value": "Both intervention estimates are positive. The matched-input",
+        "window_lines": 30
+      },
+      "expected_substring": "Both intervention estimates are positive. The matched-input\nequal-cell MAE is 0.0020257411. It uses the same 5,000 seed--pair prediction records, checkpoints, and\n40-cell weights and compares with\n0.0020248709 under zero input and 0.0020249323\nunder wrong input.",
+      "values": [
+        {
+          "literal": "0.0020257411",
+          "format": {
+            "style": "fixed",
+            "digits": 10
+          },
+          "source": {
+            "job_id": "rq3_intervention",
+            "collection": "arms",
+            "item_id": "matched_input",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.0020248709",
+          "format": {
+            "style": "fixed",
+            "digits": 10
+          },
+          "source": {
+            "job_id": "rq3_intervention",
+            "collection": "arms",
+            "item_id": "zero_input",
+            "field": "observed_mean_mae"
+          }
+        },
+        {
+          "literal": "0.0020249323",
+          "format": {
+            "style": "fixed",
+            "digits": 10
+          },
+          "source": {
+            "job_id": "rq3_intervention",
+            "collection": "arms",
+            "item_id": "wrong_input",
+            "field": "observed_mean_mae"
+          }
+        }
+      ]
+    }
+  ]
+}

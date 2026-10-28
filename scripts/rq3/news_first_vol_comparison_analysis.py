@@ -103,6 +103,14 @@ SAMPLE_METRIC_COLUMNS = (
     "supported_cell_fraction",
     "support_method",
     "support_grid_fingerprint",
+    "cell_weight_mode",
+    "cell_weight_manifest_sha256",
+    "cell_weight_fingerprint",
+    "cell_weight_metadata_json",
+    "vega_model_mae",
+    "vega_persistence_mae",
+    "vega_mae_gap",
+    "vega_skill",
     "model_mae",
     "model_rmse",
     "model_max_abs",
@@ -174,6 +182,14 @@ PAIR_METRIC_COLUMNS = (
     "atm_ab_flag",
     "article_count",
     "article_weight_sum",
+    "cell_weight_mode",
+    "cell_weight_manifest_sha256",
+    "cell_weight_fingerprint",
+    "cell_weight_metadata_json",
+    "vega_model_mae",
+    "vega_persistence_mae",
+    "vega_mae_gap",
+    "vega_skill",
     "model_mae",
     "model_rmse",
     "model_max_abs",
@@ -402,10 +418,14 @@ class RunSpec:
     generator_current_input_mode: str = "full_current"
     manifest_path: Path | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    config_path: Path | None = None
+    cell_weight_mode: str = "none"
+    cell_weight_manifest_path: str = ""
+    cell_weight_manifest_sha256: str = ""
 
     def as_record(self) -> dict[str, Any]:
         record = asdict(self)
-        for key in ("run_dir", "checkpoint_path", "manifest_path"):
+        for key in ("run_dir", "checkpoint_path", "manifest_path", "config_path"):
             value = record[key]
             record[key] = "" if value is None else str(value)
         record["metadata"] = dict(self.metadata)
@@ -651,6 +671,10 @@ def discover_run_spec(run_dir: str | Path) -> RunSpec:
         generator_current_input_mode=generator_current_input_mode,
         manifest_path=manifest_path.resolve() if manifest_path else None,
         metadata=payload,
+        config_path=(manifest_path.resolve() if manifest_path and manifest_path.name == "training_resolved_config.yaml" else None),
+        cell_weight_mode=str(_recursive_first(payload, ("cell_weight_mode",)) or "none"),
+        cell_weight_manifest_path=str(_recursive_first(payload, ("cell_weight_manifest_path",)) or ""),
+        cell_weight_manifest_sha256=str(_recursive_first(payload, ("cell_weight_manifest_sha256",)) or ""),
     )
 
 
@@ -1609,6 +1633,28 @@ def _prediction_surface_column(predictions: pd.DataFrame) -> str:
     )
 
 
+def _run_cell_weight_contract(run: RunSpec) -> dict[str, str]:
+    """Resolve metric weights from the same frozen configuration as training."""
+
+    payload = _read_mapping(Path(run.config_path)) if run.config_path else run.metadata
+    source_mode = str(_recursive_first(payload, ("cell_weight_mode",)) or "none").strip().lower()
+    mode = str(run.cell_weight_mode or "none").strip().lower()
+    if mode == "none":
+        mode = source_mode
+    elif source_mode != "none" and mode != source_mode:
+        raise ComparisonAnalysisError("Run/config cell_weight_mode mismatch.")
+    if mode not in {"none", "black76_current_vega_v1"}:
+        raise ComparisonAnalysisError(f"Unsupported cell_weight_mode: {mode}")
+    if mode == "none":
+        return {"cell_weight_mode": "none", "cell_weight_manifest_path": "", "cell_weight_manifest_sha256": ""}
+    path = str(run.cell_weight_manifest_path or _recursive_first(payload, ("cell_weight_manifest_path",)) or "")
+    digest = str(run.cell_weight_manifest_sha256 or _recursive_first(payload, ("cell_weight_manifest_sha256",)) or "")
+    if not path or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ComparisonAnalysisError("Vega metrics require a frozen cell-weight manifest path and SHA256.")
+    resolved = _resolve_relative_path(path, run_dir=run.run_dir, manifest_path=run.config_path or run.manifest_path)
+    return {"cell_weight_mode": mode, "cell_weight_manifest_path": str(resolved), "cell_weight_manifest_sha256": digest}
+
+
 def compute_sample_metrics(
     run: RunSpec,
     panel_name: str,
@@ -1620,6 +1666,7 @@ def compute_sample_metrics(
     """Join keyed predictions and compute article-grain metrics and exclusions."""
 
     panel = validate_panel(panel, panel_name=panel_name)
+    cell_contract = _run_cell_weight_contract(run)
     if not isinstance(predictions, pd.DataFrame):
         raise ComparisonAnalysisError("Evaluator must return a pandas DataFrame")
     panel_key = _sample_join_key(panel)
@@ -1737,6 +1784,10 @@ def compute_sample_metrics(
         if weight is None or weight <= 0.0:
             weight = 1.0
         row = base | {
+            "cell_weight_mode": cell_contract["cell_weight_mode"],
+            "cell_weight_manifest_sha256": cell_contract["cell_weight_manifest_sha256"],
+            "cell_weight_fingerprint": "",
+            "cell_weight_metadata_json": "",
             "first_included_tolerance_minutes": _coerce_optional_float(
                 raw.get("first_included_tolerance_minutes")
             ),
@@ -1760,6 +1811,32 @@ def compute_sample_metrics(
             "skill": skill,
             "win": float(_mae_gap_is_win(mae_gap)),
         }
+        if cell_contract["cell_weight_mode"] != "none":
+            from wgan_option.utils.vega_weights import load_vega_weight_grid
+            from wgan_option.utils.vol_forecast_metrics import cell_weighted_mean_abs_error
+
+            # Missing/hash-mismatched Vega provenance is fatal: excluding such
+            # pairs would silently change the frozen common evaluation panel.
+            cell_weights, weight_metadata = load_vega_weight_grid(
+                cell_contract["cell_weight_manifest_path"],
+                str(raw["current_snapshot_time_utc"]),
+                strike_grid, maturity_grid,
+                expected_manifest_sha256=cell_contract["cell_weight_manifest_sha256"],
+            )
+            vega_model = cell_weighted_mean_abs_error(
+                predicted.reshape(shape), target.reshape(shape), cell_weights, support_mask,
+            )
+            vega_persistence = cell_weighted_mean_abs_error(
+                current.reshape(shape), target.reshape(shape), cell_weights, support_mask,
+            )
+            row.update({
+                "vega_model_mae": vega_model,
+                "vega_persistence_mae": vega_persistence,
+                "vega_mae_gap": vega_model - vega_persistence,
+                "vega_skill": 1.0 - vega_model / vega_persistence if vega_persistence > 0.0 else float("nan"),
+                "cell_weight_fingerprint": str(weight_metadata["cell_weight_fingerprint"]),
+                "cell_weight_metadata_json": json.dumps(weight_metadata, sort_keys=True),
+            })
         try:
             row.update(
                 surface_diagnostic_metrics(
@@ -2333,6 +2410,8 @@ def aggregate_pair_metrics(sample_metrics: pd.DataFrame) -> pd.DataFrame:
         "pair_id",
     ]
     metric_columns = [
+        "vega_model_mae",
+        "vega_persistence_mae",
         "model_mae",
         "model_rmse",
         "model_max_abs",
@@ -2378,6 +2457,14 @@ def aggregate_pair_metrics(sample_metrics: pd.DataFrame) -> pd.DataFrame:
         if not bool((weights > 0.0).any()):
             weights = pd.Series(np.ones(len(group)), index=group.index, dtype=float)
         record = dict(zip(group_columns, keys))
+        for lineage_key in ("cell_weight_mode", "cell_weight_manifest_sha256", "cell_weight_fingerprint", "cell_weight_metadata_json"):
+            if lineage_key not in group:
+                record[lineage_key] = "none" if lineage_key == "cell_weight_mode" else ""
+            else:
+                lineage_values = group[lineage_key].fillna("").astype(str).unique()
+                if len(lineage_values) != 1:
+                    raise ComparisonAnalysisError(f"Pair {keys[-1]} has inconsistent {lineage_key}.")
+                record[lineage_key] = lineage_values[0]
         record.update(
             {
                 "session_id": sessions[0],
@@ -2404,6 +2491,11 @@ def aggregate_pair_metrics(sample_metrics: pd.DataFrame) -> pd.DataFrame:
             )
             record[metric] = _weighted_mean(values, weights)
         record["mae_gap"] = record["model_mae"] - record["persistence_mae"]
+        record["vega_mae_gap"] = record["vega_model_mae"] - record["vega_persistence_mae"]
+        record["vega_skill"] = (
+            1.0 - record["vega_model_mae"] / record["vega_persistence_mae"]
+            if record["vega_persistence_mae"] > 0.0 else float("nan")
+        )
         record["mae_tie"] = float(_mae_gap_is_tie(record["mae_gap"]))
         record["skill"] = (
             1.0 - record["model_mae"] / record["persistence_mae"]
@@ -3170,6 +3262,13 @@ class TrainedRunEvaluator:
         checkpoint_support = (
             str(getattr(config, "support_mask_mode", "none") or "none").strip().lower()
         )
+        contract = _run_cell_weight_contract(run)
+        for field_name, expected in contract.items():
+            actual = str(getattr(config, field_name, "none" if field_name == "cell_weight_mode" else "") or "")
+            if field_name == "cell_weight_manifest_path" and expected:
+                actual = str(Path(actual).resolve())
+            if actual != expected:
+                raise ComparisonAnalysisError(f"Run/checkpoint {field_name} mismatch: {expected!r} != {actual!r}")
         if checkpoint_support != str(run.support_mask_mode).strip().lower():
             raise ComparisonAnalysisError(
                 f"Run/checkpoint support mode mismatch: {run.support_mask_mode!r} != "
@@ -3879,6 +3978,20 @@ def _prediction_export_frame(
             "current_support_mask_fingerprint": (current_support_mask_fingerprint),
         }
     )
+    weight_contract = _run_cell_weight_contract(run)
+    if weight_contract["cell_weight_mode"] != "none":
+        lineage = evaluated_samples.copy()
+        lineage[panel_key] = lineage[panel_key].astype(str)
+        lineage = lineage.set_index(panel_key, verify_integrity=True)
+        for column in ("cell_weight_mode", "cell_weight_manifest_sha256", "cell_weight_fingerprint"):
+            if column not in lineage:
+                raise ComparisonAnalysisError(f"Weighted prediction export is missing {column}")
+            output[column] = output[panel_key].astype(str).map(lineage[column])
+            if output[column].isna().any() or output[column].astype(str).eq("").any():
+                raise ComparisonAnalysisError(f"Weighted prediction export has incomplete {column}")
+        for column in ("cell_weight_mode", "cell_weight_manifest_sha256"):
+            if not output[column].eq(weight_contract[column]).all():
+                raise ComparisonAnalysisError(f"Weighted prediction export has inconsistent {column}")
     return output.sort_values("sample_id", kind="stable").reset_index(drop=True)
 
 

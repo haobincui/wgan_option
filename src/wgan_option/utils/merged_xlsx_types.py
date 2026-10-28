@@ -36,6 +36,7 @@ class VolSurfaceXlsxBundle:
     uses_label_reliability_weights: bool = False
     uses_support_masks: bool = False
     uses_current_support_masks: bool = False
+    uses_cell_weights: bool = False
     split_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -87,6 +88,10 @@ class VolSurfaceSample:
     support_grid_fingerprint: str = ""
     support_mask_fingerprint: str = ""
     current_support_mask_fingerprint: str = ""
+    # Current-side option Vega used only for reconstruction and metrics.  IV
+    # inputs and binary support masks retain their original meanings.
+    cell_weight: Optional[np.ndarray] = None
+    cell_weight_fingerprint: str = ""
 
 
 @dataclass

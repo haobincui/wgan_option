@@ -510,6 +510,7 @@ def architecture_profile_contract(config: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def model_contract(config: Mapping[str, Any]) -> dict[str, Any]:
+    from scripts.rq3.vega_experiment_support import cell_weight_fields
     model = _mapping(config["model"], "model")
     training = _mapping(config["training"], "training")
     architecture = architecture_profile_contract(config)
@@ -546,6 +547,8 @@ def model_contract(config: Mapping[str, Any]) -> dict[str, Any]:
         "scheduler_min_lr": float(training["scheduler_min_lr"]),
         "grid_contract_sha256": grid_contract(config)["grid_contract_sha256"],
     }
+    if cell_weight_fields(config):
+        payload["cell_weight_contract"] = cell_weight_fields(config)
     payload["model_contract_sha256"] = payload_sha256(payload)
     return payload
 
@@ -1314,6 +1317,8 @@ def build_job(
         run_config[field] = (
             str(declared) if field == "generator_optimizer_profile" else float(declared)
         )
+    from scripts.rq3.vega_experiment_support import cell_weight_fields
+    run_config.update(cell_weight_fields(config))
     canonical_config_sha = training_config_payload_sha256(run_config)
     state_path = output_root / "checkpoints/full_training_state_best_learned.pt"
     lineage = {
@@ -1335,6 +1340,7 @@ def build_job(
         "pair_universe_sha256": train_summary["pair_universe_sha256"],
         "text_manifest_sha256": sha256_file(overlay_path),
     }
+    lineage.update(cell_weight_fields(config))
     if graft_state_path:
         lineage["graft_state_sha256"] = graft_state_sha256
     provisional_job = {
@@ -4302,6 +4308,9 @@ def _evaluate_prediction_job(
     noise_bank_profile_sha = _noise_bank_profile_sha256(
         job, panel["sample_id"].astype(str).tolist()
     )
+    training_config_path = Path(str(job["training_config_path"])).resolve()
+    training_config = yaml.safe_load(training_config_path.read_text(encoding="utf-8"))
+    weighted = training_config.get("cell_weight_mode", "none") != "none"
     run = RunSpec(
         run_id=str(job["job_id"]),
         run_dir=Path(str(read_json(_status_path(root, str(job["job_id"])))["run_dir"])),
@@ -4312,6 +4321,10 @@ def _evaluate_prediction_job(
         text_ablation_mode="real_text",
         support_mask_mode="raw_joint",
         generator_current_input_mode="current_support_masked",
+        config_path=training_config_path,
+        cell_weight_mode=str(training_config.get("cell_weight_mode", "none")),
+        cell_weight_manifest_path=str(training_config.get("cell_weight_manifest_path", "")),
+        cell_weight_manifest_sha256=str(training_config.get("cell_weight_manifest_sha256", "")),
         metadata={"fold": job["fold"], "arm": job["arm"]},
     )
     evaluator = TrainedRunEvaluator(
@@ -4370,14 +4383,20 @@ def _evaluate_prediction_job(
             "pair_id": standard["pair_id"].astype(str),
             "session_id": standard["session_id"].astype(str),
             "effective_origin_utc": standard["effective_origin_utc"].astype(str),
-            "target_mae": standard["model_mae"].astype(float),
-            "persistence_mae": standard["persistence_mae"].astype(float),
+            "target_mae": standard["vega_model_mae" if weighted else "model_mae"].astype(float),
+            "persistence_mae": standard["vega_persistence_mae" if weighted else "persistence_mae"].astype(float),
             "checkpoint_sha256": checkpoint["sha256"],
             "prediction_sha256": prediction_sha,
             "noise_bank_profile_sha256": noise_bank_profile_sha,
             "inference_determinism_contract_sha256": sha256_file(determinism_contract),
         }
     )
+    if weighted:
+        evidence["unweighted_target_mae"] = standard["model_mae"].astype(float)
+        evidence["unweighted_persistence_mae"] = standard["persistence_mae"].astype(float)
+        for column in ("vega_model_mae", "vega_persistence_mae", "vega_skill",
+                       "cell_weight_mode", "cell_weight_manifest_sha256", "cell_weight_fingerprint"):
+            evidence[column] = standard[column].values
     for column in (
         "current_surface_mean",
         "current_surface_std",
@@ -4422,6 +4441,13 @@ def _evaluate_prediction_job(
         "row_count": int(len(export)),
         "optional_metric_exclusion_count": int(len(metric_exclusions)),
     }
+    if weighted:
+        manifest.update({
+            "primary_metric": "vega_mae",
+            "cell_weight_mode": str(training_config["cell_weight_mode"]),
+            "cell_weight_manifest_path": str(training_config["cell_weight_manifest_path"]),
+            "cell_weight_manifest_sha256": str(training_config["cell_weight_manifest_sha256"]),
+        })
     manifest["payload_sha256"] = payload_sha256(manifest)
     write_json(_prediction_job_manifest_path(root, job), manifest)
     return manifest, evidence

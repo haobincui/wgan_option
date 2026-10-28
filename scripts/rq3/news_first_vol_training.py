@@ -156,6 +156,9 @@ EXPECTED_RAW_JOINT_COMMON_VALIDATION = {"rows": 133, "pairs": 123, "sessions": 3
 EXPECTED_RAW_JOINT_COMMON_TEST = {"rows": 152, "pairs": 130, "sessions": 45}
 EXPECTED_RAW_JOINT_BROAD_TEST = {"rows": 245, "pairs": 182, "sessions": 51}
 DIRECT_CODE_PATHS = (
+    "scripts/rq3/vega_experiment_support.py",
+    "scripts/rq3/rq12_direct_vega_parallel.py",
+    "src/wgan_option/utils/vega_weights.py",
     "scripts/rq3/main.py",
     "scripts/rq3/news_first_vol_training.py",
     "scripts/rq3/news_first_vol_comparison_analysis.py",

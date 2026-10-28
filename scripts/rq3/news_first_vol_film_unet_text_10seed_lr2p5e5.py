@@ -19,6 +19,11 @@ from typing import Any, Iterator, Mapping, Sequence
 
 import pandas as pd
 import yaml
+from scripts.rq3.vega_experiment_support import (
+    cell_weight_fields,
+    validate_parallel_runtime,
+    validate_weighted_experiment,
+)
 
 from scripts.rq123 import news_first_vol_film_nolp_10seed as core
 from scripts.rq3 import news_first_vol_film_unet_direct_5arm_seed42 as direct
@@ -275,13 +280,8 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise ValueError("Benchmark must exercise all 160 cells")
     if int(runtime.get("benchmark_epochs", -1)) != 1:
         raise ValueError("Benchmark must use one epoch")
-    primary = int(runtime.get("benchmark_workers_per_gpu", -1))
-    fallback = int(runtime.get("fallback_workers_per_gpu", -1))
-    if primary < 1 or fallback < 1 or fallback > primary:
-        raise ValueError("Invalid benchmark/fallback concurrency")
-    formal = runtime.get("formal_workers_per_gpu")
-    if formal is not None and int(formal) not in (primary, fallback):
-        raise ValueError("Frozen formal concurrency was not benchmarked")
+    validate_parallel_runtime(runtime)
+    validate_weighted_experiment(config)
 
     with multiseed._core_profile():
         core.architecture_profile_contract(config)
@@ -399,6 +399,8 @@ def _training_payload(
     model = _mapping(config["model"], "model")
     return {
         "generator_conditioning_mode": model["generator_conditioning_mode"],
+        **cell_weight_fields(config),
+        **({"best_checkpoint_metric": training["best_checkpoint_metric"]} if cell_weight_fields(config) else {}),
         "critic_conditioning_mode": model["critic_conditioning_mode"],
         "generator_optimizer_profile": GENERATOR_OPTIMIZER_PROFILE,
         "generator_learning_rate": BACKBONE_LEARNING_RATE,
