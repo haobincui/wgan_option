@@ -1,0 +1,129 @@
+training:
+  data_path: outputs/experiments/_unresolved/folds/2023Q1/sequence_dataset_all_origins.npz
+  sheet_name: sequence_npz
+  sample_unit: surface_pair
+  split_strategy: predefined_manifest
+  split_manifest_path: outputs/experiments/_unresolved/folds/2023Q1/split_manifest_all_origins.csv
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+
+  surface_input_mode: rolling_history
+  history_steps: 6
+  history_interval_minutes: 5
+  history_min_valid_steps: 3
+  history_input_policy: full_history
+  temporal_encoder_mode: masked_gru
+  temporal_hidden_dim: 256
+
+  text_embedding_mode: lp
+  sequence_text_variant: matched_lp
+  text_alignment_mode: matched
+  text_permutation_seed: 20260722
+  text_lineage_mode: strict
+  text_pooling_mode: mean_l2
+  text_preprocessing_mode: pca
+  text_transform_path: outputs/experiments/_unresolved/folds/2023Q1/text_transform_exact_news.npz
+  text_pca_components: 128
+  text_pca_whiten: false
+  text_output_dim: 389
+  normalize_text_embedding: false
+
+  surface_support_mode: raw_observed
+  surface_support_path: outputs/experiments/_unresolved/folds/2023Q1/raw_support_artifact.json
+  support_grid_quantile_low: 0.05
+  support_grid_quantile_high: 0.95
+  support_strike_bins: 16
+  support_maturity_bins: 16
+  support_min_train_pair_cells: 1
+  report_atm7_metric: false
+  min_samples_for_training: 100
+
+  normalize_current_surface: true
+  normalize_target_delta: true
+  forecast_mode: stochastic_wgan
+  conditioning_mode: residual_film
+  critic_conditioning_mode: projection
+  noise_dim: 64
+  gen_base_channels: 32
+  disc_base_channels: 32
+  gen_res_blocks: 2
+  disc_res_blocks: 2
+  text_hidden_dim: 256
+  text_out_dim: 64
+  fusion_hidden_dim: 512
+  text_dropout: 0.30
+  text_gate_initial_value: 0.0
+
+  learning_rate: 2.0e-5
+  generator_learning_rate: 2.0e-5
+  discriminator_learning_rate: 1.0e-5
+  backbone_learning_rate: 2.0e-6
+  text_adapter_learning_rate: 2.0e-5
+  beta_1: 0.5
+  beta_2: 0.9
+  critic_iter: 5
+  lambda_gp: 20.0
+  num_epochs: 30
+  batch_size: 64
+
+  lambda_adv: 0.1
+  lambda_film: 1.0e-4
+  lambda_mismatch: 0.5
+  adv_warmup_epochs: 10
+  lambda_calendar: 0.0
+  lambda_butterfly: 0.0
+  lambda_smooth: 0.0
+  lambda_recon: 20.0
+  recon_weight_mode: short_atm_band
+  recon_atm_range: 0.02
+  recon_atm_short_end_max_days: 21.0
+  recon_atm_multiplier: 8.0
+  use_calendar_constraint: false
+  use_butterfly_constraint: false
+  use_smooth_constraint: false
+  use_recon_constraint: true
+  use_atm_short_loss: true
+  lambda_atm_short: 30.0
+  atm_short_range: 0.02
+  atm_short_max_days: 21.0
+
+  eval_mc_samples: 32
+  eval_reweight_beta_mode: fixed
+  eval_reweight_beta: 0.0
+  eval_aggregation_mode: weighted_mean
+  eval_calibration_levels: [0.5, 0.8, 0.9]
+  arbitrage_violation_tolerance: 1.0e-8
+
+  checkpoint_metric: val_mae
+  extra_checkpoint_metrics:
+    - val_mae_gap_vs_current
+    - val_short_atm_mae_gap_vs_current
+  checkpoint_warmup_epochs: 10
+  use_early_stopping: true
+  early_stopping_patience: 7
+  early_stopping_min_delta: 0.0
+  initial_generator_checkpoint_path: ""
+  parent_text_transform_policy: exact
+  freeze_backbone_epochs: 0
+  seed: 42
+  cuda: true
+  num_workers: 0
+  output_root: ""
+  checkpoints_path: ""
+  metrics_path: ""
+  save_every: 10
+
+generate_result:
+  split: test
+  selection_mode: all
+  selection_count: 0
+  mc_samples: 32
+  reweight_beta_mode: fixed
+  reweight_beta: 0.0
+  aggregation_mode: weighted_mean
+  residual_blend_alpha: 1.0
+  output_dir: test_after10_json
+  save_json: true
+  save_plots: false
+  save_full_atm_timeseries: false

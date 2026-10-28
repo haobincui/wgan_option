@@ -117,6 +117,10 @@ class FilmWGANSample:
     raw_text_embedding: np.ndarray | None = None
     current_support_mask: np.ndarray | None = None
     target_support_mask: np.ndarray | None = None
+    surface_history: np.ndarray | None = None
+    history_support_mask: np.ndarray | None = None
+    history_step_mask: np.ndarray | None = None
+    history_timestamps_utc: tuple[str, ...] = ()
 
     @property
     def surface_shape(self) -> tuple[int, int]:
@@ -436,15 +440,36 @@ def _compute_normalization_stats(samples: Sequence[FilmWGANSample]) -> FilmWGANN
         target_flat = sample.target_surface.astype(np.float32).reshape(-1)
         current_log = np.log(np.clip(current_flat, _VOL_FLOOR, None))
         target_log = np.log(np.clip(target_flat, _VOL_FLOOR, None))
-        current_logs.append(current_log.astype(np.float32))
-        deltas.append((target_log - current_log).astype(np.float32))
-        current_masks.append(
-            (
-                np.asarray(sample.current_support_mask, dtype=bool).reshape(-1)
-                if sample.current_support_mask is not None
-                else np.ones_like(current_log, dtype=bool)
+        if sample.surface_history is None:
+            current_logs.append(current_log.astype(np.float32))
+            current_masks.append(
+                (
+                    np.asarray(sample.current_support_mask, dtype=bool).reshape(-1)
+                    if sample.current_support_mask is not None
+                    else np.ones_like(current_log, dtype=bool)
+                )
             )
-        )
+        else:
+            history = np.asarray(sample.surface_history, dtype=np.float32)
+            history_support = np.asarray(sample.history_support_mask, dtype=bool)
+            history_steps = np.asarray(sample.history_step_mask, dtype=bool).reshape(-1)
+            if history.ndim != 3 or history_support.shape != history.shape:
+                raise ValueError(
+                    f"Sample {sample.sample_id} has invalid rolling-history arrays."
+                )
+            if history_steps.size != history.shape[0]:
+                raise ValueError(
+                    f"Sample {sample.sample_id} history step-mask length mismatch."
+                )
+            for step_index in np.flatnonzero(history_steps):
+                step_log = np.log(
+                    np.clip(history[int(step_index)].reshape(-1), _VOL_FLOOR, None)
+                ).astype(np.float32)
+                current_logs.append(step_log)
+                current_masks.append(
+                    history_support[int(step_index)].reshape(-1)
+                )
+        deltas.append((target_log - current_log).astype(np.float32))
         delta_masks.append(sample.evaluation_support_mask.reshape(-1))
         text_embeddings.append(sample.text_embedding.astype(np.float32))
     current_logs_arr = np.stack(current_logs, axis=0)
@@ -569,6 +594,10 @@ def _validate_shape(sample_id: str, surface: np.ndarray, expected_shape: tuple[i
 
 
 def load_film_wgan_samples(config: FilmWGANTrainConfig | FilmWGANSampleConfig) -> list[FilmWGANSample]:
+    if str(config.surface_input_mode).strip().lower() == "rolling_history":
+        from .sequence_data import load_sequence_samples
+
+        return load_sequence_samples(config)
     workbook_path = Path(config.data_path)
     dataframe = pd.read_excel(workbook_path, sheet_name=config.sheet_name)
     if "training_candidate_flag" in dataframe.columns:
@@ -1746,6 +1775,10 @@ def _check_consistent_grids(samples: Sequence[FilmWGANSample]) -> tuple[np.ndarr
 
 
 def create_train_val_bundle(config: FilmWGANTrainConfig) -> FilmWGANDataBundle:
+    if str(config.surface_input_mode).strip().lower() == "rolling_history":
+        from .sequence_data import create_sequence_data_bundle
+
+        return create_sequence_data_bundle(config)
     samples = load_film_wgan_samples(config)
     if len(samples) < int(config.min_samples_for_training):
         raise ValueError(f"Standalone FiLM WGAN requires at least {config.min_samples_for_training} samples.")
@@ -1851,6 +1884,10 @@ def select_samples(samples: Sequence[FilmWGANSample], *, selection_mode: str, se
 
 
 def split_samples(config: FilmWGANSampleConfig, samples: Sequence[FilmWGANSample]) -> list[FilmWGANSample]:
+    if str(config.surface_input_mode).strip().lower() == "rolling_history":
+        from .sequence_data import select_sequence_samples
+
+        return select_sequence_samples(config, samples)
     partitions, _manifest, _transform = _prepare_partitioned_samples(config, samples)
     normalized_split = str(config.split).strip().lower()
     if normalized_split == "train":

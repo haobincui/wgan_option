@@ -36,7 +36,11 @@ from .losses import (
     build_reconstruction_weight_template,
     weighted_surface_mae,
 )
-from .models import FilmWGANGenerator, reconstruct_future_surface
+from .models import (
+    FilmWGANGenerator,
+    TemporalFilmWGANGenerator,
+    reconstruct_future_surface,
+)
 from .plotting import extract_atm_short_value, plot_atm_vol_timeseries, plot_film_wgan_payload
 
 
@@ -101,6 +105,68 @@ def prepare_condition_tensors(
     height, width = sample.surface_shape
     current_flat = torch.tensor(sample.current_surface.reshape(1, -1), dtype=torch.float32, device=device)
     text_embedding = torch.tensor(sample.text_embedding.reshape(1, -1), dtype=torch.float32, device=device)
+    if sample.surface_history is not None:
+        history_values = np.asarray(sample.surface_history, dtype=np.float32).copy()
+        support_values = np.asarray(
+            sample.history_support_mask,
+            dtype=np.float32,
+        ).copy()
+        step_values = np.asarray(
+            sample.history_step_mask,
+            dtype=np.float32,
+        ).copy()
+        if str(
+            sample.metadata.get("history_input_policy", "full_history")
+        ).strip().lower() == "current_only":
+            history_values[:-1] = 0.0
+            support_values[:-1] = 0.0
+            step_values[:-1] = 0.0
+        history = torch.tensor(
+            history_values,
+            dtype=torch.float32,
+            device=device,
+        ).unsqueeze(0)
+        history_support = torch.tensor(
+            support_values,
+            dtype=torch.float32,
+            device=device,
+        ).unsqueeze(0)
+        history_steps = torch.tensor(
+            step_values,
+            dtype=torch.float32,
+            device=device,
+        ).reshape(1, -1, 1, 1)
+        history_log = torch.log(torch.clamp(history, min=1e-4))
+        if normalize_current_surface:
+            mean = normalization.current_log_mean.view(1, 1, height, width)
+            std = normalization.current_log_std.view(1, 1, height, width)
+            history_log = normalize_tensor(history_log, mean, std)
+        valid_cells = (history_support > 0.0) & (history_steps > 0.0)
+        history_log = torch.where(
+            valid_cells,
+            history_log,
+            torch.zeros_like(history_log),
+        )
+        history_support = torch.where(
+            history_steps > 0.0,
+            history_support,
+            torch.zeros_like(history_support),
+        )
+        step_channel = history_steps.expand_as(history_support)
+        current_features = torch.stack(
+            [history_log, history_support, step_channel],
+            dim=2,
+        )
+        text_features = (
+            normalize_tensor(
+                text_embedding,
+                normalization.text_mean,
+                normalization.text_std,
+            )
+            if normalize_text_embedding
+            else text_embedding
+        )
+        return current_flat, current_features, text_features
     if normalize_current_surface:
         current_features_flat = normalize_surface_tensor(current_flat, normalization.current_log_mean, normalization.current_log_std)
     else:
@@ -383,7 +449,7 @@ def _short_atm_metrics(
     recon_weights_surface: torch.Tensor | None,
     atm_short_mask_surface: torch.Tensor | None,
     support_mask: np.ndarray | None = None,
-) -> dict[str, float]:
+) -> dict[str, float | str]:
     metric_device = (
         recon_weights_surface.device
         if recon_weights_surface is not None
@@ -418,7 +484,12 @@ def _short_atm_metrics(
         device=metric_device,
     )
 
-    metrics = {
+    supported_cell_count = (
+        int((atm_short_mask_surface * support_tensor).sum().item())
+        if atm_short_mask_surface is not None
+        else 0
+    )
+    metrics: dict[str, float | str] = {
         "short_atm_weighted_mae": 0.0,
         "current_short_atm_weighted_mae": 0.0,
         "short_atm_mae_gap_vs_current": 0.0,
@@ -427,6 +498,10 @@ def _short_atm_metrics(
         "current_atm_short_pure_mae": 0.0,
         "atm_short_pure_mae_gap_vs_current": 0.0,
         "atm_short_pure_win_flag_vs_current": 0.0,
+        "short_atm_supported_cell_count": float(supported_cell_count),
+        "short_atm_metric_status": (
+            "ok" if supported_cell_count > 0 else "no_supported_short_atm_cells"
+        ),
     }
     if recon_weights_surface is not None:
         supported_weights = recon_weights_surface * support_tensor
@@ -974,7 +1049,7 @@ class FilmWGANSampler:
         self.plots_dir = self.run_dir / "plots"
         self.device = torch.device("cuda:0" if (config.cuda and torch.cuda.is_available()) else "cpu")
 
-    def _load_generator(self) -> tuple[FilmWGANGenerator, dict[str, Any], FilmWGANTrainConfig, TensorNormalizationStats]:
+    def _load_generator(self) -> tuple[torch.nn.Module, dict[str, Any], FilmWGANTrainConfig, TensorNormalizationStats]:
         if not str(self.config.checkpoint_path).strip():
             raise ValueError("checkpoint_path must be set for standalone FiLM WGAN sampling.")
         checkpoint = load_checkpoint(self.config.checkpoint_path, self.device)
@@ -982,21 +1057,53 @@ class FilmWGANSampler:
         surface_shape = tuple(int(v) for v in checkpoint["surface_shape"])
         forecast_mode = str(checkpoint.get("forecast_mode", train_config.forecast_mode)).strip().lower()
         conditioning_mode = str(checkpoint.get("conditioning_mode", train_config.conditioning_mode)).strip().lower()
-        generator = FilmWGANGenerator(
-            surface_height=surface_shape[0],
-            surface_width=surface_shape[1],
-            embedding_dim=int(checkpoint["embedding_dim"]),
-            noise_dim=0 if forecast_mode == "deterministic" else int(train_config.noise_dim),
-            base_channels=int(train_config.gen_base_channels),
-            res_blocks=int(train_config.gen_res_blocks),
-            text_hidden_dim=int(train_config.text_hidden_dim),
-            text_out_dim=int(train_config.text_out_dim),
-            fusion_hidden_dim=int(train_config.fusion_hidden_dim),
-            conditioning_mode=conditioning_mode,
-            text_dropout=float(train_config.text_dropout),
-            text_gate_initial_value=float(train_config.text_gate_initial_value),
-            current_surface_channels=int(checkpoint.get("current_surface_channels", 1)),
-        ).to(self.device)
+        rolling_history = str(
+            checkpoint.get(
+                "surface_input_mode",
+                train_config.surface_input_mode,
+            )
+        ).strip().lower() == "rolling_history"
+        if rolling_history:
+            generator = TemporalFilmWGANGenerator(
+                surface_height=surface_shape[0],
+                surface_width=surface_shape[1],
+                history_steps=int(
+                    checkpoint.get("history_steps", train_config.history_steps)
+                ),
+                embedding_dim=int(checkpoint["embedding_dim"]),
+                noise_dim=(
+                    0
+                    if forecast_mode == "deterministic"
+                    else int(train_config.noise_dim)
+                ),
+                base_channels=int(train_config.gen_base_channels),
+                res_blocks=int(train_config.gen_res_blocks),
+                temporal_hidden_dim=int(train_config.temporal_hidden_dim),
+                text_hidden_dim=int(train_config.text_hidden_dim),
+                text_out_dim=int(train_config.text_out_dim),
+                fusion_hidden_dim=int(train_config.fusion_hidden_dim),
+                text_dropout=float(train_config.text_dropout),
+                text_gate_initial_value=float(train_config.text_gate_initial_value),
+                current_surface_channels=int(
+                    checkpoint.get("current_surface_channels", 3)
+                ),
+            ).to(self.device)
+        else:
+            generator = FilmWGANGenerator(
+                surface_height=surface_shape[0],
+                surface_width=surface_shape[1],
+                embedding_dim=int(checkpoint["embedding_dim"]),
+                noise_dim=0 if forecast_mode == "deterministic" else int(train_config.noise_dim),
+                base_channels=int(train_config.gen_base_channels),
+                res_blocks=int(train_config.gen_res_blocks),
+                text_hidden_dim=int(train_config.text_hidden_dim),
+                text_out_dim=int(train_config.text_out_dim),
+                fusion_hidden_dim=int(train_config.fusion_hidden_dim),
+                conditioning_mode=conditioning_mode,
+                text_dropout=float(train_config.text_dropout),
+                text_gate_initial_value=float(train_config.text_gate_initial_value),
+                current_surface_channels=int(checkpoint.get("current_surface_channels", 1)),
+            ).to(self.device)
         generator.load_state_dict(checkpoint["generator_state_dict"])
         generator.eval()
         normalization = normalization_stats_to_tensors(checkpoint["normalization_stats"], self.device)
@@ -1171,7 +1278,12 @@ class FilmWGANSampler:
                                 sample.metadata.get(
                                     "alignment_type",
                                     "exact",
-                                ): int(sample.metadata.get("news_count", 1))
+                                ): int(
+                                    sample.metadata.get(
+                                        "news_count",
+                                        sample.metadata.get("news_count_total", 1),
+                                    )
+                                )
                             },
                         ),
                         ensure_ascii=True,
@@ -1190,8 +1302,63 @@ class FilmWGANSampler:
                         sample.metadata.get("article_ids", []),
                         ensure_ascii=True,
                     ),
-                    "news_count": int(sample.metadata.get("news_count", 1)),
-                    "unique_embedding_count": int(sample.metadata.get("unique_embedding_count", 1)),
+                    "news_count": int(
+                        sample.metadata.get(
+                            "news_count",
+                            sample.metadata.get("news_count_total", 1),
+                        )
+                    ),
+                    "news_count_total": int(
+                        sample.metadata.get(
+                            "news_count_total",
+                            sample.metadata.get("news_count", 0),
+                        )
+                    ),
+                    "news_count_0_15": int(sample.metadata.get("news_count_0_15", 0)),
+                    "news_count_15_30": int(sample.metadata.get("news_count_15_30", 0)),
+                    "news_count_30_60": int(sample.metadata.get("news_count_30_60", 0)),
+                    "source_article_ids_json": sample.metadata.get(
+                        "source_article_ids_json",
+                        "[]",
+                    ),
+                    "latest_news_recency_minutes": _metadata_float(
+                        sample.metadata.get("latest_news_recency_minutes", 60.0)
+                    ),
+                    "history_valid_steps": int(
+                        sample.metadata.get("history_valid_steps", 1)
+                    ),
+                    "history_observed_valid_steps": int(
+                        sample.metadata.get(
+                            "history_observed_valid_steps",
+                            sample.metadata.get("history_valid_steps", 1),
+                        )
+                    ),
+                    "history_effective_valid_steps": int(
+                        sample.metadata.get(
+                            "history_effective_valid_steps",
+                            sample.metadata.get("history_valid_steps", 1),
+                        )
+                    ),
+                    "history_input_policy": sample.metadata.get(
+                        "history_input_policy",
+                        "current_surface",
+                    ),
+                    "sequence_text_variant": sample.metadata.get(
+                        "sequence_text_variant",
+                        "",
+                    ),
+                    "trading_day": sample.metadata.get("trading_day", ""),
+                    "session_id_sequence": sample.metadata.get("session_id", ""),
+                    "history_anchor_times_utc": json.dumps(
+                        list(sample.history_timestamps_utc),
+                        ensure_ascii=True,
+                    ),
+                    "unique_embedding_count": int(
+                        sample.metadata.get(
+                            "unique_embedding_count",
+                            sample.metadata.get("news_count_total", 1),
+                        )
+                    ),
                     "pooling_mode": sample.metadata.get("pooling_mode", ""),
                     "has_text_condition": float(sample.metadata.get("has_text", 1.0)),
                     "effective_beta": float(payload["effective_beta"]),
@@ -1226,6 +1393,12 @@ class FilmWGANSampler:
                     ),
                     "atm_short_pure_win_flag_vs_current": float(
                         payload["short_atm_metrics"]["atm_short_pure_win_flag_vs_current"]
+                    ),
+                    "short_atm_supported_cell_count": int(
+                        payload["short_atm_metrics"]["short_atm_supported_cell_count"]
+                    ),
+                    "short_atm_metric_status": str(
+                        payload["short_atm_metrics"]["short_atm_metric_status"]
                     ),
                     "generated_current_mae": float(payload["generated_current_metrics"]["mae"]),
                     "atm7_abs_err": float(atm_row["generated_target_abs_error"]),

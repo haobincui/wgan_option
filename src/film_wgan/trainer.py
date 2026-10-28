@@ -39,7 +39,13 @@ from .losses import (
     strike_smoothness_penalty,
     weighted_surface_mae,
 )
-from .models import FilmWGANCritic, FilmWGANGenerator, reconstruct_future_surface
+from .models import (
+    FilmWGANCritic,
+    FilmWGANGenerator,
+    TemporalFilmWGANCritic,
+    TemporalFilmWGANGenerator,
+    reconstruct_future_surface,
+)
 from .text_transform import sha256_file
 from .training_plots import plot_training_curves
 from wgan_option.config_parsing import load_yaml_mapping
@@ -89,8 +95,10 @@ class FilmWGANTrainer(BaseTrainer):
         self.device = torch.device("cuda:0" if (config.cuda and torch.cuda.is_available()) else "cpu")
 
         self.bundle: Optional[FilmWGANDataBundle] = None
-        self.generator: Optional[FilmWGANGenerator] = None
-        self.critic: Optional[FilmWGANCritic] = None
+        self.generator: Optional[
+            FilmWGANGenerator | TemporalFilmWGANGenerator
+        ] = None
+        self.critic: Optional[FilmWGANCritic | TemporalFilmWGANCritic] = None
         self.generator_optimizer: Optional[Adam] = None
         self.critic_optimizer: Optional[Adam] = None
         self.generator_scheduler: Optional[CosineAnnealingLR] = None
@@ -170,6 +178,28 @@ class FilmWGANTrainer(BaseTrainer):
                 "Parent generator current-surface channel mismatch: "
                 f"expected {self.generator.current_surface_channels}, found {parent_channels}."
             )
+        parent_input_mode = str(
+            checkpoint.get(
+                "surface_input_mode",
+                (checkpoint.get("config") or {}).get(
+                    "surface_input_mode",
+                    "current_surface",
+                ),
+            )
+        ).strip().lower()
+        current_input_mode = str(self.config.surface_input_mode).strip().lower()
+        if parent_input_mode != current_input_mode:
+            raise ValueError(
+                "Parent generator surface-input mode mismatch: "
+                f"expected {current_input_mode}, found {parent_input_mode}."
+            )
+        if current_input_mode == "rolling_history" and int(
+            checkpoint.get(
+                "history_steps",
+                (checkpoint.get("config") or {}).get("history_steps", -1),
+            )
+        ) != int(self.config.history_steps):
+            raise ValueError("Parent generator history_steps mismatch.")
         parent_support_sha = str(checkpoint.get("surface_support_sha256", ""))
         if parent_support_sha != str(self.bundle.surface_support_sha256):
             raise ValueError(
@@ -297,44 +327,82 @@ class FilmWGANTrainer(BaseTrainer):
         )
         self._atm_short_mask_flat = self._atm_short_mask_surface.reshape(-1)
         surface_height, surface_width = self.bundle.surface_shape
+        rolling_history = (
+            str(self.config.surface_input_mode).strip().lower()
+            == "rolling_history"
+        )
         current_surface_channels = (
-            2
+            3
+            if rolling_history
+            else 2
             if str(self.config.surface_support_mode).strip().lower() == "raw_observed"
             else 1
         )
         deterministic = str(self.config.forecast_mode).strip().lower() == "deterministic"
         generator_noise_dim = 0 if deterministic else int(self.config.noise_dim)
-        self.generator = FilmWGANGenerator(
-            surface_height=surface_height,
-            surface_width=surface_width,
-            embedding_dim=self.bundle.embedding_dim,
-            noise_dim=generator_noise_dim,
-            base_channels=self.config.gen_base_channels,
-            res_blocks=self.config.gen_res_blocks,
-            text_hidden_dim=self.config.text_hidden_dim,
-            text_out_dim=self.config.text_out_dim,
-            fusion_hidden_dim=self.config.fusion_hidden_dim,
-            conditioning_mode=self.config.conditioning_mode,
-            text_dropout=float(self.config.text_dropout),
-            text_gate_initial_value=float(self.config.text_gate_initial_value),
-            current_surface_channels=current_surface_channels,
-        ).to(self.device)
-        self._load_initial_generator_checkpoint()
-        if not deterministic:
-            self.critic = FilmWGANCritic(
+        if rolling_history:
+            self.generator = TemporalFilmWGANGenerator(
+                surface_height=surface_height,
+                surface_width=surface_width,
+                history_steps=int(self.config.history_steps),
+                embedding_dim=self.bundle.embedding_dim,
+                noise_dim=generator_noise_dim,
+                base_channels=self.config.gen_base_channels,
+                res_blocks=self.config.gen_res_blocks,
+                temporal_hidden_dim=int(self.config.temporal_hidden_dim),
+                text_hidden_dim=self.config.text_hidden_dim,
+                text_out_dim=self.config.text_out_dim,
+                fusion_hidden_dim=self.config.fusion_hidden_dim,
+                text_dropout=float(self.config.text_dropout),
+                text_gate_initial_value=float(self.config.text_gate_initial_value),
+                current_surface_channels=current_surface_channels,
+            ).to(self.device)
+        else:
+            self.generator = FilmWGANGenerator(
                 surface_height=surface_height,
                 surface_width=surface_width,
                 embedding_dim=self.bundle.embedding_dim,
-                base_channels=self.config.disc_base_channels,
-                res_blocks=self.config.disc_res_blocks,
+                noise_dim=generator_noise_dim,
+                base_channels=self.config.gen_base_channels,
+                res_blocks=self.config.gen_res_blocks,
                 text_hidden_dim=self.config.text_hidden_dim,
                 text_out_dim=self.config.text_out_dim,
                 fusion_hidden_dim=self.config.fusion_hidden_dim,
                 conditioning_mode=self.config.conditioning_mode,
-                critic_conditioning_mode=self.config.critic_conditioning_mode,
                 text_dropout=float(self.config.text_dropout),
+                text_gate_initial_value=float(self.config.text_gate_initial_value),
                 current_surface_channels=current_surface_channels,
             ).to(self.device)
+        self._load_initial_generator_checkpoint()
+        if not deterministic:
+            if rolling_history:
+                self.critic = TemporalFilmWGANCritic(
+                    history_steps=int(self.config.history_steps),
+                    embedding_dim=self.bundle.embedding_dim,
+                    base_channels=self.config.disc_base_channels,
+                    res_blocks=self.config.disc_res_blocks,
+                    temporal_hidden_dim=int(self.config.temporal_hidden_dim),
+                    text_hidden_dim=self.config.text_hidden_dim,
+                    text_out_dim=self.config.text_out_dim,
+                    fusion_hidden_dim=self.config.fusion_hidden_dim,
+                    text_dropout=float(self.config.text_dropout),
+                    current_surface_channels=current_surface_channels,
+                ).to(self.device)
+            else:
+                self.critic = FilmWGANCritic(
+                    surface_height=surface_height,
+                    surface_width=surface_width,
+                    embedding_dim=self.bundle.embedding_dim,
+                    base_channels=self.config.disc_base_channels,
+                    res_blocks=self.config.disc_res_blocks,
+                    text_hidden_dim=self.config.text_hidden_dim,
+                    text_out_dim=self.config.text_out_dim,
+                    fusion_hidden_dim=self.config.fusion_hidden_dim,
+                    conditioning_mode=self.config.conditioning_mode,
+                    critic_conditioning_mode=self.config.critic_conditioning_mode,
+                    text_dropout=float(self.config.text_dropout),
+                    current_surface_channels=current_surface_channels,
+                ).to(self.device)
         self._initial_generator_state_sha256 = module_state_sha256(self.generator)
         self._initial_critic_state_sha256 = module_state_sha256(self.critic)
         write_json(
@@ -352,6 +420,9 @@ class FilmWGANTrainer(BaseTrainer):
                 "surface_support_path": self.bundle.surface_support_path,
                 "surface_support_sha256": self.bundle.surface_support_sha256,
                 "current_surface_channels": current_surface_channels,
+                "surface_input_mode": str(self.config.surface_input_mode),
+                "history_steps": int(self.config.history_steps),
+                "history_input_policy": str(self.config.history_input_policy),
                 "initial_generator_state_sha256": self._initial_generator_state_sha256,
                 "initial_critic_state_sha256": self._initial_critic_state_sha256,
             },
@@ -466,22 +537,22 @@ class FilmWGANTrainer(BaseTrainer):
         )
         mismatch_loss = torch.zeros((), device=self.device, dtype=real_scores.dtype)
         mismatch_scores = None
+        conditioned_indices = torch.nonzero(
+            has_text > 0.0,
+            as_tuple=False,
+        ).reshape(-1)
         mismatch_enabled = (
             self.critic.conditioning_mode == "projection"
             and float(self.config.lambda_mismatch) > 0.0
-            and current_features.size(0) > 1
-            and bool(torch.any(has_text > 0.0))
+            and conditioned_indices.numel() > 1
         )
         if mismatch_enabled:
-            donor_indices = torch.roll(
-                torch.arange(current_features.size(0), device=self.device),
-                shifts=1,
-            )
+            donor_indices = torch.roll(conditioned_indices, shifts=1)
             mismatch_scores = self.critic(
-                real_future_surface,
-                current_features,
+                real_future_surface[conditioned_indices],
+                current_features[conditioned_indices],
                 text_features[donor_indices],
-                has_text=has_text[donor_indices],
+                has_text=torch.ones_like(has_text[conditioned_indices]),
             )
             mismatch_loss = mismatch_scores.mean()
         self._disc_step_count += 1
@@ -879,10 +950,15 @@ class FilmWGANTrainer(BaseTrainer):
         assert self.bundle is not None
         assert self.generator is not None
         return {
-            "checkpoint_schema_version": 4,
-            "architecture_version": "pair_text_residual_film_v1"
-            if self.generator.conditioning_mode == "residual_film"
-            else "film_wgan_legacy_v2",
+            "checkpoint_schema_version": 5,
+            "architecture_version": (
+                "intraday_temporal_residual_film_v1"
+                if str(self.config.surface_input_mode).strip().lower()
+                == "rolling_history"
+                else "pair_text_residual_film_v1"
+                if self.generator.conditioning_mode == "residual_film"
+                else "film_wgan_legacy_v2"
+            ),
             "epoch": int(self._current_epoch),
             "forecast_mode": str(self.config.forecast_mode),
             "conditioning_mode": str(self.config.conditioning_mode),
@@ -914,6 +990,12 @@ class FilmWGANTrainer(BaseTrainer):
             "surface_support_path": self.bundle.surface_support_path,
             "surface_support_sha256": self.bundle.surface_support_sha256,
             "current_surface_channels": int(self.generator.current_surface_channels),
+            "surface_input_mode": str(self.config.surface_input_mode),
+            "history_steps": int(self.config.history_steps),
+            "history_interval_minutes": int(
+                self.config.history_interval_minutes
+            ),
+            "history_input_policy": str(self.config.history_input_policy),
             "backbone_frozen": bool(self._backbone_frozen),
         }
 
@@ -1029,7 +1111,12 @@ class FilmWGANTrainer(BaseTrainer):
                     target_flat,
                 ) = batch[:5]
                 extra_index = 5
-                if str(self.config.surface_support_mode).strip().lower() == "raw_observed":
+                if (
+                    str(self.config.surface_input_mode).strip().lower()
+                    == "rolling_history"
+                    or str(self.config.surface_support_mode).strip().lower()
+                    == "raw_observed"
+                ):
                     support_mask_flat = batch[extra_index]
                     extra_index += 1
                 else:
@@ -1111,11 +1198,9 @@ class FilmWGANTrainer(BaseTrainer):
                 fallback_metric = monitor_value
                 fallback_epoch = epoch
                 save_checkpoint(fallback_checkpoint_path, self._checkpoint_payload())
-            improved = False
             if epoch > checkpoint_warmup_epochs and monitor_value < (best_metric - early_stopping_min_delta):
                 best_metric = monitor_value
                 best_epoch = epoch
-                improved = True
                 epochs_without_improvement = 0
                 save_checkpoint(self.checkpoints_dir / "film_wgan_best.pt", self._checkpoint_payload())
             elif epoch > checkpoint_warmup_epochs and early_stopping_enabled:

@@ -1,693 +1,717 @@
-# Detailed GAN Model Architecture
+# Temporal Residual FiLM-WGAN: Detailed Model Architecture
+
+Last implementation review: 2026-08-07 (UTC)
+
+This document describes the model that is currently used by the intraday RQ1
+experiments. It replaces the earlier description of a single-surface CNN GAN.
+The active model is a persistence-anchored, stochastic, temporal FiLM-WGAN that
+encodes a masked sequence of raw-volatility surfaces and adds a gated text
+residual to a no-text forecast.
+
+The source of truth is:
+
+- `src/film_wgan/models.py`
+- `src/film_wgan/sequence_data.py`
+- `src/film_wgan/trainer.py`
+- `src/film_wgan/inference.py`
+- `src/film_wgan/losses.py`
+- `scripts/rq1_event30/event30_dataset.py`
+- `configs/film_wgan/train_rq1_event30_textbase.yaml`
+
+The older `FilmWGANGenerator` and `FilmWGANCritic` classes remain available for
+legacy single-surface checkpoints. When `surface_input_mode=rolling_history`,
+the trainer selects `TemporalFilmWGANGenerator` and
+`TemporalFilmWGANCritic`, which are the focus of this document.
+
+## 1. Forecasting Task
+
+For the current 30-minute-history configuration, the model predicts the next
+5-minute volatility surface from six 5-minute surface positions:
+
+```text
+history = [S_(t-25), S_(t-20), S_(t-15), S_(t-10), S_(t-5), S_t]
+target  = S_(t+5)
+```
 
-This document explains the current WGAN-based vol-surface forecasting model in detail, including the internal structure of the generator, the discriminator, and the way both modules interact during training.
+The text-conditioned experiment uses news published strictly before the
+forecast origin:
+
+```text
+t - 5 minutes <= news_time < t
+```
+
+Factiva publication timestamps are interpreted in `Europe/London`. The data
+builder rejects future news, keeps the history and target within one CME
+continuous session, and requires at least 3 of the 6 history positions. The
+latest position `S_t` must always be valid.
 
-It is based on the current implementation in:
+The active RQ1 data source is a raw-volatility surface. Option implied-volatility
+points are interpolated onto a fold-specific 16 x 16 grid; the sequence loader
+requires `surface_model=raw`. No SVI parameters or SVI reconstruction enter the
+current sequence experiment.
 
-- `src/wgan_option/models/generator.py`
-- `src/wgan_option/models/discriminator.py`
-- `src/wgan_option/models/gan_model.py`
+The conditional distribution is represented as:
 
-It complements the higher-level overview in:
+```text
+p(S_(t+5) | S_(t-25:t), support masks, text condition)
+```
 
-- `docs/vol_surface_gan_architecture.md`
+The generator predicts a log-IV increment relative to the persistence anchor
+`S_t`, rather than directly predicting an unconstrained volatility level.
 
-## 1. Problem Setting
+## 2. Current Configuration Snapshot
 
-The model is a conditional GAN for forecasting the future option volatility surface.
+The architecture is configurable. The following values are the active defaults
+in `train_rq1_event30_textbase.yaml`:
 
-The mapping is:
+| Setting | Value |
+|---|---:|
+| Surface grid | 16 maturities x 16 moneyness points |
+| History length | 6 positions |
+| History spacing | 5 minutes |
+| Minimum valid history | 3 positions |
+| Forecast horizon | 5 minutes |
+| History channels | 3 |
+| Text-condition dimension | 389 |
+| LP semantic dimension after PCA | 128 |
+| Frame CNN base channels | 32 |
+| Temporal hidden dimension | 256 |
+| Temporal residual MLP blocks | 2 |
+| Text hidden/output dimensions | 256 / 64 |
+| Noise dimension | 64 |
+| Fusion hidden dimension | 512 |
+| Text dropout | 0.30 |
+| Initial text gate | 0.0 |
+| Batch size | 64 |
+| Critic updates per generator update | 5 |
+| Training epochs | 30 |
+| Monte Carlo draws at evaluation | 32 |
 
-\[
-(\text{current surface},\ \text{text embedding},\ \text{noise}) \rightarrow \text{future surface}
-\]
+The 60-minute predecessor remains configurable with 12 positions, but it is
+not the configuration summarized in the tables below.
 
-More precisely:
+## 3. Data Tensor Contract
 
-- the generator predicts a future surface conditioned on the current surface and the news embedding
-- the discriminator, used as a WGAN critic, scores whether a candidate future surface looks realistic given the same current surface and text embedding
+### 3.1 History tensor
 
-The current implementation is not an unconditional image generator.
-It is a conditional transition model:
+The sequence dataset emits:
 
-\[
-(\text{surface}_t,\ \text{text}_t) \rightarrow \text{surface}_{t+h}
-\]
+```text
+history_features: [B, T, 3, H, W]
+```
 
-## 2. Inputs, Outputs, and Tensor Shapes
+For the active configuration:
 
-### 2.1 Generator inputs
+```text
+[B, 6, 3, 16, 16]
+```
 
-The generator receives:
+The three channels at each time step are:
 
-- `current_surface`: shape `[B, 1, H, W]`
-- `text_embedding`: shape `[B, E]`
-- `noise`: shape `[B, Z]`
+1. Train-normalized log implied volatility.
+2. Raw-data support mask for each grid cell.
+3. A step-validity mask broadcast over the full grid.
 
-where:
+Formally, for step `j` and grid cell `c`:
 
-- `B` is batch size
-- `H` is the number of maturity bins
-- `W` is the number of strike bins
-- `E` is the text-embedding dimension
-- `Z` is the latent noise dimension
+```text
+x[j,c,0] = (log(IV[j,c]) - train_mean[c]) / train_std[c]
+x[j,c,1] = support[j,c]
+x[j,c,2] = step_valid[j]
+```
 
-If `noise` is not provided explicitly, the generator samples:
+Unsupported cells and missing steps are set to zero after normalization. The
+support and validity channels let the network distinguish a missing value from
+a genuine normalized value near zero. No forward fill is used.
 
-\[
-\epsilon \sim \mathcal{N}(0, I)
-\]
+### 3.2 Target
 
-inside `forward()`.
+The supervised target is the cell-wise log-IV increment:
 
-### 2.2 Generator output
+```text
+delta_target = log(S_(t+5)) - log(S_t)
+```
 
-The generator returns:
+It is normalized with train-only, cell-specific mean and standard deviation and
+returned as a 256-dimensional vector. Losses and metrics use only the
+intersection of current and target raw support:
 
-- `next_surface`: shape `[B, 1, H, W]`
+```text
+evaluation_support = support(S_t) AND support(S_(t+5))
+```
 
-This is interpreted as the predicted future volatility surface.
+### 3.3 Train-only transforms
 
-### 2.3 Discriminator inputs
+The following artifacts are fitted separately within each rolling fold using
+only its training partition:
 
-The discriminator receives:
+- the 16 x 16 raw support grid;
+- current/history log-IV normalization;
+- target log-delta normalization;
+- LP text PCA;
+- news-count standardization.
 
-- `next_surface`: shape `[B, 1, H, W]`
-- `current_surface`: shape `[B, 1, H, W]`
-- `text_embedding`: shape `[B, E]`
+Validation and test data cannot change these transforms. Their paths and hashes
+are recorded in resolved configs and experiment artifacts.
 
-It then scores:
+## 4. Text Condition
 
-\[
-D(\text{candidate future surface} \mid \text{current surface}, \text{text embedding})
-\]
+### 4.1 Article pooling
 
-### 2.4 Discriminator output
+For each forecast origin, articles in the strict prior 5-minute window are
+deduplicated first by `ArticleID` and then audited by embedding SHA256. LP
+embeddings are pooled as:
 
-The discriminator returns:
+```text
+pooled_lp = L2_normalize(mean(L2_normalize(article_embedding_i)))
+```
 
-- shape `[B, 1]`
+A PCA transform is fitted on unique pooled training-news vectors only:
 
-This is not a probability.
-In WGAN-GP, it is a critic score.
+```text
+pooled LP embedding -> train-fold PCA -> 128 semantic coordinates
+```
 
-Higher values mean:
+PCA whitening is disabled. If a fold has fewer than 128 identifiable
+components, the transformed vector is zero-padded to 128 dimensions.
 
-- the candidate future surface looks more like a real sample under the given conditioning information
+### 4.2 The 389-dimensional compatibility layout
 
-## 3. Generator Internals
+The active event30 dataset retains the earlier three-bucket interface so all
+sequence variants have the same input width:
 
-The generator is implemented in `src/wgan_option/models/generator.py`.
+```text
+indices   0:128   = prior-5-minute LP PCA features
+indices 128:384   = reserved zero padding for two legacy semantic buckets
+indices 384:389   = auxiliary news-arrival features
+```
 
-Its internal structure has three branches:
+The five auxiliary values are:
 
-1. surface encoder
-2. text encoder
-3. fusion head
+```text
+[
+  zscore(log1p(article_count)),
+  0,
+  0,
+  has_news,
+  latest_news_recency_minutes / 5
+]
+```
 
-### 3.1 Surface encoder
+The two zero entries are reserved for compatibility with the earlier
+three-bucket count representation. They do not carry information in the strict
+prior-5-minute experiment.
 
-The current surface is passed through three convolutional layers:
+### 4.3 Controlled variants
 
-1. `Conv2d(channels, 32, kernel_size=3, stride=1, padding=1)`
-2. `Conv2d(32, 64, kernel_size=3, stride=2, padding=1)`
-3. `Conv2d(64, 128, kernel_size=3, stride=2, padding=1)`
+All variants use exactly 389 input coordinates and the same downstream network:
 
-Each convolution is followed by:
+| Variant | Semantic coordinates | Arrival/count coordinates | `has_text` |
+|---|---|---|---:|
+| `no_text` | all zero | all zero | 0 |
+| `news_count` | all zero | observed auxiliaries | 1 for news rows |
+| `matched_lp` | matched LP PCA-128 | observed auxiliaries | 1 for news rows |
+| `shuffled_lp` | train-donor LP PCA-128 | target-row auxiliaries | 1 for news rows |
 
-- `LeakyReLU(0.2)`
+Shuffled donors come only from the training partition and must have disjoint
+article IDs from the target row. No-news rows are zero in every text array.
 
-#### Shape evolution
+`normalize_text_embedding=false` is intentional: these features have already
+been transformed using fold-train-only artifacts.
 
-For an input of shape:
+## 5. Temporal Surface Encoder
 
-\[
-[B, 1, H, W]
-\]
+The generator and critic have separate temporal encoders with identical
+topology and independent parameters.
 
-the surface encoder produces approximately:
+### 5.1 Shared frame CNN
 
-\[
-[B, 32, H, W]
-\rightarrow
-[B, 64, H/2, W/2]
-\rightarrow
-[B, 128, H/4, W/4]
-\]
+Each history frame `[B,3,16,16]` is encoded by the same CNN:
 
-with exact output sizes determined by the convolution formula used in `_conv2d_out_size(...)`.
+| Layer | Output shape |
+|---|---|
+| `Conv2d(3,32,3,padding=1)` + LeakyReLU | `[B,32,16,16]` |
+| `Conv2d(32,64,3,stride=2,padding=1)` + LeakyReLU | `[B,64,8,8]` |
+| `Conv2d(64,128,3,stride=2,padding=1)` + LeakyReLU | `[B,128,4,4]` |
+| `AdaptiveAvgPool2d(1)` + flatten | `[B,128]` |
 
-#### Default-grid example
+The frame encoder is shared across all six time positions, preserving a common
+spatial representation while limiting parameter growth.
 
-With the current common grid size:
+### 5.2 Masked GRU
 
-- `H = 16`
-- `W = 16`
+The sequence of 128-dimensional frame vectors is passed to:
 
-the shape becomes:
+```text
+GRUCell(input_size=128, hidden_size=256)
+```
 
-\[
-[B, 1, 16, 16]
-\rightarrow
-[B, 32, 16, 16]
-\rightarrow
-[B, 64, 8, 8]
-\rightarrow
-[B, 128, 4, 4]
-\]
+At each step, the candidate hidden state is computed normally. It replaces the
+previous state only when the broadcast step-validity channel is greater than
+0.5. Missing positions therefore do not update the recurrent state:
 
-After flattening:
+```text
+h_candidate[j] = GRUCell(frame_feature[j], h[j-1])
+h[j] = h_candidate[j] if valid[j] else h[j-1]
+```
 
-\[
-128 \times 4 \times 4 = 2048
-\]
+After the final step, two residual MLP blocks refine the temporal state:
 
-So under the default 16x16 grid, the generator surface feature vector has dimension `2048`.
+```text
+h <- LeakyReLU(h + Linear(LeakyReLU(Linear(h))))
+```
 
-### 3.2 Text encoder
+The temporal encoder output is `[B,256]`.
 
-The text branch is a small MLP:
+## 6. Generator
 
-1. `Linear(embedding_dim, 256)`
-2. `LayerNorm(256)`
-3. `LeakyReLU(0.2)`
-4. `Dropout(0.1)`
-5. `Linear(256, 128)`
-6. `LeakyReLU(0.2)`
+### 6.1 Inputs and output
 
-So the text embedding is compressed into a 128-dimensional feature vector.
+The temporal generator receives:
 
-#### Why this matters
+```text
+history       [B,6,3,16,16]
+text          [B,389]
+has_text      [B,1]
+noise z       [B,64], z ~ N(0,I)
+```
 
-This branch does two things:
+For backward API compatibility, the Python argument carrying the history is
+still named `current_surface`. In rolling-history mode it contains the complete
+five-dimensional history tensor, not only `S_t`.
 
-- reduces a potentially large text embedding into a compact conditioning vector
-- normalizes the representation before fusion, which helps when embedding values come from external models
+It returns a normalized log-IV delta:
 
-### 3.3 Noise branch
+```text
+delta_norm    [B,256]
+```
 
-The generator includes a latent noise input of dimension `noise_dim`.
+### 6.2 No-text stochastic backbone
 
-In the current default configuration:
+The temporal state `h` and noise `z` are concatenated:
 
-- `noise_dim = 32`
+```text
+[h,z]: 256 + 64 = 320
+```
 
-If no noise tensor is passed into `forward()`, the code samples:
+The base forecast head is:
 
-\[
-\epsilon \in \mathbb{R}^{B \times Z}
-\]
+```text
+Linear(320,512)
+LeakyReLU(0.2)
+Linear(512,512)
+LeakyReLU(0.2)
+Linear(512,256)
+```
 
-from a standard Gaussian.
+Its output, `base_delta`, is the no-text stochastic forecast. It does not depend
+on the text encoder.
 
-This means the generator is technically stochastic.
-However, because the training objective also contains a strong reconstruction loss, the model is encouraged to stay close to the true future surface, so the practical amount of stochastic diversity may be limited.
+### 6.3 Text encoder
 
-### 3.4 Fusion head
+The text branch is:
 
-The three feature sources are concatenated:
+```text
+Linear(389,256)
+LayerNorm(256)
+LeakyReLU(0.2)
+Dropout(0.30)
+Linear(256,64)
+LeakyReLU(0.2)
+Dropout(0.30)
+```
 
-- encoded surface features
-- encoded text features
-- latent noise
+The 64-dimensional output is multiplied by `has_text`. This second mask is
+applied after the MLP, preventing linear biases from creating an implicit text
+condition for no-text samples.
 
-So the fusion input dimension is:
+### 6.4 Residual vector FiLM adapter
 
-\[
-\text{surface\_feat\_dim} + 128 + \text{noise\_dim}
-\]
+Text modulates only the 256-dimensional temporal bottleneck. A linear layer maps
+the text feature to `gamma` and `beta`:
 
-Under the default 16x16 setup:
+```text
+[gamma,beta] = Linear(64,512)(text_feature)
+h_film       = (1 + gamma) * h + beta
+```
 
-\[
-2048 + 128 + 32 = 2208
-\]
+The FiLM projection is initialized to zero, so it initially acts as the
+identity. The text adapter receives the modulation difference and the encoded
+text:
 
-The fusion MLP is:
+```text
+adapter_input = concat(h_film - h, text_feature)  # 256 + 64 = 320
+text_delta    = Linear(256,256)(Dropout(LeakyReLU(Linear(320,256))))
+```
 
-1. `Linear(fusion_dim, hidden_dim)`
-2. `LeakyReLU(0.2)`
-3. `Linear(hidden_dim, hidden_dim)`
-4. `LeakyReLU(0.2)`
-5. `Linear(hidden_dim, H * W)`
+The final adapter layer has small random weights (`std=1e-3`) and zero bias.
 
-With the default config:
+### 6.5 Zero-initialized scalar gate
 
-- `hidden_dim = 512`
+The final generator equation is:
 
-So the generator ultimately maps the fused latent state into `H * W` scalar outputs, then reshapes them into a surface delta of shape `[B, 1, H, W]`.
+```text
+delta_norm = base_delta
+           + has_text * tanh(text_gate) * text_delta
+```
 
-### 3.5 Residual output design
+`text_gate` is initialized at zero. Therefore, before Stage-B learning:
 
-The final generator output is computed as:
+```text
+G(history, any_text, z, has_text=1)
+= G(history, zeros, z, has_text=0)
+```
 
-\[
-\text{next\_surface} = \text{softplus}(\text{current\_surface} + \Delta) + 10^{-4}
-\]
+for an identical initialized backbone and noise draw. The small random adapter
+initialization gives the scalar gate a non-zero learning signal; after the gate
+moves away from zero, gradients also flow into the adapter.
 
-where:
+This construction is central to the controlled experiment: text is asked to
+learn an incremental residual rather than relearning the complete surface
+dynamics.
 
-- `Delta` is the surface delta produced by the fusion MLP
+### 6.6 Reconstructing volatility levels
 
-This design has two important consequences.
+The generated normalized delta is returned to log-IV units using train-only
+statistics. Volatility levels are reconstructed from the latest actual surface:
 
-#### Residual forecasting
+```text
+future_log_iv = clamp(log(S_t) + delta, log(1e-4), log(5.0))
+S_hat_(t+5)   = exp(future_log_iv)
+```
 
-The generator does not predict the future surface from scratch.
-Instead, it predicts a change relative to the current surface.
+Thus `delta=0` is exactly the persistence forecast. The final volatility is
+bounded to `[1e-4,5.0]` for numerical stability.
 
-That is often a better inductive bias for forecasting, because current and future surfaces are usually strongly related.
+## 7. Projection Critic
 
-#### Positivity enforcement
+The critic receives:
 
-`softplus(...) + 1e-4` guarantees strictly positive outputs.
+```text
+candidate future surface [B,1,16,16]
+history condition         [B,6,3,16,16]
+text condition            [B,389]
+has_text                  [B,1]
+```
 
-That is important because volatility values should not be negative, and some downstream penalty calculations assume a positive surface.
+It has three branches.
 
-## 4. Discriminator Internals
+### 7.1 History branch
 
-The discriminator is implemented in `src/wgan_option/models/discriminator.py`.
+The history uses an independent copy of the temporal CNN + masked GRU encoder
+described above and produces `[B,256]`.
 
-It is a conditional critic rather than a sigmoid classifier.
+### 7.2 Candidate-future branch
 
-Its internal structure also has three parts:
+The normalized candidate future surface is encoded by a one-channel frame CNN:
 
-1. stacked surface encoder
-2. text encoder
-3. classifier head
+```text
+Conv2d(1,32) -> Conv2d(32,64,stride=2)
+-> Conv2d(64,128,stride=2) -> AdaptiveAvgPool -> [B,128]
+```
 
-### 4.1 Surface stacking
+The history and future representations are concatenated and mapped to a joint
+512-dimensional feature:
 
-The discriminator first concatenates the current and candidate future surfaces along the channel axis:
+```text
+joint = LeakyReLU(Linear(256 + 128, 512))
+```
 
-\[
-\text{stacked} = \text{concat}(\text{current\_surface},\ \text{next\_surface})
-\]
+### 7.3 Unconditional and text-projection scores
 
-So the input shape becomes:
+The critic text encoder is:
 
-\[
-[B, 2, H, W]
-\]
+```text
+Linear(389,256) -> LeakyReLU -> Dropout(0.30)
+-> Linear(256,64) -> LeakyReLU
+```
 
-This is a key conditional-design choice.
-Instead of judging the future surface alone, the critic judges the pair:
+The final score is:
 
-- what the surface looks like now
-- what the proposed next surface looks like
+```text
+D = Linear(512,1)(joint)
+  + has_text * dot(Linear(512,64)(joint), text_feature) / sqrt(64)
+```
 
-### 4.2 Surface encoder
+There is no sigmoid: the output is a WGAN critic score, not a probability.
+When `has_text=0`, the score is strictly unconditional with respect to the text
+branch.
 
-The stacked surface tensor is passed through:
+## 8. Parameter Counts
 
-1. `Conv2d(channels * 2, 32, kernel_size=3, stride=2, padding=1)`
-2. `LeakyReLU(0.2)`
-3. `Conv2d(32, 64, kernel_size=3, stride=2, padding=1)`
-4. `InstanceNorm2d(64, affine=True)`
-5. `LeakyReLU(0.2)`
-6. `Conv2d(64, 128, kernel_size=3, stride=2, padding=1)`
-7. `InstanceNorm2d(128, affine=True)`
-8. `LeakyReLU(0.2)`
+For the active 16 x 16, 6-step, 389-dimensional configuration:
 
-#### Shape evolution
+| Module | Parameters |
+|---|---:|
+| Generator backbone | 1,211,200 |
+| Generator text adapter and gate | 298,049 |
+| Generator total | 1,509,249 |
+| Critic total | 1,092,289 |
+| Generator + critic | 2,601,538 |
 
-For input `[B, 2, H, W]`, the feature map becomes approximately:
+The no-text and text variants instantiate the same generator architecture and
+parameter count. Their controlled difference is the text values and
+`has_text`, not network width.
 
-\[
-[B, 32, H/2, W/2]
-\rightarrow
-[B, 64, H/4, W/4]
-\rightarrow
-[B, 128, H/8, W/8]
-\]
+## 9. Paired Stage-A / Stage-B Training
 
-#### Default-grid example
+The continuation workflow is designed as follows:
 
-For the common 16x16 grid:
+1. **Stage A no-text parent**: train the temporal stochastic backbone on all
+   eligible origins with a zero 389-dimensional text vector and `has_text=0`.
+2. **Stage B continued no-text**: initialize from the corresponding Stage-A
+   generator and continue on the news-conditioned comparison sample.
+3. **Stage B text variants**: initialize from the exact same Stage-A generator,
+   then train `news_count`, `matched_lp`, and `shuffled_lp` branches.
+4. **Fresh critic**: critic weights and optimizer state are not inherited by
+   Stage B.
 
-\[
-[B, 2, 16, 16]
-\rightarrow
-[B, 32, 8, 8]
-\rightarrow
-[B, 64, 4, 4]
-\rightarrow
-[B, 128, 2, 2]
-\]
+The loader audits parent checkpoint SHA256, surface shape, input mode, history
+length, support artifact, text-transform policy, and architecture version.
+Current temporal checkpoints use schema version 5 and architecture identifier
+`intraday_temporal_residual_film_v1`; the checkpoint also records parent and
+transform lineage needed to reproduce the continuation initialization.
 
-After flattening:
+When an initial parent is configured, the generator optimizer uses separate
+parameter groups:
 
-\[
-128 \times 2 \times 2 = 512
-\]
+```text
+backbone learning rate     = 2e-6
+text adapter learning rate = 2e-5
+```
 
-So the default discriminator surface feature dimension is `512`.
+The implementation supports freezing the backbone for the first `N` epochs.
+The current event30 base config sets `freeze_backbone_epochs=0`; any experiment
+claiming a five-epoch freeze must show `freeze_backbone_epochs=5` in that run's
+resolved config. Without a parent checkpoint, the full generator uses the
+standard generator learning rate `2e-5`.
 
-### 4.3 Why InstanceNorm is used here
+## 10. Training Objectives
 
-The discriminator uses `InstanceNorm2d` on the deeper convolutional blocks.
+### 10.1 Critic objective
 
-Practically, this helps:
+For matched real samples and generated samples, the base WGAN-GP objective is:
 
-- stabilize feature scales in the critic
-- keep the critic less sensitive to absolute activation magnitude shifts
+```text
+L_D = mean(D(fake)) - mean(D(real)) + gradient_penalty
+```
 
-This is a common stabilization pattern in adversarial models, although exact normalization choices always involve trade-offs.
+The gradient penalty coefficient ramps from zero to `lambda_gp=20` over the
+first 200 critic steps.
 
-### 4.4 Text encoder
+For a batch containing at least two text-conditioned rows, text embeddings are
+rotated within the conditioned subset to construct mismatched real/text pairs.
+With `lambda_mismatch=0.5`, the adversarial part becomes:
 
-The discriminator text branch is simpler than the generator text branch:
+```text
+L_D_adv = (mean(D(fake))
+           + 0.5 * mean(D(real, mismatched_text))) / 1.5
+          - mean(D(real, matched_text))
+```
 
-1. `Linear(embedding_dim, 128)`
-2. `LeakyReLU(0.2)`
+This asks the projection critic to identify both unrealistic surfaces and
+incorrect surface-text alignment. The mismatch term is disabled for no-text
+batches.
 
-So the critic also uses a 128-dimensional text conditioning vector.
+### 10.2 Generator objective
 
-### 4.5 Classifier head
+For the active configuration:
 
-The flattened surface features and text features are concatenated:
+```text
+L_G = lambda_adv * (-mean(D(fake)))
+    + 20 * weighted_surface_MAE
+    + 30 * short_ATM_MAE
+    + 1e-4 * FiLM_regularization
+```
 
-\[
-\text{combined} = \text{concat}(\text{surface\_features},\ \text{text\_features})
-\]
+The generator adversarial coefficient is zero through epoch 10 and becomes
+`lambda_adv=0.1` afterwards. The critic still trains during this period.
 
-The head is:
+`weighted_surface_MAE` uses support-aware weights. Cells satisfying:
 
-1. `Linear(surface_feat_dim + 128, hidden_dim)`
-2. `LeakyReLU(0.2)`
-3. `Linear(hidden_dim, 1)`
+```text
+abs(moneyness - 1.0) <= 0.02
+maturity_days <= 21
+```
 
-With the default config:
+receive an 8x raw weight before the template is normalized to mean one. The
+separate short-ATM MAE applies only to the same eligible supported cells. The
+current setup therefore deliberately emphasizes this region through both the
+weighted reconstruction term and a dedicated loss.
 
-- `hidden_dim = 256`
+Calendar-arbitrage, butterfly-arbitrage, and smoothness penalties exist in the
+code but are disabled in the active config (`use_*=false`, coefficient zero).
+The current model must not be described as arbitrage-constrained during
+training.
 
-Under the default 16x16 grid, the combined input dimension is:
+Both optimizers use Adam with `beta1=0.5` and `beta2=0.9`. The configured critic
+learning rate is `1e-5`, and five critic updates are performed per generator
+update.
 
-\[
-512 + 128 = 640
-\]
+## 11. Validation and Checkpoint Selection
 
-The output is one scalar critic score per sample.
+Validation is chronological and fold-specific. The principal checkpoint metric
+is unweighted support-aware validation surface MAE:
 
-## 5. Generator and Discriminator Together
+```text
+checkpoint_metric = val_mae
+```
 
-The two modules interact through the `WGAN_GP` wrapper in `src/wgan_option/models/gan_model.py`.
+Additional checkpoints track MAE gap versus persistence and short-ATM MAE gap.
+Epochs 1-10 are excluded from paper-facing checkpoint selection:
 
-### 5.1 Generator usage
+```text
+checkpoint_warmup_epochs = 10
+```
 
-Given:
+Early stopping patience is seven validation epochs. Test data is not used for
+normalization, PCA, checkpoint selection, or early stopping.
 
-- `current_surface`
-- `text_embedding`
+## 12. Scenario Generation and Point Forecast
 
-the training loop computes:
+At evaluation time, each sample receives 32 reproducible Gaussian noise draws.
+The draw seed is derived from:
 
-\[
-\text{fake\_future} = G(\text{current\_surface},\ \text{text\_embedding})
-\]
+```text
+(experiment seed, surface_pair_id, draw index)
+```
 
-The fake future surface is then:
+Each draw produces one future surface. The active aggregation settings are:
 
-- compared with the true future surface through reconstruction and constraint losses
-- fed into the discriminator to produce adversarial feedback
+```text
+reweight_beta_mode = fixed
+reweight_beta      = 0.0
+aggregation_mode   = weighted_mean
+```
 
-### 5.2 Discriminator usage
+`beta=0` makes all 32 scenario weights equal. Although the inference module can
+reweight full rectangular surfaces by an arbitrage penalty, that mechanism has
+no effect under the current config. The reported point forecast is therefore
+the simple Monte Carlo mean.
 
-The discriminator sees both:
+## 13. Evaluation Metrics
 
-\[
-D(\text{real\_future},\ \text{current\_surface},\ \text{text\_embedding})
-\]
+All deterministic metrics are calculated only on the current-target support
+intersection.
 
-and:
+### 13.1 Point metrics
 
-\[
-D(\text{fake\_future},\ \text{current\_surface},\ \text{text\_embedding})
-\]
+- `surface_mae`: mean absolute IV error over all supported grid cells.
+- `surface_rmse`: root mean squared IV error over supported cells.
+- `short_atm_mae`: MAE where `abs(moneyness-1)<=0.02` and maturity is at most
+  21 days.
+- `mae_gap_vs_current`: model MAE minus persistence MAE; negative is better.
+- `win_flag_vs_current`: one when model MAE is lower than persistence MAE.
 
-So the critic learns to judge whether the future surface is plausible under the same conditioning context.
+The raw support does not justify a fixed 7-day ATM extrapolation in the current
+experiment, so `report_atm7_metric=false`.
 
-## 6. Training Loop Mechanics
+### 13.2 Probabilistic metrics
 
-### 6.1 Optimizers
+- Energy score, normalized by the square root of the supported cell count.
+- Local-neighbour variogram score across adjacent strike and maturity cells.
+- Pointwise 50%, 80%, and 90% interval coverage.
+- Mean interval width at each nominal level.
+- Mean absolute calibration error across the three coverage levels.
+- Scenario spread around the weighted mean.
+- Effective scenario count and Monte Carlo standard error of surface MAE.
 
-The code creates two Adam optimizers:
+These intervals are raw generator intervals. Validation conformal calibration
+is a separate post-processing step and does not change the neural architecture.
 
-- one for the generator
-- one for the discriminator
+### 13.3 Financial consistency metrics
 
-Both use:
+Calendar and butterfly violation rates are computed only when a sample has full
+rectangular support. For partial raw support, the implementation records that
+the metric is unavailable instead of treating missing cells as valid surface
+values.
 
-- `learning_rate`
-- `beta_1`
-- `beta_2`
+## 14. End-to-End Forward Pass
 
-from the config.
+```text
+raw IV history and masks
+    [B,6,3,16,16]
+        |
+        v
+shared frame CNN at each time
+    [B,6,128]
+        |
+        v
+masked GRU + 2 residual MLP blocks
+    h = [B,256]
+        |
+        +---------------------------+
+        |                           |
+        v                           v
+concat Gaussian z [B,64]       text [B,389]
+        |                       MLP -> [B,64]
+        v                           |
+base forecast head                 v
+base_delta [B,256]          vector FiLM + adapter
+        |                    text_delta [B,256]
+        +------------+--------------+
+                     v
+base_delta + has_text * tanh(gate) * text_delta
+                     |
+                     v
+denormalize log-IV delta
+                     |
+                     v
+exp(log(S_t) + delta)
+                     |
+                     v
+predicted S_(t+5) [B,16,16]
+```
 
-### 6.2 Critic update schedule
+## 15. Interpretation of the Controlled Comparison
 
-Inside each batch, the discriminator is updated `critic_iter` times, then the generator is updated once.
+The principal incremental-text contrast should compare `matched_lp` with
+`continued_no_text` initialized from the same Stage-A parent, fold, and seed:
 
-So the per-batch structure is:
+```text
+text_effect = no_text_error - matched_lp_error
+positive text_effect => matched LP text lowers forecast error
+```
 
-1. repeat discriminator step `critic_iter` times
-2. run one generator step
+`news_count` tests whether news arrival intensity explains the result without
+semantics. `shuffled_lp` tests whether correct article-surface alignment matters.
+Because the gate starts at zero and the architecture width is identical, an
+initial performance difference cannot be attributed to a larger text network's
+uncontrolled base forecast.
 
-This is standard WGAN practice and gives the critic more chances to approximate the Wasserstein geometry before updating the generator.
+The comparison still requires paired samples, the same support masks, the same
+parent checkpoint SHA, and all pre-registered seeds. The architecture alone
+does not guarantee that text will improve MAE.
 
-### 6.3 Generator loss
+## 16. Known Limitations
 
-The generator step computes:
+1. The 389-dimensional input contains 256 reserved zeros in the current strict
+   prior-5-minute dataset. This preserves compatibility but is not a minimal
+   representation.
+2. The scalar text gate can remain close to zero when the incremental text
+   signal is weak relative to reconstruction loss.
+3. Strong reconstruction and short-ATM coefficients can dominate the relatively
+   small adversarial coefficient.
+4. Thirty-two latent draws do not guarantee calibrated prediction intervals;
+   empirical undercoverage requires calibration or changes to distributional
+   training.
+5. Static-arbitrage training constraints are currently disabled, and partial
+   raw support limits ex-post arbitrage diagnostics.
+6. Results from the 2022-2023 rolling folds are development evidence, not an
+   untouched future-period confirmation.
 
-\[
-\mathcal{L}_G
-=
-\mathcal{L}_{adv}
-+ \lambda_{recon}\mathcal{L}_{recon}
-+ \lambda_{cal}\mathcal{L}_{calendar}
-+ \lambda_{bfly}\mathcal{L}_{butterfly}
-+ \lambda_{smooth}\mathcal{L}_{smooth}
-\]
+## 17. Code Reading Guide
 
-where:
+| Concern | Implementation |
+|---|---|
+| Temporal generator and critic | `src/film_wgan/models.py` |
+| Raw sequence loading and masks | `src/film_wgan/sequence_data.py` |
+| Text pooling/PCA and strict news window | `scripts/rq1_event30/event30_dataset.py` |
+| Parent loading and optimizer groups | `src/film_wgan/trainer.py` |
+| WGAN-GP and MAE losses | `src/film_wgan/losses.py` |
+| Monte Carlo scenarios and metrics | `src/film_wgan/inference.py` |
+| Active hyperparameter snapshot | `configs/film_wgan/train_rq1_event30_textbase.yaml` |
 
-\[
-\mathcal{L}_{adv} = -\mathbb{E}[D(fake)]
-\]
-
-\[
-\mathcal{L}_{recon} = L1(fake,\ real)
-\]
-
-and the calendar, butterfly, and smoothness terms are optional according to config flags.
-
-### 6.4 Discriminator loss
-
-The critic step computes:
-
-\[
-\mathcal{L}_D = \mathbb{E}[D(fake)] - \mathbb{E}[D(real)] + \mathcal{L}_{gp}
-\]
-
-where:
-
-\[
-\mathcal{L}_{gp}
-=
-\lambda_{gp}
-\cdot
-\mathbb{E}\left[
-\left(
-\|\nabla_{\hat{x}}D(\hat{x})\|_2 - 1
-\right)^2
-\right]
-\]
-
-and:
-
-\[
-\hat{x} = \alpha \cdot real + (1-\alpha) \cdot fake
-\]
-
-with random interpolation coefficient `alpha`.
-
-### 6.5 Validation phase
-
-Validation uses only the generator.
-
-For each validation batch, the code computes:
-
-- `val_recon`
-- `val_calendar`
-- `val_butterfly`
-
-No discriminator validation loss is used for model selection.
-
-That is an important design choice:
-
-- forecast quality is tracked by validation reconstruction and structural penalties
-- adversarial losses are treated as training-dynamics diagnostics rather than the final selection rule
-
-## 7. Constraint Modules
-
-The current GAN wrapper includes three structural penalties on generated surfaces.
-
-### 7.1 Calendar arbitrage penalty
-
-The code computes total variance:
-
-\[
-w(\tau, k) = \sigma(\tau, k)^2 \tau
-\]
-
-and penalizes:
-
-\[
-\text{ReLU}(-(w_{\tau+1} - w_{\tau}))
-\]
-
-This discourages violations of maturity-direction monotonicity in total variance.
-
-### 7.2 Butterfly arbitrage penalty
-
-The code converts implied volatility into Black call prices and applies a second finite difference across strike:
-
-\[
-C_{i+1} - 2C_i + C_{i-1}
-\]
-
-Negative values are penalized through `ReLU(-second_diff)`.
-
-This encourages convexity of call price with respect to strike.
-
-### 7.3 Smoothness penalty
-
-The code adds squared first differences along:
-
-- maturity direction
-- strike direction
-
-This discourages locally jagged or noisy predicted surfaces.
-
-## 8. Metrics and Selection Logic
-
-At epoch level, the training loop records metrics such as:
-
-- `g_total`
-- `g_adv`
-- `g_recon`
-- `g_calendar`
-- `g_butterfly`
-- `g_smooth`
-- `d_total`
-- `d_real`
-- `d_fake`
-- `gp`
-- `val_recon`
-- `val_calendar`
-- `val_butterfly`
-- `g_lr`
-- `d_lr`
-
-The primary model-selection metric is:
-
-- `val_recon`
-
-When validation is available, the code can also:
-
-- save best checkpoints
-- apply early stopping
-- apply `ReduceLROnPlateau`
-
-All three currently monitor `val_recon`.
-
-## 9. Architectural Rationale
-
-The current model design reflects several practical choices.
-
-### 9.1 Why use a residual generator
-
-Forecasting future surfaces is often easier as:
-
-\[
-\text{future surface} = \text{current surface} + \text{change}
-\]
-
-than as unconditional decoding from text alone.
-
-The generator therefore learns a delta, not a brand-new surface from scratch.
-
-### 9.2 Why combine adversarial and reconstruction losses
-
-Pure adversarial training might produce visually plausible surfaces that are not close to the actual future target.
-Pure regression might minimize average error but produce overly smooth, less realistic shapes.
-
-The current model combines both objectives:
-
-- adversarial realism
-- pointwise forecasting accuracy
-- structural surface regularity
-
-### 9.3 Why condition the discriminator on the current surface
-
-A future surface should not be judged in isolation.
-It should be judged relative to:
-
-- where the surface started
-- what text information is available
-
-That is why the critic sees both current and candidate future surfaces together.
-
-### 9.4 Why this is not a U-Net or decoder-heavy generator
-
-The current grid sizes are small enough that a compact CNN encoder plus MLP fusion head is practical.
-The model is therefore simpler than many image-to-image GANs:
-
-- no transpose-convolution decoder
-- no skip connections
-- no attention blocks
-
-This keeps the architecture easier to reason about while still supporting conditional surface forecasting.
-
-## 10. Limitations of the Current Design
-
-The architecture is workable and research-usable, but it has several limitations.
-
-### 10.1 Noise may be partially suppressed
-
-Because reconstruction loss is strong, the model may use the latent noise only weakly.
-So even though the generator is stochastic in form, it may behave almost deterministically in practice.
-
-### 10.2 Global MLP output head
-
-The generator decodes the final surface through a fully connected head to `H * W`.
-That is simple and effective for small grids, but it may scale less naturally to larger surfaces than a fully convolutional decoder.
-
-### 10.3 Critic only sees static one-step transitions
-
-The current critic evaluates one current/future pair at a time.
-It does not model multi-step surface trajectories or temporal consistency across longer windows.
-
-### 10.4 Constraint penalties are soft, not hard
-
-The model encourages no-arbitrage-like behavior through penalties, but it does not guarantee strict arbitrage freedom.
-
-## 11. Practical Reading Guide
-
-If you are reading the code from top to bottom, the most useful order is:
-
-1. `src/wgan_option/models/generator.py`
-2. `src/wgan_option/models/discriminator.py`
-3. `src/wgan_option/models/gan_model.py`
-4. `src/wgan_option/train_vol_xlsx.py`
-5. `src/wgan_option/utils/merged_xlsx.py`
-
-If you are reading training outputs, start with:
-
-1. `val_recon`
-2. `val_calendar`
-3. `val_butterfly`
-4. `g_recon`
-5. `gp`
-
-and treat `g_total`, `d_total`, `d_real`, and `d_fake` mainly as training-dynamics diagnostics.
+For any reported experiment, the archived `training_resolved_config.yaml`,
+split manifest, support artifact, text transform, parent-checkpoint audit, and
+checkpoint SHA take precedence over defaults shown in this document.

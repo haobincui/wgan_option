@@ -50,6 +50,15 @@ class FilmWGANTrainConfig:
     report_atm7_metric: bool = True
     min_samples_for_training: int = 2
 
+    surface_input_mode: str = "current_surface"
+    history_steps: int = 12
+    history_interval_minutes: int = 5
+    history_min_valid_steps: int = 6
+    history_input_policy: str = "full_history"
+    temporal_encoder_mode: str = "masked_gru"
+    temporal_hidden_dim: int = 256
+    sequence_text_variant: str = "matched_lp"
+
     normalize_current_surface: bool = True
     normalize_target_delta: bool = True
     normalize_text_embedding: bool = True
@@ -161,6 +170,21 @@ class FilmWGANSampleConfig:
     support_maturity_bins: int = 16
     support_min_train_pair_cells: int = 1
     report_atm7_metric: bool = True
+    atm_short_range: float = 0.05
+    atm_short_max_days: float = 60.0
+
+    surface_input_mode: str = "current_surface"
+    history_steps: int = 12
+    history_interval_minutes: int = 5
+    history_min_valid_steps: int = 6
+    history_input_policy: str = "full_history"
+    temporal_encoder_mode: str = "masked_gru"
+    temporal_hidden_dim: int = 256
+    sequence_text_variant: str = "matched_lp"
+
+    normalize_current_surface: bool = True
+    normalize_target_delta: bool = True
+    normalize_text_embedding: bool = True
 
     checkpoint_path: str = ""
     seed: int = 42
@@ -217,6 +241,19 @@ _SHARED_GENERATE_FIELDS = {
     "support_maturity_bins",
     "support_min_train_pair_cells",
     "report_atm7_metric",
+    "atm_short_range",
+    "atm_short_max_days",
+    "surface_input_mode",
+    "history_steps",
+    "history_interval_minutes",
+    "history_min_valid_steps",
+    "history_input_policy",
+    "temporal_encoder_mode",
+    "temporal_hidden_dim",
+    "sequence_text_variant",
+    "normalize_current_surface",
+    "normalize_target_delta",
+    "normalize_text_embedding",
     "seed",
     "cuda",
 }
@@ -224,11 +261,18 @@ _SHARED_GENERATE_FIELDS = {
 
 def _validate_split_fields(config: FilmWGANTrainConfig | FilmWGANSampleConfig) -> None:
     strategy = str(config.split_strategy).strip().lower()
-    if strategy not in {"legacy_row", "grouped_chronological"}:
+    if strategy not in {"legacy_row", "grouped_chronological", "predefined_manifest"}:
         raise ValueError(
-            "split_strategy must be one of ['legacy_row', 'grouped_chronological'], "
+            "split_strategy must be one of "
+            "['legacy_row', 'grouped_chronological', 'predefined_manifest'], "
             f"got: {config.split_strategy}"
         )
+    if strategy == "predefined_manifest":
+        if not str(config.split_manifest_path).strip():
+            raise ValueError(
+                "split_strategy=predefined_manifest requires split_manifest_path."
+            )
+        return
     if strategy == "legacy_row":
         if not 0.0 < float(config.train_ratio) < 1.0:
             raise ValueError("legacy_row train_ratio must be between 0 and 1.")
@@ -242,6 +286,54 @@ def _validate_split_fields(config: FilmWGANTrainConfig | FilmWGANSampleConfig) -
 
 def _validate_common_fields(config: FilmWGANTrainConfig | FilmWGANSampleConfig) -> None:
     _validate_split_fields(config)
+    surface_input_mode = str(config.surface_input_mode).strip().lower()
+    if surface_input_mode not in {"current_surface", "rolling_history"}:
+        raise ValueError(
+            "surface_input_mode must be one of "
+            "['current_surface', 'rolling_history']."
+        )
+    if surface_input_mode == "rolling_history":
+        if str(config.split_strategy).strip().lower() != "predefined_manifest":
+            raise ValueError(
+                "surface_input_mode=rolling_history requires "
+                "split_strategy=predefined_manifest."
+            )
+        if str(config.sample_unit).strip().lower() != "surface_pair":
+            raise ValueError(
+                "surface_input_mode=rolling_history requires sample_unit=surface_pair."
+            )
+        if int(config.history_steps) <= 1:
+            raise ValueError("history_steps must be greater than one.")
+        if int(config.history_interval_minutes) <= 0:
+            raise ValueError("history_interval_minutes must be positive.")
+        if not 1 <= int(config.history_min_valid_steps) <= int(config.history_steps):
+            raise ValueError(
+                "history_min_valid_steps must be in [1, history_steps]."
+            )
+        if str(config.history_input_policy).strip().lower() not in {
+            "full_history",
+            "current_only",
+        }:
+            raise ValueError(
+                "history_input_policy must be one of "
+                "['full_history', 'current_only']."
+            )
+        if str(config.temporal_encoder_mode).strip().lower() != "masked_gru":
+            raise ValueError(
+                "rolling_history currently requires temporal_encoder_mode=masked_gru."
+            )
+        if int(config.temporal_hidden_dim) <= 0:
+            raise ValueError("temporal_hidden_dim must be positive.")
+        if str(config.sequence_text_variant).strip().lower() not in {
+            "no_text",
+            "news_count",
+            "matched_lp",
+            "shuffled_lp",
+        }:
+            raise ValueError(
+                "sequence_text_variant must be one of "
+                "['no_text', 'news_count', 'matched_lp', 'shuffled_lp']."
+            )
     alignment = str(config.text_alignment_mode).strip().lower()
     if alignment not in {"matched", "permuted"}:
         raise ValueError("text_alignment_mode must be one of ['matched', 'permuted'].")
@@ -269,6 +361,10 @@ def _validate_common_fields(config: FilmWGANTrainConfig | FilmWGANSampleConfig) 
         raise ValueError("text_pca_components must be positive.")
     if int(config.text_output_dim) <= 0:
         raise ValueError("text_output_dim must be positive.")
+    if float(config.atm_short_range) < 0.0:
+        raise ValueError("atm_short_range must be non-negative.")
+    if float(config.atm_short_max_days) <= 0.0:
+        raise ValueError("atm_short_max_days must be positive.")
     support_mode = str(config.surface_support_mode).strip().lower()
     if support_mode not in {"full_grid", "raw_observed"}:
         raise ValueError("surface_support_mode must be one of ['full_grid', 'raw_observed'].")
@@ -319,6 +415,14 @@ def _validate_train_fields(config: FilmWGANTrainConfig) -> None:
         raise ValueError("forecast_mode must be one of ['stochastic_wgan', 'deterministic'].")
     if conditioning_mode not in {"film", "concat", "residual_film"}:
         raise ValueError("conditioning_mode must be one of ['film', 'concat', 'residual_film'].")
+    if (
+        str(config.surface_input_mode).strip().lower() == "rolling_history"
+        and conditioning_mode != "residual_film"
+    ):
+        raise ValueError(
+            "surface_input_mode=rolling_history currently requires "
+            "conditioning_mode=residual_film."
+        )
     critic_conditioning_mode = str(config.critic_conditioning_mode).strip().lower()
     if critic_conditioning_mode not in {"inherit", "film", "concat", "projection"}:
         raise ValueError(
